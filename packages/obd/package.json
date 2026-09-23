@@ -1,0 +1,17 @@
+{
+  "name": "@carheadsup/obd",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ELM327 OBD-II adapter driver, PID polling scheduler, and an ELM327 emulator backed by a vehicle simulation.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@carheadsup/core": "*",
+    "serialport": "^13.0.0"
+  }
+}

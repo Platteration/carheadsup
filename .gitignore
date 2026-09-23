@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.vite/
+/data/
+test-results/
+playwright-report/
+
+# Android / Gradle
+companion-android/.gradle/
+companion-android/**/build/
+companion-android/local.properties
+companion-android/.idea/
+*.iml
+.kotlin/

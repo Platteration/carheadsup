@@ -1,0 +1,26 @@
+{
+  "name": "@carheadsup/hud-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "On-vehicle HUD service: OBD, phone link, sensors, state, persistence, HTTP/WebSocket API; serves the renderer.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "carheadsup": "./src/main.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "start": "node src/main.ts",
+    "sim": "node src/main.ts --sim"
+  },
+  "dependencies": {
+    "@carheadsup/core": "*",
+    "@carheadsup/obd": "*",
+    "ws": "^8.21.3"
+  },
+  "optionalDependencies": {
+    "i2c-bus": "^5.2.3"
+  }
+}

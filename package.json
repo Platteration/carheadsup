@@ -1,0 +1,35 @@
+{
+  "name": "carheadsup",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Software for a windshield-projected automotive heads-up display: OBD-II, phone navigation/media/calls, adaptive clutter, diagnostics.",
+  "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/obd",
+    "packages/hud-server",
+    "packages/hud-renderer"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "npm run build --workspace @carheadsup/hud-renderer",
+    "start": "node packages/hud-server/src/main.ts",
+    "sim": "node packages/hud-server/src/main.ts --sim",
+    "dev": "npm run dev --workspace @carheadsup/hud-renderer",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.20.4",
+    "@types/ws": "^8.18.1",
+    "prettier": "^3.9.9",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}
