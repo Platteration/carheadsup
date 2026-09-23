@@ -1,0 +1,652 @@
+/* Widgets. Sizes are in --u (see hud.css) and clamped to the zone with cqh / cqw. */
+
+.hud-w {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Speed ------------------------------------------------------------------------------------ */
+
+.hud-speed {
+  display: flex;
+  flex-direction: column;
+  align-items: var(--justify, center);
+  min-width: 0;
+}
+
+.hud-speed__value {
+  font-family: var(--font-mono);
+  font-size: min(calc(var(--u) * 30), 76cqh, 50cqw);
+  line-height: 0.82;
+  letter-spacing: -0.04em;
+}
+
+.hud-speed--over .hud-speed__value {
+  color: var(--c-critical);
+}
+
+.hud-speed__meta {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1.2);
+  margin-top: calc(var(--u) * 1.2);
+  min-height: calc(var(--u) * 4);
+}
+
+.hud-speed__unit {
+  font-size: calc(var(--u) * 3.2);
+  color: var(--c-secondary);
+  letter-spacing: 0.06em;
+}
+
+.hud-speed__over {
+  font-size: calc(var(--u) * 3.2);
+  line-height: 1.15;
+  color: var(--c-critical);
+  padding: 0 calc(var(--u) * 1);
+  border: calc(var(--u) * 0.5) solid currentColor;
+  border-radius: 999px;
+}
+
+/* Speed limit sign -------------------------------------------------------------------------- */
+
+.hud-limit {
+  height: min(calc(var(--u) * 20), 62cqh);
+  width: auto;
+  color: var(--c-primary);
+  font-family: var(--font-sans);
+}
+
+.hud-sign--vienna {
+  aspect-ratio: 1;
+}
+
+.hud-sign--mutcd {
+  aspect-ratio: 4 / 5;
+}
+
+.hud-sign--unlimited {
+  aspect-ratio: 1;
+  color: var(--c-dim);
+}
+
+.hud-sign__ring {
+  stroke: var(--c-critical);
+}
+
+.hud-sign text {
+  font-family: var(--font-sans);
+}
+
+/* Tachometer -------------------------------------------------------------------------------- */
+
+.hud-w--tachometer {
+  width: min(100%, calc(var(--u) * 62));
+}
+
+.hud-tach {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: calc(var(--u) * 0.8);
+  width: 100%;
+}
+
+.hud-tach__bar {
+  height: calc(var(--u) * 3.2);
+  color: var(--c-primary);
+}
+
+.hud-tach--red .hud-tach__bar {
+  color: var(--c-critical);
+}
+
+.hud-tach__zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  background: color-mix(in srgb, var(--c-critical) 35%, transparent);
+}
+
+.hud-tach__tick {
+  position: absolute;
+  top: 25%;
+  bottom: 25%;
+  z-index: 2;
+  width: calc(var(--u) * 0.35);
+  margin-left: calc(var(--u) * -0.175);
+  background: #000;
+  opacity: 0.6;
+}
+
+.hud-tach__readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: var(--justify, center);
+  font-size: calc(var(--u) * 4.2);
+  line-height: 1;
+}
+
+/* Gear -------------------------------------------------------------------------------------- */
+
+.hud-gear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(calc(var(--u) * 14), 46cqh, 90cqw);
+  aspect-ratio: 1;
+  border: calc(var(--u) * 0.6) solid var(--c-secondary);
+  border-radius: calc(var(--u) * 2);
+}
+
+.hud-gear--inferred {
+  border-color: var(--c-faint);
+}
+
+.hud-gear__value {
+  font-family: var(--font-mono);
+  font-size: min(calc(var(--u) * 10), 34cqh);
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.hud-gear--wide .hud-gear__value {
+  font-size: min(calc(var(--u) * 7), 24cqh);
+}
+
+/* Navigation -------------------------------------------------------------------------------- */
+
+.hud-nav {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    'icon main'
+    'street street';
+  align-items: center;
+  column-gap: calc(var(--u) * 2);
+  row-gap: calc(var(--u) * 0.6);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.hud-nav__icon {
+  grid-area: icon;
+  flex: none;
+  width: min(calc(var(--u) * 14), 58cqh);
+  aspect-ratio: 1;
+  color: var(--c-accent);
+}
+
+.hud-nav--imminent .hud-nav__icon {
+  width: min(calc(var(--u) * 20), 66cqh);
+}
+
+.hud-maneuver__exit {
+  fill: var(--c-primary);
+  font-family: var(--font-sans);
+}
+
+.hud-nav__arrow,
+.hud-nav__png {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.hud-nav__main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--u) * 0.7);
+  min-width: 0;
+  text-align: left;
+}
+
+.hud-nav__distance {
+  font-size: calc(var(--u) * 7);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.hud-nav__distance .hud-unit {
+  font-size: calc(var(--u) * 3.4);
+}
+
+.hud-nav--imminent .hud-nav__distance {
+  font-size: calc(var(--u) * 9);
+}
+
+.hud-nav__approach {
+  position: relative;
+  width: 100%;
+  min-width: calc(var(--u) * 16);
+  height: calc(var(--u) * 1.5);
+  border: calc(var(--u) * 0.4) solid var(--c-faint);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.hud-nav__approach-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--c-accent);
+}
+
+.hud-nav__street {
+  grid-area: street;
+  min-width: 0;
+  font-size: calc(var(--u) * 3.8);
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-nav__then {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1);
+  font-size: calc(var(--u) * 2.5);
+  color: var(--c-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.hud-nav__then-icon {
+  width: calc(var(--u) * 5);
+  height: calc(var(--u) * 5);
+  color: var(--c-secondary);
+}
+
+/* Lanes ------------------------------------------------------------------------------------- */
+
+.hud-lanes {
+  --lane-w: min(calc(var(--u) * 11), calc(96cqw / var(--lanes, 1)));
+  display: flex;
+  align-items: stretch;
+}
+
+.hud-lane {
+  display: flex;
+  justify-content: center;
+  width: var(--lane-w);
+  height: calc(var(--lane-w) * 1.3);
+  padding: calc(var(--u) * 0.5) calc(var(--lane-w) * 0.1);
+  color: var(--c-dim);
+}
+
+.hud-lane + .hud-lane {
+  border-left: calc(var(--u) * 0.45) dashed var(--c-faint);
+}
+
+.hud-lane--recommended {
+  color: var(--c-go);
+}
+
+.hud-lane-icon {
+  width: 100%;
+  height: 100%;
+}
+
+/* ETA --------------------------------------------------------------------------------------- */
+
+.hud-eta {
+  display: flex;
+  flex-direction: column;
+  align-items: var(--justify, flex-start);
+  gap: calc(var(--u) * 0.4);
+}
+
+.hud-eta__time {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--u) * 1);
+  font-size: calc(var(--u) * 4.4);
+  line-height: 1;
+}
+
+.hud-eta__time .hud-unit {
+  margin-left: 0;
+}
+
+.hud-eta__label {
+  font-size: calc(var(--u) * 2.5);
+  color: var(--c-dim);
+  letter-spacing: 0.1em;
+}
+
+.hud-eta__rest {
+  font-size: calc(var(--u) * 3);
+  color: var(--c-secondary);
+  white-space: nowrap;
+}
+
+/* Hazard ------------------------------------------------------------------------------------ */
+
+.hud-hazard {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1.6);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.hud-hazard__icon {
+  width: min(calc(var(--u) * 8), 60cqh);
+  height: min(calc(var(--u) * 8), 60cqh);
+}
+
+.hud-hazard__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+}
+
+.hud-hazard__distance {
+  font-size: calc(var(--u) * 5);
+  line-height: 1.05;
+  color: var(--c-primary);
+  white-space: nowrap;
+}
+
+.hud-hazard__distance .hud-unit {
+  color: var(--c-secondary);
+  opacity: 1;
+}
+
+.hud-hazard__label {
+  font-size: calc(var(--u) * 2.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-hazard__limit {
+  height: min(calc(var(--u) * 8.5), 60cqh);
+  width: auto;
+  color: var(--c-primary);
+}
+
+.hud-hazard__delay {
+  font-size: calc(var(--u) * 3.8);
+  white-space: nowrap;
+}
+
+/* Fuel -------------------------------------------------------------------------------------- */
+
+.hud-fuel {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1.4);
+}
+
+.hud-fuel__icon {
+  width: calc(var(--u) * 5);
+  height: calc(var(--u) * 5);
+  color: var(--c-secondary);
+}
+
+.hud-tone--caution .hud-fuel__icon {
+  color: inherit;
+}
+
+.hud-fuel__body {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--u) * 0.5);
+  text-align: left;
+}
+
+.hud-fuel__economy {
+  font-size: calc(var(--u) * 4.4);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.hud-fuel__economy .hud-unit {
+  font-size: calc(var(--u) * 2.5);
+}
+
+.hud-fuel__sub {
+  font-size: calc(var(--u) * 2.8);
+  color: var(--c-secondary);
+  white-space: nowrap;
+}
+
+.hud-tone--caution .hud-fuel__sub {
+  color: inherit;
+}
+
+.hud-fuel__level {
+  width: calc(var(--u) * 18);
+  color: var(--c-secondary);
+}
+
+.hud-tone--caution .hud-fuel__level {
+  color: var(--c-caution);
+}
+
+/* Coolant / voltage ------------------------------------------------------------------------- */
+
+.hud-reading {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1);
+  font-size: calc(var(--u) * 5);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.hud-reading .hud-unit {
+  margin-left: 0;
+}
+
+.hud-reading__icon {
+  width: calc(var(--u) * 5.5);
+  height: calc(var(--u) * 5.5);
+}
+
+/* TPMS -------------------------------------------------------------------------------------- */
+
+.hud-tpms {
+  display: flex;
+  flex-direction: column;
+  align-items: var(--justify, center);
+  gap: calc(var(--u) * 0.4);
+}
+
+.hud-tpms__grid {
+  display: grid;
+  grid-template-columns: auto auto auto;
+  grid-template-rows: auto auto;
+  column-gap: calc(var(--u) * 1.4);
+  row-gap: calc(var(--u) * 1.8);
+  align-items: center;
+  font-size: calc(var(--u) * 3.5);
+  line-height: 1;
+}
+
+.hud-tpms__car {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  height: min(calc(var(--u) * 10), 36cqh);
+  width: auto;
+  color: var(--c-secondary);
+}
+
+.hud-tpms__value--fl {
+  grid-area: 1 / 1;
+  text-align: right;
+}
+.hud-tpms__value--fr {
+  grid-area: 1 / 3;
+  text-align: left;
+}
+.hud-tpms__value--rl {
+  grid-area: 2 / 1;
+  text-align: right;
+}
+.hud-tpms__value--rr {
+  grid-area: 2 / 3;
+  text-align: left;
+}
+
+.hud-tpms__value--low {
+  color: var(--c-caution);
+}
+
+.hud-tpms__wheel {
+  fill: var(--c-dim);
+}
+
+.hud-tpms__wheel--low {
+  fill: var(--c-caution);
+}
+
+.hud-tpms__unit {
+  margin-left: 0;
+  font-size: calc(var(--u) * 2.4);
+}
+
+/* Clock / outside temperature --------------------------------------------------------------- */
+
+.hud-clock,
+.hud-temp {
+  display: flex;
+  align-items: baseline;
+  font-size: calc(var(--u) * 4.4);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.hud-clock .hud-unit {
+  font-size: calc(var(--u) * 2.6);
+}
+
+.hud-temp {
+  align-items: center;
+  gap: calc(var(--u) * 0.2);
+}
+
+.hud-temp .hud-unit {
+  margin-left: calc(var(--u) * 0.4);
+}
+
+.hud-temp__ice {
+  width: calc(var(--u) * 4.6);
+  height: calc(var(--u) * 4.6);
+  margin-right: calc(var(--u) * 1);
+  color: var(--c-accent);
+}
+
+.hud-temp--ice .hud-num {
+  color: var(--c-accent);
+}
+
+/* Media ------------------------------------------------------------------------------------- */
+
+.hud-media {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1.4);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.hud-media__icon {
+  width: calc(var(--u) * 4.5);
+  height: calc(var(--u) * 4.5);
+  color: var(--c-accent);
+}
+
+.hud-media--paused .hud-media__icon {
+  color: var(--c-dim);
+}
+
+.hud-media__text {
+  min-width: 0;
+  text-align: left;
+}
+
+.hud-media__title {
+  font-size: calc(var(--u) * 3.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-media__artist {
+  font-size: calc(var(--u) * 2.8);
+  color: var(--c-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Boost ------------------------------------------------------------------------------------- */
+
+.hud-w--boost {
+  width: min(100%, calc(var(--u) * 32));
+}
+
+.hud-boost {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--u) * 0.7);
+  width: 100%;
+}
+
+.hud-boost__readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: var(--justify, center);
+  gap: calc(var(--u) * 1);
+  font-size: calc(var(--u) * 4.4);
+  line-height: 1;
+}
+
+.hud-boost__readout .hud-unit {
+  margin-left: 0;
+}
+
+.hud-boost__bar {
+  color: var(--c-accent);
+}
+
+.hud-boost--vacuum .hud-boost__bar,
+.hud-boost--vacuum .hud-num {
+  color: var(--c-dim);
+}
+
+/* Trip summary ------------------------------------------------------------------------------ */
+
+.hud-trip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: var(--justify, center);
+  column-gap: calc(var(--u) * 3.5);
+  height: calc(var(--u) * 8);
+  overflow: hidden;
+}
+
+.hud-trip__stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--u) * 0.6);
+  height: calc(var(--u) * 8);
+}
+
+.hud-trip__value {
+  font-size: calc(var(--u) * 4.2);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.hud-trip__value .hud-unit {
+  font-size: calc(var(--u) * 2.5);
+}

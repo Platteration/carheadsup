@@ -1,0 +1,100 @@
+package dev.carheadsup.companion.hud
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import java.net.InetAddress
+import java.net.UnknownHostException
+
+/**
+ * Tracks the Wi-Fi network the HUD is on.
+ *
+ * The HUD usually runs its own access point without internet. Android then keeps mobile data as
+ * the default network, and sockets opened without a network binding go out over mobile data,
+ * where the HUD's private address is unreachable. Connections to the HUD are therefore bound to
+ * the Wi-Fi network explicitly ([bind]); internet traffic (Overpass) keeps the default network.
+ */
+class LocalNetwork(context: Context) {
+    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    private val wifiNetworks = LinkedHashSet<Network>()
+    private var registered = false
+
+    private val callback =
+        object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                synchronized(wifiNetworks) { wifiNetworks += network }
+            }
+
+            override fun onLost(network: Network) {
+                synchronized(wifiNetworks) { wifiNetworks -= network }
+            }
+        }
+
+    /** The most recently connected Wi-Fi network (with or without internet), if any. */
+    val wifi: Network?
+        get() = synchronized(wifiNetworks) { wifiNetworks.lastOrNull() }
+
+    fun start() {
+        if (registered) return
+        val request =
+            NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                // Match access points without internet access too (the default request requires it).
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+        try {
+            connectivity.registerNetworkCallback(request, callback)
+            registered = true
+        } catch (e: RuntimeException) {
+            // SecurityException / TooManyRequestsException: fall back to default routing.
+            registered = false
+        }
+    }
+
+    fun stop() {
+        if (!registered) return
+        try {
+            connectivity.unregisterNetworkCallback(callback)
+        } catch (e: IllegalArgumentException) {
+            // Already unregistered.
+        }
+        registered = false
+        synchronized(wifiNetworks) { wifiNetworks.clear() }
+    }
+
+    /**
+     * Routes the whole process over the Wi-Fi network (for components that cannot be bound per
+     * socket, such as the settings WebView). Undo with [unbindProcess]; internet requests fail
+     * meanwhile when the Wi-Fi has no internet.
+     */
+    fun bindProcess(): Boolean {
+        val network = wifi ?: return false
+        return connectivity.bindProcessToNetwork(network)
+    }
+
+    fun unbindProcess() {
+        connectivity.bindProcessToNetwork(null)
+    }
+
+    /** [client] with sockets and DNS bound to the Wi-Fi network, or unchanged without Wi-Fi. */
+    fun bind(client: OkHttpClient): OkHttpClient {
+        val network = wifi ?: return client
+        return client
+            .newBuilder()
+            .socketFactory(network.socketFactory)
+            .dns(NetworkDns(network))
+            .build()
+    }
+
+    private class NetworkDns(private val network: Network) : Dns {
+        override fun lookup(hostname: String): List<InetAddress> = try {
+            network.getAllByName(hostname).toList()
+        } catch (e: UnknownHostException) {
+            Dns.SYSTEM.lookup(hostname)
+        }
+    }
+}

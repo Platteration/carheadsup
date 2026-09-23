@@ -1,0 +1,10 @@
+# Kotlin style for the companion app (ktlint reads these; Android Studio honours the ij_* keys).
+[*.{kt,kts}]
+indent_size = 4
+max_line_length = 120
+ktlint_code_style = intellij_idea
+ij_kotlin_allow_trailing_comma = true
+ij_kotlin_allow_trailing_comma_on_call_site = true
+ij_kotlin_imports_layout = *,java.**,javax.**,kotlin.**,^
+ktlint_function_naming_ignore_when_annotated_with = Composable
+ktlint_standard_condition-wrapping = disabled

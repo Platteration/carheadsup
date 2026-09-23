@@ -1,1 +1,101 @@
-export {};
+/**
+ * @carheadsup/obd — ELM327 OBD-II driver, transports, PID poller, connection service, and an
+ * ELM327 emulator backed by a deterministic vehicle simulation.
+ */
+export type {
+  Transport,
+  SerialPortLike,
+  SerialTransportOptions,
+  TcpTransportOptions,
+} from './transport.ts';
+export { SerialTransport, TcpTransport, TransportEvents, createTransport } from './transport.ts';
+
+export {
+  Elm327,
+  type ClearDtcsResult,
+  type DtcReport,
+  type Elm327Info,
+  type Elm327Options,
+  type Mode01Answer,
+  type Mode01Result,
+  type RawAnswer,
+} from './elm327.ts';
+export {
+  ELM_ERROR_CODES,
+  ElmError,
+  describeNrc,
+  isElmError,
+  isLinkFatal,
+  isVehicleSilence,
+  type ElmErrorCode,
+  type ElmErrorDetails,
+} from './errors.ts';
+export {
+  cleanResponse,
+  classifyResponse,
+  parseVoltage,
+  splitLines,
+  type CommandKind,
+} from './response.ts';
+export { parseEcuMessages, type EcuMessage, type FrameParseOptions } from './frames.ts';
+export {
+  MODE01_DATA_LENGTHS,
+  VARIABLE_LENGTH_PIDS,
+  collectDtcs,
+  collectMode01,
+  decodeVin,
+  negativeResponseCode,
+  positiveResponses,
+  splitMode01Payload,
+} from './payloads.ts';
+export {
+  ELM_PROTOCOLS,
+  getProtocol,
+  inferFamily,
+  maxPidsPerRequest,
+  normalizeProtocolSetting,
+  type ElmProtocol,
+  type ProtocolFamily,
+} from './protocols.ts';
+
+export {
+  DEFAULT_POLLER_TUNING,
+  ObdPoller,
+  type PollerDriver,
+  type PollerOptions,
+  type PollerTuning,
+} from './poller.ts';
+export {
+  MAX_RECONNECT_DELAY_MS,
+  ObdService,
+  type ClearDtcsOutcome,
+  type ObdServiceDeps,
+} from './service.ts';
+
+export {
+  VehicleSimulator,
+  type ScenarioStepListener,
+  type TirePressures,
+  type VehicleSimulatorOptions,
+  type VehicleSnapshot,
+} from './sim/vehicle-sim.ts';
+export { DEMO_SCENARIO, SpeedController, type ScenarioStep } from './sim/scenario.ts';
+export { VEHICLE_MODEL, rpmPerKph } from './sim/model.ts';
+export { SimulationClock, type SimulationClockOptions } from './sim/clock.ts';
+export {
+  Elm327Emulator,
+  SIM_TPMS_PIDS,
+  type Elm327EmulatorOptions,
+  type EmulatorFault,
+  type EmulatorFaultOptions,
+} from './sim/elm327-emulator.ts';
+export { SIM_TPMS_DIDS, encodeDtc, supportedBitmap, type EmulatedEcu } from './sim/ecus.ts';
+
+export {
+  SILENT_LOGGER,
+  SYSTEM_CLOCK,
+  SYSTEM_TIMERS,
+  type Clock,
+  type Logger,
+  type Timers,
+} from './runtime.ts';

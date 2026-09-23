@@ -1,12 +1,37 @@
 import type { DtcInfo } from '../types/vehicle.ts';
-import { notImplemented } from '../todo.ts';
+import { DTC_DATABASE } from './dtc-database.ts';
+import {
+  describeDtcRange,
+  dtcRangeLabel,
+  dtcSystemOf,
+  isManufacturerSpecificDtc,
+} from './dtc-ranges.ts';
+
+/** Maximum length of `DtcInfo.short`, the glanceable HUD label. */
+export const DTC_SHORT_MAX_LENGTH = 32;
+
+const DTC_LETTERS = ['P', 'C', 'B', 'U'] as const;
+const DTC_PATTERN = /^[PCBU][0-3][0-9A-F]{3}$/;
+
+const isByte = (n: number): boolean => Number.isInteger(n) && n >= 0 && n <= 0xff;
+const hexNibble = (n: number): string => (n & 0x0f).toString(16).toUpperCase();
 
 /**
  * Decode the two raw bytes of a DTC into its five-character form (SAE J2012),
  * e.g. [0x04, 0x20] → "P0420", [0xC1, 0x00] → "U0100". Returns null for 0x0000 padding.
+ *
+ * Byte A bits 7–6 select the letter (P/C/B/U), bits 5–4 the first digit (0–3) and bits 3–0
+ * the second; byte B supplies the last two hex digits.
+ *
+ * @throws RangeError when either argument is not an integer in 0–255.
  */
 export function decodeDtcBytes(a: number, b: number): string | null {
-  return notImplemented(`decodeDtcBytes(${a}, ${b})`);
+  if (!isByte(a) || !isByte(b)) {
+    throw new RangeError(`DTC bytes must be integers in 0–255, got ${a}, ${b}`);
+  }
+  if (a === 0 && b === 0) return null;
+  const letter = DTC_LETTERS[a >> 6] ?? 'P';
+  return `${letter}${(a >> 4) & 0x03}${hexNibble(a)}${hexNibble(b >> 4)}${hexNibble(b)}`;
 }
 
 /**
@@ -14,20 +39,101 @@ export function decodeDtcBytes(a: number, b: number): string | null {
  * response service byte (0x43 / 0x47 / 0x4A), already reassembled across frames.
  * On CAN (ISO 15765) the first byte is the DTC count; on legacy protocols there is no
  * count byte and codes are padded with 0x0000. Duplicates are removed, order preserved.
+ *
+ * Tolerant of imperfect responses: a CAN count larger than the codes actually present yields
+ * the codes that are present, bytes beyond the counted codes are ignored, 0x0000 pairs are
+ * dropped wherever they appear, and a trailing odd byte is ignored.
  */
 export function parseDtcPayload(data: Uint8Array, opts: { hasCountByte: boolean }): string[] {
-  return notImplemented(`parseDtcPayload(${data.length}, ${opts.hasCountByte})`);
+  let start = 0;
+  let pairs = Math.floor(data.length / 2);
+  if (opts.hasCountByte) {
+    if (data.length === 0) return [];
+    start = 1;
+    pairs = Math.min(data[0] ?? 0, Math.floor((data.length - 1) / 2));
+  }
+
+  const codes: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < pairs; i++) {
+    const offset = start + i * 2;
+    const code = decodeDtcBytes(data[offset] ?? 0, data[offset + 1] ?? 0);
+    if (code !== null && !seen.has(code)) {
+      seen.add(code);
+      codes.push(code);
+    }
+  }
+  return codes;
 }
 
-/** True for syntactically valid codes like "P0420", "C1234", "U0100". */
+/** Trim and upper-case a code as typed by a person or returned by another tool. */
+export function normalizeDtc(code: string): string {
+  return code.trim().toUpperCase();
+}
+
+/** True for syntactically valid codes like "P0420", "C1234", "U0100" (after trimming/upper-casing). */
 export function isValidDtc(code: string): boolean {
-  return notImplemented(`isValidDtc(${code})`);
+  return DTC_PATTERN.test(normalizeDtc(code));
+}
+
+/** Clamp a HUD label to {@link DTC_SHORT_MAX_LENGTH}, marking truncation with an ellipsis. */
+function clampShort(short: string): string {
+  const trimmed = short.trim();
+  return trimmed.length <= DTC_SHORT_MAX_LENGTH
+    ? trimmed
+    : `${trimmed.slice(0, DTC_SHORT_MAX_LENGTH - 1).trimEnd()}…`;
 }
 
 /**
  * Human-friendly information about a code. Unknown codes still return a useful result
  * synthesised from the code's system and range (e.g. "P03xx → Ignition system / misfire").
+ *
+ * Input is trimmed and upper-cased first. Syntactically invalid input never throws; it returns
+ * `known: false` with an "Unrecognised trouble code" description.
  */
 export function lookupDtc(code: string): DtcInfo {
-  return notImplemented(`lookupDtc(${code})`);
+  const normalized = normalizeDtc(code);
+  const system = dtcSystemOf(normalized);
+
+  if (!DTC_PATTERN.test(normalized)) {
+    return {
+      code: normalized,
+      system,
+      description: 'Unrecognised trouble code',
+      short: 'Unrecognised code',
+      severity: 'caution',
+      manufacturerSpecific: false,
+      known: false,
+    };
+  }
+
+  const manufacturerSpecific = isManufacturerSpecificDtc(normalized);
+  const range = describeDtcRange(normalized);
+  const entry = Object.hasOwn(DTC_DATABASE, normalized) ? DTC_DATABASE[normalized] : undefined;
+  if (entry) {
+    return {
+      code: normalized,
+      system,
+      description: entry.description,
+      // The HUD always needs a label; fall back to the range label if an entry lacks one.
+      short: clampShort(entry.short) || clampShort(range.short),
+      severity: entry.severity,
+      manufacturerSpecific,
+      known: true,
+    };
+  }
+
+  const rangeLabel = dtcRangeLabel(normalized);
+  const description = manufacturerSpecific
+    ? `${range.description} (${rangeLabel} range); see the vehicle's service information`
+    : `${range.description} (unlisted generic code in the ${rangeLabel} range)`;
+  return {
+    code: normalized,
+    system,
+    description,
+    short: clampShort(range.short),
+    severity: range.severity,
+    manufacturerSpecific,
+    known: false,
+  };
 }

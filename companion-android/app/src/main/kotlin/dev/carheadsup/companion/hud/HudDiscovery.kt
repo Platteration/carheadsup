@@ -1,0 +1,190 @@
+package dev.carheadsup.companion.hud
+
+import android.content.Context
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.os.Build
+import android.util.Log
+import androidx.annotation.RequiresApi
+import dev.carheadsup.protocol.link.HudEndpoint
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.util.concurrent.Executors
+
+/**
+ * Finds the HUD with DNS-SD: it advertises `_carheadsup._tcp` (see `server.mdns`). The newest
+ * resolved address is published on [endpoint]; it becomes null when the service disappears.
+ *
+ * Resolution uses `registerServiceInfoCallback` on Android 14+ and `resolveService` before
+ * (which allows only one resolution at a time, so services are resolved one after another).
+ */
+class HudDiscovery(context: Context) {
+    private val nsd = context.getSystemService(NsdManager::class.java)
+    private val executor = Executors.newSingleThreadExecutor()
+    private val state = MutableStateFlow<HudEndpoint?>(null)
+    private var discoveryListener: NsdManager.DiscoveryListener? = null
+    private var infoCallback: Any? = null
+    private var resolving = false
+    private val resolveQueue = ArrayDeque<NsdServiceInfo>()
+    private var currentServiceName: String? = null
+
+    val endpoint: StateFlow<HudEndpoint?> = state.asStateFlow()
+
+    @Synchronized
+    fun start() {
+        if (discoveryListener != null) return
+        val listener =
+            object : NsdManager.DiscoveryListener {
+                override fun onDiscoveryStarted(serviceType: String) {
+                    Log.d(TAG, "Discovery started for $serviceType")
+                }
+
+                override fun onServiceFound(serviceInfo: NsdServiceInfo) = resolve(serviceInfo)
+
+                override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                    synchronized(this@HudDiscovery) {
+                        if (serviceInfo.serviceName == currentServiceName) {
+                            currentServiceName = null
+                            state.value = null
+                        }
+                    }
+                }
+
+                override fun onDiscoveryStopped(serviceType: String) {
+                    Log.d(TAG, "Discovery stopped")
+                }
+
+                override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                    Log.w(TAG, "Discovery failed to start: $errorCode")
+                    synchronized(this@HudDiscovery) { discoveryListener = null }
+                }
+
+                override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+                    Log.w(TAG, "Discovery failed to stop: $errorCode")
+                }
+            }
+        discoveryListener = listener
+        try {
+            nsd.discoverServices(HudEndpoint.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Discovery could not start", e)
+            discoveryListener = null
+        }
+    }
+
+    @Synchronized
+    fun stop() {
+        discoveryListener?.let { listener ->
+            try {
+                nsd.stopServiceDiscovery(listener)
+            } catch (e: IllegalArgumentException) {
+                // Not running.
+            }
+        }
+        discoveryListener = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) unregisterInfoCallback()
+        resolveQueue.clear()
+        resolving = false
+        currentServiceName = null
+        state.value = null
+    }
+
+    private fun resolve(service: NsdServiceInfo) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            resolveWithCallback(service)
+        } else {
+            synchronized(this) {
+                resolveQueue.addLast(service)
+                if (!resolving) resolveNext()
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun resolveNext() {
+        val next = resolveQueue.removeFirstOrNull() ?: return
+        resolving = true
+        nsd.resolveService(
+            next,
+            object : NsdManager.ResolveListener {
+                override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                    publish(serviceInfo.serviceName, serviceInfo.host?.let(::listOf).orEmpty(), serviceInfo.port)
+                    synchronized(this@HudDiscovery) {
+                        resolving = false
+                        resolveNext()
+                    }
+                }
+
+                override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                    Log.w(TAG, "Resolving ${serviceInfo.serviceName} failed: $errorCode")
+                    synchronized(this@HudDiscovery) {
+                        resolving = false
+                        resolveNext()
+                    }
+                }
+            },
+        )
+    }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun resolveWithCallback(service: NsdServiceInfo) {
+        synchronized(this) { unregisterInfoCallback() }
+        val callback =
+            object : NsdManager.ServiceInfoCallback {
+                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                    Log.w(TAG, "Service info callback failed: $errorCode")
+                }
+
+                override fun onServiceUpdated(serviceInfo: NsdServiceInfo) {
+                    publish(serviceInfo.serviceName, serviceInfo.hostAddresses, serviceInfo.port)
+                }
+
+                override fun onServiceLost() {
+                    synchronized(this@HudDiscovery) {
+                        if (service.serviceName == currentServiceName) {
+                            currentServiceName = null
+                            state.value = null
+                        }
+                    }
+                }
+
+                override fun onServiceInfoCallbackUnregistered() = Unit
+            }
+        try {
+            nsd.registerServiceInfoCallback(service, executor, callback)
+            synchronized(this) { infoCallback = callback }
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Cannot resolve ${service.serviceName}", e)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun unregisterInfoCallback() {
+        val callback = infoCallback as? NsdManager.ServiceInfoCallback ?: return
+        try {
+            nsd.unregisterServiceInfoCallback(callback)
+        } catch (e: IllegalArgumentException) {
+            // Already unregistered.
+        }
+        infoCallback = null
+    }
+
+    private fun publish(serviceName: String, addresses: List<InetAddress>, port: Int) {
+        // Prefer IPv4: link-local IPv6 addresses need a scope id that URLs handle poorly.
+        val address = addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull() ?: return
+        val host = address.hostAddress ?: return
+        if (port !in 1..65535) return
+        synchronized(this) {
+            currentServiceName = serviceName
+            state.value = HudEndpoint(host.substringBefore('%'), port)
+        }
+        Log.i(TAG, "Found HUD \"$serviceName\" at $host:$port")
+    }
+
+    private companion object {
+        const val TAG = "HudDiscovery"
+    }
+}

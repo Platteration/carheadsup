@@ -1,0 +1,341 @@
+/* Parked diagnostics dashboard. Sizes in --u; tiles clamp to themselves with container units. */
+
+.hud-diag {
+  position: absolute;
+  top: calc(var(--u) * 4.5);
+  bottom: calc(var(--u) * 2.5);
+  left: 0;
+  right: 0;
+  width: calc(100% - var(--u) * 10);
+  max-width: calc(var(--u) * 225);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--u) * 2);
+}
+
+.hud-diag__header {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 3);
+  min-height: calc(var(--u) * 6);
+}
+
+.hud-diag__title {
+  flex: 1;
+  min-width: 0;
+  font-size: calc(var(--u) * 5);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-diag__mil {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 0.8);
+  font-size: calc(var(--u) * 3);
+  letter-spacing: 0.1em;
+}
+
+.hud-diag__mil-icon {
+  width: calc(var(--u) * 5);
+  height: calc(var(--u) * 5);
+}
+
+.hud-diag__dots {
+  display: flex;
+  gap: calc(var(--u) * 1.2);
+}
+
+.hud-diag__dot {
+  width: calc(var(--u) * 1.6);
+  height: calc(var(--u) * 1.6);
+  border-radius: 50%;
+  border: calc(var(--u) * 0.4) solid var(--c-dim);
+}
+
+.hud-diag__dot--current {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+}
+
+.hud-diag__top,
+.hud-diag__bottom {
+  display: flex;
+  justify-content: center;
+  gap: calc(var(--u) * 2);
+}
+
+.hud-diag__top > *,
+.hud-diag__bottom > * {
+  flex: 0 1 calc(var(--u) * 90);
+  min-width: 0;
+}
+
+.hud-diag__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--u) * 2);
+  overflow: hidden;
+}
+
+.hud-diag__empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--u) * 1.5);
+  font-size: calc(var(--u) * 5);
+  color: var(--c-secondary);
+}
+
+.hud-diag__empty-sub {
+  font-size: calc(var(--u) * 3);
+  color: var(--c-dim);
+}
+
+.hud-diag__notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--u) * 1) calc(var(--u) * 5);
+  font-size: calc(var(--u) * 3.2);
+}
+
+.hud-diag__note {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--u) * 1);
+  white-space: nowrap;
+}
+
+.hud-diag__note-icon {
+  width: calc(var(--u) * 4.2);
+  height: calc(var(--u) * 4.2);
+}
+
+.hud-diag__vehicle {
+  font-size: calc(var(--u) * 2.5);
+  color: var(--c-dim);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Gauges ------------------------------------------------------------------------------------ */
+
+.hud-gauges {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--rows, 2), minmax(0, 1fr));
+  gap: calc(var(--u) * 2.5) calc(var(--u) * 3);
+}
+
+.hud-gauge {
+  container-type: size;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* The accent rule spans the tile's content only, not the whole cell. */
+.hud-gauge__body {
+  display: flex;
+  flex-direction: column;
+  gap: min(calc(var(--u) * 1), 5cqh);
+  padding-left: calc(var(--u) * 2);
+  border-left: calc(var(--u) * 0.5) solid var(--c-faint);
+}
+
+.hud-gauge__label,
+.hud-diag-trip__tile .hud-gauge__label {
+  font-size: min(calc(var(--u) * 2.8), 18cqh);
+  color: var(--c-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-gauge__value {
+  font-size: min(calc(var(--u) * 10), 38cqh, 24cqw);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.hud-gauge__value .hud-unit {
+  font-size: 0.4em;
+}
+
+.hud-gauge__bar {
+  position: relative;
+  width: 100%;
+  height: min(calc(var(--u) * 1.2), 8cqh);
+  border-radius: 999px;
+  background: var(--c-faint);
+  overflow: hidden;
+}
+
+.hud-gauge__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: currentColor;
+}
+
+.hud-gauge.hud-tone--neutral .hud-gauge__fill {
+  background: var(--c-secondary);
+}
+
+.hud-gauge.hud-tone--unknown .hud-gauge__fill {
+  display: none;
+}
+
+/* Trouble codes ----------------------------------------------------------------------------- */
+
+.hud-dtcs {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.hud-dtc {
+  display: grid;
+  grid-template-columns: calc(var(--u) * 17) calc(var(--u) * 19) minmax(0, 1fr);
+  align-items: center;
+  column-gap: calc(var(--u) * 2);
+  padding: calc(var(--u) * 1.1) 0;
+  border-bottom: calc(var(--u) * 0.3) solid var(--c-faint);
+}
+
+.hud-dtc__code {
+  font-size: calc(var(--u) * 4.8);
+  line-height: 1;
+}
+
+.hud-dtc__kind {
+  justify-self: start;
+  font-size: calc(var(--u) * 2.2);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: calc(var(--u) * 0.3) calc(var(--u) * 0.8);
+  border: calc(var(--u) * 0.35) solid currentColor;
+  border-radius: calc(var(--u) * 0.8);
+}
+
+.hud-dtc__text {
+  min-width: 0;
+}
+
+.hud-dtc__short {
+  font-size: calc(var(--u) * 3.6);
+  color: var(--c-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-dtc__desc {
+  font-size: calc(var(--u) * 2.6);
+  color: var(--c-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-dtcs__more {
+  padding-top: calc(var(--u) * 1);
+  font-size: calc(var(--u) * 3);
+  color: var(--c-dim);
+}
+
+/* Trip -------------------------------------------------------------------------------------- */
+
+.hud-diag-trip {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: calc(var(--u) * 3);
+}
+
+.hud-diag-trip__tile {
+  container-type: size;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.hud-diag-trip__value {
+  font-size: min(calc(var(--u) * 8.5), 42cqh, 19cqw);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.hud-diag-trip__value .hud-unit {
+  font-size: 0.42em;
+}
+
+/* Maintenance ------------------------------------------------------------------------------- */
+
+.hud-maint {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.hud-maint__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) calc(var(--u) * 22) minmax(0, 1fr);
+  align-items: center;
+  column-gap: calc(var(--u) * 2);
+  padding: calc(var(--u) * 1.2) 0;
+  font-size: calc(var(--u) * 3.6);
+  border-bottom: calc(var(--u) * 0.3) solid var(--c-faint);
+}
+
+.hud-maint__label {
+  color: var(--c-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-maint__status {
+  font-size: calc(var(--u) * 2.6);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.hud-maint__item.hud-tone--neutral .hud-maint__status {
+  color: var(--c-go);
+}
+
+.hud-maint__remaining {
+  text-align: right;
+  font-size: calc(var(--u) * 3);
+  color: var(--c-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-maint__item.hud-tone--caution .hud-maint__remaining,
+.hud-maint__item.hud-tone--critical .hud-maint__remaining {
+  color: inherit;
+}

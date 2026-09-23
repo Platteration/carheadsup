@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The HUD serves plain HTTP/WebSocket on the car's local network at an address that is only
+     known at runtime (DHCP / mDNS), so cleartext cannot be limited to a fixed domain. Everything
+     on the internet (Overpass) is requested over HTTPS. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

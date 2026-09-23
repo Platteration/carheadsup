@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">carheadsup</string>
+    <string name="notification_listener_label">carheadsup navigation, messages and media</string>
+    <string name="hud_settings_title">HUD settings</string>
+
+    <!-- Tabs -->
+    <string name="tab_status">Status</string>
+    <string name="tab_remote">Remote</string>
+    <string name="tab_trips">Trips</string>
+    <string name="tab_setup">Setup</string>
+
+    <!-- Sections -->
+    <string name="section_hud">HUD</string>
+    <string name="section_permissions">Permissions</string>
+    <string name="section_connection">Connection</string>
+    <string name="section_features">Features</string>
+    <string name="section_hud_settings">HUD settings</string>
+    <string name="section_maintenance">Maintenance</string>
+    <string name="section_trips">Trips</string>
+
+    <!-- Link status -->
+    <string name="status_stopped">Not running</string>
+    <string name="status_starting">Starting…</string>
+    <string name="status_searching">Looking for the HUD on this Wi-Fi…</string>
+    <string name="status_connecting">Connecting to %1$s…</string>
+    <string name="status_connected">Connected to %1$s</string>
+    <string name="status_waiting">Disconnected: %1$s</string>
+    <string name="status_waiting_countdown">Disconnected (%1$s), retrying in %2$d s</string>
+    <string name="status_refused">The HUD refused the connection: %1$s</string>
+    <string name="status_bad_token">wrong pairing token (see Setup)</string>
+    <string name="status_rtt">%1$d ms</string>
+    <string name="status_read_aloud_on">Messages are read aloud on the phone</string>
+    <string name="status_read_aloud_off">Messages are not read aloud (HUD or app setting)</string>
+    <string name="service_start_refused">Android did not allow starting the service. Try again with the app open.</string>
+
+    <!-- Actions -->
+    <string name="action_start">Connect to HUD</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_retry_now">Retry now</string>
+    <string name="action_grant">Grant</string>
+    <string name="action_app_settings">App settings</string>
+    <string name="action_save">Save</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="action_sync_trips">Sync trips</string>
+    <string name="action_open_hud_settings">Open HUD settings</string>
+    <string name="granted">OK</string>
+
+    <!-- Permissions -->
+    <string name="perm_notification_access">Notification access</string>
+    <string name="perm_notification_access_description">Google Maps turn-by-turn, message senders and the music you play</string>
+    <string name="perm_restricted_settings_hint">If Android says this setting is restricted: open App settings, tap ⋮ and choose \"Allow restricted settings\", then try again.</string>
+    <string name="perm_calls">Phone calls</string>
+    <string name="perm_calls_description">Show incoming calls with the number; accept or decline from the HUD</string>
+    <string name="perm_contacts">Contacts</string>
+    <string name="perm_contacts_description">Show the caller\'s name instead of the number</string>
+    <string name="perm_location">Location</string>
+    <string name="perm_location_description">GPS for the HUD, speed limits and speed cameras</string>
+    <string name="perm_notifications">Notifications</string>
+    <string name="perm_notifications_description">Connection status, logged trips and maintenance reminders</string>
+    <string name="perm_battery">Unrestricted battery use</string>
+    <string name="perm_battery_description">Keeps the connection alive while the screen is off</string>
+
+    <!-- Remote -->
+    <string name="remote_primary">Accept / OK</string>
+    <string name="remote_secondary">Decline / Dismiss</string>
+    <string name="remote_prev_page">◀ Page</string>
+    <string name="remote_next_page">Page ▶</string>
+    <string name="remote_brightness_down">Dimmer</string>
+    <string name="remote_brightness_up">Brighter</string>
+    <string name="remote_blank">Blank / unblank HUD</string>
+    <string name="remote_not_connected">Not connected over the live link; buttons are sent through the HUD\'s web API.</string>
+    <string name="remote_failed">Could not reach the HUD: %1$s</string>
+
+    <!-- Trips & maintenance -->
+    <string name="trips_totals">%1$d trips · %2$s · fuel %3$s</string>
+    <string name="trips_cost_total">Fuel cost: %1$s</string>
+    <string name="trips_synced">%1$d trips from the HUD</string>
+    <string name="trips_empty">No trips yet. Trips are logged by the HUD and appear here after each drive.</string>
+    <string name="trip_avg_speed">avg %1$s</string>
+    <string name="trip_max_speed">max %1$s</string>
+    <string name="trip_idle">idle %1$s</string>
+    <string name="trip_logged">Trip logged</string>
+    <string name="maintenance_none">No maintenance items configured on the HUD.</string>
+    <string name="maintenance_due_soon">due soon</string>
+    <string name="maintenance_overdue">overdue</string>
+    <string name="load_failed">Could not load: %1$s</string>
+
+    <!-- Setup -->
+    <string name="setting_discovery">Find the HUD automatically</string>
+    <string name="setting_discovery_description">Uses mDNS (_carheadsup._tcp) on the car\'s Wi-Fi</string>
+    <string name="setting_discovery_found">Found at %1$s</string>
+    <string name="setting_address">HUD address (host:port)</string>
+    <string name="setting_address_invalid">Enter an address like 192.168.4.1 or hud.local:8080</string>
+    <string name="setting_pairing_token">Pairing token</string>
+    <string name="setting_pairing_token_description">As set in the HUD\'s phone settings; empty if none</string>
+    <string name="setting_api_token">API token</string>
+    <string name="setting_api_token_description">For trips, maintenance and the settings page; empty if the HUD has none</string>
+    <string name="setting_read_aloud">Read messages aloud</string>
+    <string name="setting_read_aloud_description">The HUD shows only who wrote; the phone reads the message while connected</string>
+    <string name="setting_location">Share location with the HUD</string>
+    <string name="setting_location_description">Used for night mode by sun position and for context</string>
+    <string name="setting_osm">Speed limits from OpenStreetMap</string>
+    <string name="setting_osm_description">Looks up map data around you (uses mobile data)</string>
+    <string name="setting_cameras">Speed camera warnings</string>
+    <string name="setting_cameras_description">Mapped cameras ahead. Check local law: such warnings are illegal while driving in some countries (e.g. Germany, Switzerland).</string>
+    <string name="hud_settings_description">Layouts, units, alerts and projection are configured on the HUD itself.</string>
+    <string name="hud_address_unknown">The HUD\'s address is not known yet: connect first or enter it above.</string>
+    <string name="about_version">carheadsup companion %1$s</string>
+
+    <!-- Notifications -->
+    <string name="channel_link">HUD connection</string>
+    <string name="channel_link_description">Shown while the app keeps the connection to the HUD</string>
+    <string name="channel_trips">Trips</string>
+    <string name="channel_trips_description">A summary when the HUD logs a trip</string>
+    <string name="channel_maintenance">Maintenance</string>
+    <string name="channel_maintenance_description">Oil changes and other service that is due</string>
+
+    <!-- Speech -->
+    <string name="tts_message">Message from %1$s. %2$s</string>
+</resources>

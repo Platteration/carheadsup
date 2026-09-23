@@ -1,0 +1,990 @@
+import { describe, expect, it } from 'vitest';
+import { LINK_LOSS_GRACE_MS } from '../../src/display/context.ts';
+import {
+  EMPTY_PERSISTED_STATE,
+  createInitialState,
+  extractPersisted,
+  reduce,
+} from '../../src/state/reducer.ts';
+import { TRACK_NOT_ANNOUNCED } from '../../src/state/phone.ts';
+import {
+  ENDED_CALL_SHOW_MS,
+  HAZARD_TTL_MS,
+  MAX_MESSAGES,
+  MESSAGE_TTL_MS,
+  PHONE_DATA_GRACE_MS,
+} from '../../src/state/selectors.ts';
+import type { HudEvent } from '../../src/types/events.ts';
+import type { Hazard } from '../../src/types/nav.ts';
+import type { MessageInfo } from '../../src/types/phone.ts';
+import {
+  Harness,
+  T0,
+  callInfo,
+  freezeDeep,
+  makeConfig,
+  mediaInfo,
+  navInfo,
+  persisted,
+  roadInfo,
+  samplesEvent,
+} from './fixtures.ts';
+
+const DAY = 86_400_000;
+
+function message(id: string, sender = 'Alex', overrides: Partial<MessageInfo> = {}): MessageInfo {
+  return { id, sender, app: 'WhatsApp', receivedAt: 0, readingAloud: true, ...overrides };
+}
+
+function hazard(id: string, distanceM: number | null, overrides: Partial<Hazard> = {}): Hazard {
+  return {
+    id,
+    type: 'speed-camera',
+    distanceM,
+    speedLimitKph: 100,
+    delaySeconds: null,
+    description: null,
+    updatedAt: 0,
+    ...overrides,
+  };
+}
+
+/** A harness with the OBD link up, driving at `speed` for a couple of seconds. */
+function driving(speed = 50, config = makeConfig()): Harness {
+  const h = new Harness(config);
+  h.obdConnected(T0);
+  h.run(T0 + 2000, { speed, rpm: 2000 });
+  return h;
+}
+
+describe('createInitialState', () => {
+  it('seeds odometer, gear ratios, fuel average and maintenance records from persistence', () => {
+    const config = makeConfig();
+    const state = createInitialState(
+      config,
+      persisted({
+        odometerKm: 48_500,
+        learnedGearRatios: [120, 70, 48, 36, 29],
+        avgLPer100km: 7.2,
+        maintenanceRecords: [{ itemId: 'oil', odometerKm: 41_000, at: T0 - 200 * DAY }],
+      }),
+      T0,
+      { simulated: true },
+    );
+    expect(state.now).toBe(T0);
+    expect(state.simulated).toBe(true);
+    expect(state.odometer).toEqual({
+      km: 48_500,
+      source: 'estimated',
+      integratedKm: 0,
+      lastSampleAt: null,
+      lastSpeedKph: null,
+    });
+    expect(state.gear.learnedRatios).toEqual([120, 70, 48, 36, 29]);
+    expect(state.fuel.readings.averageLPer100km).toBeCloseTo(7.2);
+    expect(state.maintenance.records).toEqual([
+      { itemId: 'oil', odometerKm: 41_000, at: T0 - 200 * DAY },
+    ]);
+    // Status is derived right away: 48 500 − 41 000 = 7 500 km of an 8 000 km interval.
+    const oil = state.maintenance.status.find((s) => s.itemId === 'oil');
+    expect(oil?.status).toBe('due-soon');
+    expect(oil?.remainingKm).toBe(500);
+    expect(state.maintenance.checkedAt).toBe(T0);
+    // …and so are the alerts that follow from it.
+    expect(state.alerts.map((a) => a.key)).toEqual(['maintenance-due:oil']);
+  });
+
+  it('starts disconnected and empty', () => {
+    const state = createInitialState(makeConfig(), EMPTY_PERSISTED_STATE, T0);
+    expect(state.simulated).toBe(false);
+    expect(state.vehicle.link).toEqual({
+      state: 'disconnected',
+      adapter: null,
+      protocol: null,
+      message: null,
+      since: T0,
+    });
+    expect(state.vehicle.signals).toEqual({});
+    expect(state.vehicle.supported).toBeNull();
+    expect(state.vehicle.dtcs).toEqual([]);
+    expect(state.context.context).toBe('parked');
+    expect(state.odometer.km).toBeNull();
+    expect(state.odometer.source).toBeNull();
+    expect(state.nav).toBeNull();
+    expect(state.road).toBeNull();
+    expect(state.hazards).toEqual([]);
+    expect(state.media).toBeNull();
+    expect(state.call).toBeNull();
+    expect(state.messages).toEqual([]);
+    expect(state.phone.connected).toBe(false);
+    expect(state.adas.moduleConnected).toBe(false);
+    expect(state.alerts).toEqual([]);
+    expect(state.ui).toEqual({
+      blanked: false,
+      page: 0,
+      brightnessOffset: 0,
+      toastDismissedAt: null,
+      lastInputAt: null,
+    });
+  });
+
+  it('ignores an implausible persisted odometer', () => {
+    for (const odometerKm of [Number.NaN, -5, Number.POSITIVE_INFINITY]) {
+      const state = createInitialState(makeConfig(), persisted({ odometerKm }), T0);
+      expect(state.odometer.km).toBeNull();
+      expect(state.odometer.source).toBeNull();
+    }
+  });
+});
+
+describe('reduce — general', () => {
+  it('never moves time backwards', () => {
+    const h = new Harness();
+    h.tick(T0 + 5000);
+    h.send({ type: 'sensor/light', lux: 500, at: T0 + 1000 });
+    expect(h.state.now).toBe(T0 + 5000);
+    expect(h.state.env.luxAt).toBe(T0 + 5000);
+  });
+
+  it('ignores events with a non-finite timestamp for the clock', () => {
+    const h = new Harness();
+    h.send({ type: 'sensor/light', lux: 500, at: Number.NaN });
+    expect(h.state.now).toBe(T0);
+    expect(h.state.env.lux).toBe(500);
+  });
+
+  it('ignores unknown event types from a newer peer', () => {
+    const h = new Harness();
+    const before = h.state;
+    const next = reduce(before, { type: 'future/thing', at: T0 } as unknown as HudEvent, h.config);
+    expect(next).toBe(before);
+  });
+
+  it('never mutates its input (frozen state)', () => {
+    const config = makeConfig();
+    const state = freezeDeep(createInitialState(config, EMPTY_PERSISTED_STATE, T0));
+    const snapshot = JSON.stringify(state);
+    reduce(state, samplesEvent(T0 + 100, { speed: 40, rpm: 1800 }), config);
+    reduce(state, { type: 'input', action: 'next-page', at: T0 + 100 }, config);
+    expect(JSON.stringify(state)).toBe(snapshot);
+  });
+});
+
+describe('obd/samples', () => {
+  it('stores valid samples stamped with the event time and ignores junk', () => {
+    const h = new Harness();
+    h.send({
+      type: 'obd/samples',
+      at: T0 + 100,
+      samples: [
+        { signal: 'coolantTemp', value: 90 },
+        { signal: 'rpm', value: Number.NaN },
+        { signal: 'bogus' as 'rpm', value: 3 },
+      ],
+    });
+    expect(h.state.vehicle.signals).toEqual({ coolantTemp: { value: 90, at: T0 + 100 } });
+  });
+
+  it('leaves the state alone for a batch without usable samples', () => {
+    const h = new Harness();
+    const before = h.state;
+    const next = reduce(before, samplesEvent(T0, { rpm: Number.NaN }), h.config);
+    expect(next).toBe(before);
+  });
+
+  it('integrates distance trapezoidally between speed samples', () => {
+    const h = new Harness();
+    h.samples(T0, { speed: 0 });
+    h.samples(T0 + 1000, { speed: 36 }); // mean 18 km/h for 1 s = 5 m
+    h.samples(T0 + 2000, { speed: 36 }); // 10 m
+    h.samples(T0 + 2500, { coolantTemp: 80 }); // no speed: no integration
+    expect(h.state.odometer.integratedKm).toBeCloseTo(0.015, 9);
+    expect(h.state.odometer.lastSampleAt).toBe(T0 + 2000);
+    expect(h.state.odometer.lastSpeedKph).toBe(36);
+  });
+
+  it('does not bridge gaps longer than 5 s', () => {
+    const h = new Harness();
+    h.samples(T0, { speed: 100 });
+    h.samples(T0 + 6000, { speed: 100 });
+    expect(h.state.odometer.integratedKm).toBe(0);
+    h.samples(T0 + 7000, { speed: 100 });
+    expect(h.state.odometer.integratedKm).toBeCloseTo(100 / 3600, 9);
+  });
+
+  it('ignores negative speeds for integration', () => {
+    const h = new Harness();
+    h.samples(T0, { speed: 50 });
+    h.samples(T0 + 1000, { speed: -5 });
+    expect(h.state.odometer.integratedKm).toBe(0);
+    expect(h.state.odometer.lastSampleAt).toBe(T0);
+  });
+
+  it('estimates the odometer from the persisted baseline plus integrated distance', () => {
+    const h = new Harness(makeConfig(), persisted({ odometerKm: 1000 }));
+    h.samples(T0, { speed: 72 });
+    h.samples(T0 + 1000, { speed: 72 }); // 20 m
+    expect(h.state.odometer.source).toBe('estimated');
+    expect(h.state.odometer.km).toBeCloseTo(1000.02, 9);
+  });
+
+  it('snaps to the odometer PID, extrapolates while it is fresh, then estimates', () => {
+    const h = new Harness(makeConfig(), persisted({ odometerKm: 1000 }));
+    h.samples(T0, { speed: 72, odometer: 52_000.4 });
+    expect(h.state.odometer).toMatchObject({ km: 52_000.4, source: 'pid' });
+    h.samples(T0 + 1000, { speed: 72 });
+    expect(h.state.odometer.source).toBe('pid');
+    expect(h.state.odometer.km).toBeCloseTo(52_000.42, 9);
+    // The PID goes stale after 120 s without readings.
+    h.samples(T0 + 121_000, { speed: 72 });
+    h.samples(T0 + 122_000, { speed: 72 });
+    expect(h.state.odometer.source).toBe('estimated');
+    expect(h.state.odometer.km).toBeCloseTo(52_000.44, 9);
+  });
+
+  it('keeps the odometer unknown without a baseline or PID', () => {
+    const h = new Harness();
+    h.samples(T0, { speed: 72 });
+    h.samples(T0 + 1000, { speed: 72 });
+    expect(h.state.odometer.km).toBeNull();
+    expect(h.state.odometer.integratedKm).toBeGreaterThan(0);
+  });
+
+  it('advances context, gear, fuel and trip from fresh values', () => {
+    const config = makeConfig({
+      vehicle: { transmission: 'manual', gearRatiosRpmPerKph: [120, 70, 48, 36, 29] },
+    });
+    const h = new Harness(config);
+    h.obdConnected(T0);
+    h.run(T0 + 3000, { speed: 50, rpm: 2400, maf: 12, fuelLevel: 60 });
+    expect(h.state.context.context).toBe('city');
+    expect(h.state.gear.estimate.gear).toBe(3);
+    expect(h.state.fuel.readings.rateSource).toBe('maf');
+    expect(h.state.fuel.readings.levelPct).toBeCloseTo(60);
+    expect(h.state.trip.current).not.toBeNull();
+    expect(h.state.trip.current?.distanceKm).toBeGreaterThan(0.03);
+  });
+
+  it('treats the engine as running only from 300 rpm', () => {
+    const h = new Harness();
+    h.obdConnected(T0);
+    h.samples(T0 + 100, { rpm: 250, speed: 0 });
+    expect(h.state.trip.current).toBeNull();
+    h.samples(T0 + 200, { rpm: 800, speed: 0 });
+    expect(h.state.trip.current).not.toBeNull();
+  });
+});
+
+describe('tick', () => {
+  it('parks after vehicle data is lost for the grace period', () => {
+    const h = driving(50);
+    expect(h.state.context.context).toBe('city');
+    h.idle(h.now + LINK_LOSS_GRACE_MS - 5000);
+    expect(h.state.context.context).toBe('city');
+    h.idle(h.now + 10_000);
+    expect(h.state.context.context).toBe('parked');
+  });
+
+  it('drops the gear estimate once its inputs go stale', () => {
+    const config = makeConfig({
+      vehicle: { transmission: 'manual', gearRatiosRpmPerKph: [120, 70, 48, 36, 29] },
+    });
+    const h = new Harness(config);
+    h.obdConnected(T0);
+    h.run(T0 + 2000, { speed: 50, rpm: 2400 });
+    expect(h.state.gear.estimate.gear).toBe(3);
+    h.idle(h.now + 3000);
+    expect(h.state.gear.estimate.gear).toBeNull();
+  });
+
+  it('drives brightness from a fresh light sensor and falls back to the sun', () => {
+    const config = makeConfig({ sensors: { fallbackLocation: { lat: 48.1, lon: 11.6 } } });
+    const h = new Harness(config);
+    h.send({ type: 'sensor/light', lux: 1, at: T0 });
+    h.tick(T0 + 100);
+    expect(h.state.env.brightness.level).toBeCloseTo(0.08);
+    expect(h.state.env.brightness.night).toBe(true);
+    // Six seconds later the reading is stale: noon in Munich → daytime sun fallback.
+    h.tick(T0 + 6000);
+    h.idle(T0 + 30_000);
+    expect(h.state.env.brightness.night).toBe(false);
+    expect(h.state.env.brightness.target).toBeCloseTo(0.8);
+  });
+
+  it('prefers the phone location over the fallback location for the sun', () => {
+    const config = makeConfig({
+      display: { brightness: { nightMode: 'sun' } },
+      sensors: { fallbackLocation: { lat: 48.1, lon: 11.6 } },
+    });
+    const h = new Harness(config);
+    h.tick(T0 + 1000);
+    expect(h.state.env.brightness.night).toBe(false); // noon in Munich
+    // Honolulu at 12:00 UTC is 02:00 local.
+    h.send({ type: 'location/update', lat: 21.3, lon: -157.9, accuracyM: 10, at: T0 + 2000 });
+    h.tick(T0 + 3000);
+    expect(h.state.env.brightness.night).toBe(true);
+  });
+
+  it('ends the trip after the engine has been off long enough', () => {
+    const h = driving(60);
+    h.run(h.now + 20_000, { speed: 60, rpm: 2200 });
+    h.run(h.now + 2000, { speed: 0, rpm: 0 });
+    expect(h.state.trip.completedCount).toBe(0);
+    h.idle(h.now + h.config.trip.endAfterEngineOffMs + 2000);
+    expect(h.state.trip.completedCount).toBe(1);
+    expect(h.state.trip.current).toBeNull();
+    expect(h.state.trip.lastCompleted?.distanceKm).toBeGreaterThan(0.3);
+  });
+
+  it('recomputes maintenance status at most once a minute', () => {
+    const h = new Harness(
+      makeConfig(),
+      persisted({
+        odometerKm: 1000,
+        maintenanceRecords: [{ itemId: 'brake-fluid', odometerKm: null, at: T0 - 700 * DAY }],
+      }),
+    );
+    const checked = h.state.maintenance.checkedAt;
+    h.tick(T0 + 30_000);
+    expect(h.state.maintenance.checkedAt).toBe(checked);
+    h.tick(T0 + 60_000);
+    expect(h.state.maintenance.checkedAt).toBe(T0 + 60_000);
+  });
+
+  it('expires messages after a minute', () => {
+    const h = new Harness();
+    h.send({ type: 'message/received', message: message('m1'), at: T0 });
+    h.tick(T0 + MESSAGE_TTL_MS);
+    expect(h.state.messages).toHaveLength(1);
+    h.tick(T0 + MESSAGE_TTL_MS + 1);
+    expect(h.state.messages).toHaveLength(0);
+  });
+
+  it('clears an ended call 2 s after it ended', () => {
+    const h = new Harness();
+    h.phoneConnected(T0);
+    h.send({ type: 'call/update', call: callInfo({ state: 'ended' }), at: T0 + 1000 });
+    h.tick(T0 + 1000 + ENDED_CALL_SHOW_MS - 1);
+    expect(h.state.call?.state).toBe('ended');
+    h.tick(T0 + 1000 + ENDED_CALL_SHOW_MS);
+    expect(h.state.call).toBeNull();
+  });
+
+  it('expires hazards not refreshed for 2 minutes', () => {
+    const h = new Harness();
+    h.phoneConnected(T0);
+    h.send({ type: 'hazards/update', hazards: [hazard('h1', 800)], at: T0 });
+    h.tick(T0 + HAZARD_TTL_MS);
+    expect(h.state.hazards).toHaveLength(1);
+    h.tick(T0 + HAZARD_TTL_MS + 1);
+    expect(h.state.hazards).toHaveLength(0);
+  });
+
+  it('drops hazards once they are more than 50 m behind', () => {
+    const h = driving(72); // 20 m/s
+    h.phoneConnected(h.now);
+    h.send({
+      type: 'hazards/update',
+      hazards: [hazard('near', 60), hazard('far', 900)],
+      at: h.now,
+    });
+    h.run(h.now + 5000, { speed: 72, rpm: 2000 }); // 100 m
+    expect(h.state.hazards.map((t) => t.hazard.id)).toEqual(['near', 'far']);
+    h.run(h.now + 1000, { speed: 72, rpm: 2000 }); // 120 m: 60 m past "near"
+    expect(h.state.hazards.map((t) => t.hazard.id)).toEqual(['far']);
+  });
+
+  it('clears phone data 30 s after the phone disconnects', () => {
+    const h = new Harness();
+    h.phoneConnected(T0);
+    h.send({ type: 'nav/update', nav: navInfo(), at: T0 });
+    h.send({ type: 'road/update', road: roadInfo(50), at: T0 });
+    h.send({ type: 'hazards/update', hazards: [hazard('h1', 500)], at: T0 });
+    h.send({ type: 'media/update', media: mediaInfo(), at: T0 });
+    h.send({ type: 'call/update', call: callInfo({ state: 'active' }), at: T0 });
+    h.send({ type: 'phone/link', connected: false, at: T0 + 1000 });
+    h.tick(T0 + 1000 + PHONE_DATA_GRACE_MS - 1);
+    expect(h.state.nav).not.toBeNull();
+    expect(h.state.road).not.toBeNull();
+    h.tick(T0 + 1000 + PHONE_DATA_GRACE_MS);
+    expect(h.state.nav).toBeNull();
+    expect(h.state.road).toBeNull();
+    expect(h.state.hazards).toEqual([]);
+    expect(h.state.media).toBeNull();
+    expect(h.state.call).toBeNull();
+  });
+
+  it('keeps phone data when the phone reconnects within the grace period', () => {
+    const h = new Harness();
+    h.phoneConnected(T0);
+    h.send({ type: 'nav/update', nav: navInfo(), at: T0 });
+    h.send({ type: 'phone/link', connected: false, at: T0 + 1000 });
+    h.send({ type: 'phone/link', connected: true, at: T0 + 20_000 });
+    h.idle(T0 + 60_000, 5000);
+    expect(h.state.nav).not.toBeNull();
+  });
+});
+
+describe('OBD events', () => {
+  it('tracks link state; `since` moves only on a state change', () => {
+    const h = new Harness();
+    h.send({ type: 'obd/link', state: 'connecting', message: 'Opening /dev/rfcomm0', at: T0 + 10 });
+    expect(h.state.vehicle.link).toMatchObject({
+      state: 'connecting',
+      message: 'Opening /dev/rfcomm0',
+      since: T0 + 10,
+    });
+    h.send({ type: 'obd/link', state: 'connecting', at: T0 + 20 });
+    expect(h.state.vehicle.link.since).toBe(T0 + 10);
+    expect(h.state.vehicle.link.message).toBe('Opening /dev/rfcomm0');
+    h.send({
+      type: 'obd/link',
+      state: 'connected',
+      adapter: 'ELM327 v2.1',
+      protocol: 'CAN',
+      at: T0 + 30,
+    });
+    expect(h.state.vehicle.link).toEqual({
+      state: 'connected',
+      adapter: 'ELM327 v2.1',
+      protocol: 'CAN',
+      message: null,
+      since: T0 + 30,
+    });
+    h.send({ type: 'obd/link', state: 'error', message: 'Timeout', at: T0 + 40 });
+    expect(h.state.vehicle.link).toMatchObject({ adapter: 'ELM327 v2.1', protocol: 'CAN' });
+  });
+
+  it('stores supported signals without duplicates or unknown ids', () => {
+    const h = new Harness();
+    h.send({
+      type: 'obd/supported',
+      signals: ['rpm', 'speed', 'rpm', 'nonsense' as 'rpm'],
+      at: T0,
+    });
+    expect(h.state.vehicle.supported).toEqual(['rpm', 'speed']);
+  });
+
+  it('merges trouble codes, keeping when each code was first seen', () => {
+    const h = new Harness();
+    h.send({
+      type: 'obd/dtcs',
+      milOn: false,
+      stored: [],
+      pending: ['p0420'],
+      permanent: [],
+      at: T0 + 1000,
+    });
+    expect(h.state.vehicle.dtcs).toEqual([
+      { code: 'P0420', kind: 'pending', firstSeenAt: T0 + 1000 },
+    ]);
+    h.send({
+      type: 'obd/dtcs',
+      milOn: true,
+      stored: ['P0420', 'P0301', 'P0301', 'XYZ'],
+      pending: [],
+      permanent: ['P0420'],
+      at: T0 + 5000,
+    });
+    expect(h.state.vehicle.milOn).toBe(true);
+    expect(h.state.vehicle.dtcsCheckedAt).toBe(T0 + 5000);
+    expect(h.state.vehicle.dtcs).toEqual([
+      { code: 'P0420', kind: 'stored', firstSeenAt: T0 + 1000 },
+      { code: 'P0301', kind: 'stored', firstSeenAt: T0 + 5000 },
+      { code: 'P0420', kind: 'permanent', firstSeenAt: T0 + 1000 },
+    ]);
+    h.send({
+      type: 'obd/dtcs',
+      milOn: false,
+      stored: [],
+      pending: [],
+      permanent: [],
+      at: T0 + 9000,
+    });
+    expect(h.state.vehicle.dtcs).toEqual([]);
+    expect(h.state.vehicle.milOn).toBe(false);
+  });
+
+  it('stores the VIN trimmed and upper-cased', () => {
+    const h = new Harness();
+    h.send({ type: 'obd/vin', vin: ' wvwzzzauzkw123456 ', at: T0 });
+    expect(h.state.vehicle.vin).toBe('WVWZZZAUZKW123456');
+    h.send({ type: 'obd/vin', vin: '  ', at: T0 });
+    expect(h.state.vehicle.vin).toBeNull();
+  });
+});
+
+describe('phone events', () => {
+  it('tracks the phone link', () => {
+    const h = new Harness();
+    h.send({
+      type: 'phone/link',
+      connected: true,
+      deviceName: 'Pixel 9',
+      appVersion: '1.2.0',
+      at: T0 + 5,
+    });
+    expect(h.state.phone).toEqual({
+      connected: true,
+      deviceName: 'Pixel 9',
+      appVersion: '1.2.0',
+      since: T0 + 5,
+    });
+    h.send({ type: 'phone/link', connected: true, at: T0 + 10 });
+    expect(h.state.phone.since).toBe(T0 + 5);
+    expect(h.state.phone.deviceName).toBe('Pixel 9');
+    h.send({ type: 'phone/link', connected: false, at: T0 + 20 });
+    expect(h.state.phone).toMatchObject({
+      connected: false,
+      since: T0 + 20,
+      deviceName: 'Pixel 9',
+    });
+  });
+
+  it('anchors nav updates to the integrated distance and clears them', () => {
+    const h = driving(72);
+    const km = h.state.odometer.integratedKm;
+    expect(km).toBeGreaterThan(0);
+    h.send({ type: 'nav/update', nav: navInfo(), at: h.now });
+    expect(h.state.nav).toEqual({ info: navInfo(), integratedKmAtUpdate: km });
+    h.send({ type: 'nav/clear', at: h.now });
+    expect(h.state.nav).toBeNull();
+  });
+
+  it('stores road info', () => {
+    const h = new Harness();
+    h.send({ type: 'road/update', road: roadInfo(80), at: T0 });
+    expect(h.state.road).toEqual(roadInfo(80));
+  });
+
+  it('replaces hazards, stamping them with the receipt time', () => {
+    const h = driving(50);
+    h.send({ type: 'hazards/update', hazards: [hazard('a', 400), hazard('b', 900)], at: h.now });
+    expect(h.state.hazards).toHaveLength(2);
+    expect(h.state.hazards[0]?.hazard.updatedAt).toBe(h.now);
+    expect(h.state.hazards[0]?.integratedKmAtUpdate).toBe(h.state.odometer.integratedKm);
+    h.send({ type: 'hazards/update', hazards: [], at: h.now });
+    expect(h.state.hazards).toEqual([]);
+  });
+
+  describe('media', () => {
+    it('announces a new track only when it plays', () => {
+      const h = new Harness();
+      h.send({ type: 'media/update', media: mediaInfo(), at: T0 + 100 });
+      expect(h.state.media?.trackChangedAt).toBe(T0 + 100);
+      // Same track, new metadata timestamp: no new announcement.
+      h.send({ type: 'media/update', media: mediaInfo({ updatedAt: T0 + 500 }), at: T0 + 500 });
+      expect(h.state.media?.trackChangedAt).toBe(T0 + 100);
+      h.send({
+        type: 'media/update',
+        media: mediaInfo({ trackKey: 'b', title: 'B' }),
+        at: T0 + 900,
+      });
+      expect(h.state.media?.trackChangedAt).toBe(T0 + 900);
+    });
+
+    it('does not re-announce after pause and resume', () => {
+      const h = new Harness();
+      h.send({ type: 'media/update', media: mediaInfo(), at: T0 });
+      h.send({ type: 'media/update', media: mediaInfo({ playing: false }), at: T0 + 10_000 });
+      h.send({ type: 'media/update', media: mediaInfo(), at: T0 + 20_000 });
+      expect(h.state.media?.trackChangedAt).toBe(T0);
+    });
+
+    it('announces a track that changed while paused once it starts playing', () => {
+      const h = new Harness();
+      h.send({ type: 'media/update', media: mediaInfo({ playing: false }), at: T0 });
+      expect(h.state.media?.trackChangedAt).toBe(TRACK_NOT_ANNOUNCED);
+      h.send({
+        type: 'media/update',
+        media: mediaInfo({ playing: false, trackKey: 'b' }),
+        at: T0 + 100,
+      });
+      expect(h.state.media?.trackChangedAt).toBe(TRACK_NOT_ANNOUNCED);
+      h.send({ type: 'media/update', media: mediaInfo({ trackKey: 'b' }), at: T0 + 200 });
+      expect(h.state.media?.trackChangedAt).toBe(T0 + 200);
+    });
+
+    it('clears media', () => {
+      const h = new Harness();
+      h.send({ type: 'media/update', media: mediaInfo(), at: T0 });
+      h.send({ type: 'media/update', media: null, at: T0 + 1 });
+      expect(h.state.media).toBeNull();
+    });
+  });
+
+  describe('calls', () => {
+    it('restamps updates and restarts the clock when the call is answered', () => {
+      const h = new Harness();
+      h.send({ type: 'call/update', call: callInfo({ startedAt: T0 - 500 }), at: T0 });
+      expect(h.state.call).toMatchObject({ state: 'ringing', startedAt: T0 - 500, updatedAt: T0 });
+      h.send({
+        type: 'call/update',
+        call: callInfo({ state: 'active', startedAt: T0 - 500 }),
+        at: T0 + 8000,
+      });
+      expect(h.state.call).toMatchObject({
+        state: 'active',
+        startedAt: T0 + 8000,
+        updatedAt: T0 + 8000,
+      });
+      h.send({ type: 'call/update', call: callInfo({ state: 'held' }), at: T0 + 20_000 });
+      expect(h.state.call?.startedAt).toBe(T0 + 8000);
+      h.send({ type: 'call/update', call: callInfo({ state: 'ended' }), at: T0 + 30_000 });
+      expect(h.state.call).toMatchObject({
+        state: 'ended',
+        startedAt: T0 + 8000,
+        updatedAt: T0 + 30_000,
+      });
+    });
+
+    it('trusts a plausible start time for a call first seen mid-call', () => {
+      const h = new Harness();
+      h.send({
+        type: 'call/update',
+        call: callInfo({ state: 'active', startedAt: T0 - 60_000 }),
+        at: T0,
+      });
+      expect(h.state.call?.startedAt).toBe(T0 - 60_000);
+      h.send({
+        type: 'call/update',
+        call: callInfo({ id: 'c2', startedAt: T0 + 99_999 }),
+        at: T0 + 1,
+      });
+      expect(h.state.call?.startedAt).toBe(T0 + 1);
+    });
+
+    it('clears the call', () => {
+      const h = new Harness();
+      h.send({ type: 'call/update', call: callInfo(), at: T0 });
+      h.send({ type: 'call/update', call: null, at: T0 + 1 });
+      expect(h.state.call).toBeNull();
+    });
+  });
+
+  describe('messages', () => {
+    it('keeps the most recent first, capped, stamped with the receipt time', () => {
+      const h = new Harness();
+      for (let i = 0; i < MAX_MESSAGES + 2; i++) {
+        h.send({ type: 'message/received', message: message(`m${i}`), at: T0 + i * 1000 });
+      }
+      expect(h.state.messages.map((m) => m.id)).toEqual(['m6', 'm5', 'm4', 'm3', 'm2']);
+      expect(h.state.messages[0]?.receivedAt).toBe(T0 + 6000);
+    });
+
+    it('dedupes by id, keeping the original receipt time', () => {
+      const h = new Harness();
+      h.send({ type: 'message/received', message: message('a', 'Ann'), at: T0 });
+      h.send({ type: 'message/received', message: message('b', 'Ben'), at: T0 + 1000 });
+      h.send({
+        type: 'message/received',
+        message: message('a', 'Ann', { readingAloud: false }),
+        at: T0 + 2000,
+      });
+      expect(h.state.messages.map((m) => m.id)).toEqual(['b', 'a']);
+      expect(h.state.messages[1]).toMatchObject({ receivedAt: T0, readingAloud: false });
+    });
+  });
+
+  it('accepts only plausible locations', () => {
+    const h = new Harness();
+    h.send({ type: 'location/update', lat: 48.1, lon: 11.6, accuracyM: 5, at: T0 + 1 });
+    expect(h.state.env.location).toEqual({ lat: 48.1, lon: 11.6, at: T0 + 1 });
+    h.send({ type: 'location/update', lat: 95, lon: 11.6, accuracyM: 5, at: T0 + 2 });
+    h.send({ type: 'location/update', lat: Number.NaN, lon: 0, accuracyM: null, at: T0 + 3 });
+    expect(h.state.env.location).toEqual({ lat: 48.1, lon: 11.6, at: T0 + 1 });
+  });
+});
+
+describe('sensors and ADAS', () => {
+  it('stores light readings, ignoring invalid ones', () => {
+    const h = new Harness();
+    h.send({ type: 'sensor/light', lux: 1200, at: T0 + 5 });
+    expect(h.state.env).toMatchObject({ lux: 1200, luxAt: T0 + 5 });
+    h.send({ type: 'sensor/light', lux: -1, at: T0 + 6 });
+    h.send({ type: 'sensor/light', lux: Number.NaN, at: T0 + 7 });
+    expect(h.state.env).toMatchObject({ lux: 1200, luxAt: T0 + 5 });
+  });
+
+  it('tracks the ADAS module', () => {
+    const h = new Harness();
+    h.send({ type: 'adas/link', connected: true, at: T0 });
+    h.send({ type: 'adas/blind-spot', left: true, right: false, at: T0 + 10 });
+    h.send({ type: 'adas/collision', level: 'caution', ttcSeconds: 2.4, at: T0 + 20 });
+    expect(h.state.adas).toEqual({
+      moduleConnected: true,
+      blindSpotLeft: true,
+      blindSpotRight: false,
+      blindSpotUpdatedAt: T0 + 10,
+      collision: 'caution',
+      ttcSeconds: 2.4,
+      collisionUpdatedAt: T0 + 20,
+    });
+    h.send({ type: 'adas/link', connected: false, at: T0 + 30 });
+    expect(h.state.adas.moduleConnected).toBe(false);
+    // Data from the module proves it is back.
+    h.send({ type: 'adas/collision', level: 'none', ttcSeconds: null, at: T0 + 40 });
+    expect(h.state.adas.moduleConnected).toBe(true);
+  });
+});
+
+describe('input', () => {
+  /** A stopped vehicle with a low-fuel caution and a check-engine alert. */
+  function withAlerts(): Harness {
+    const h = new Harness();
+    h.obdConnected(T0);
+    h.samples(T0 + 100, { speed: 0, rpm: 800, fuelLevel: 5 });
+    h.send({
+      type: 'obd/dtcs',
+      milOn: true,
+      stored: ['P0301'],
+      pending: [],
+      permanent: [],
+      at: T0 + 200,
+    });
+    return h;
+  }
+
+  it('records when the driver last pressed anything', () => {
+    const h = new Harness();
+    h.input('toggle-blank', T0 + 50);
+    expect(h.state.ui.lastInputAt).toBe(T0 + 50);
+  });
+
+  it('primary acknowledges the top dismissible alert', () => {
+    const h = withAlerts();
+    const top = h.frame().alerts[0];
+    expect(top?.key).toBe('check-engine:P0301');
+    h.input('primary', T0 + 300);
+    const dismissed = h.state.alerts.find((a) => a.key === 'check-engine:P0301');
+    expect(dismissed?.dismissedAt).toBe(T0 + 300);
+    expect(h.frame().alerts.map((a) => a.key)).toEqual(['fuel-low']);
+    h.input('primary', T0 + 400);
+    expect(h.frame().alerts).toEqual([]);
+  });
+
+  it('never dismisses a critical alert and skips to the next dismissible one', () => {
+    const h = withAlerts();
+    h.samples(T0 + 250, { coolantTemp: 125, speed: 0, rpm: 800, fuelLevel: 5 });
+    expect(h.frame().alerts.map((a) => a.key)).toEqual(['coolant', 'check-engine:P0301']);
+    h.input('primary', T0 + 300);
+    expect(h.state.alerts.find((a) => a.key === 'coolant')?.dismissedAt).toBeNull();
+    expect(h.state.alerts.find((a) => a.key === 'check-engine:P0301')?.dismissedAt).toBe(T0 + 300);
+  });
+
+  it('primary on a ringing call changes nothing but the input time', () => {
+    const h = withAlerts();
+    h.send({ type: 'call/update', call: callInfo(), at: T0 + 300 });
+    const before = h.state;
+    h.input('primary', T0 + 400);
+    expect(h.state.alerts).toBe(before.alerts);
+    expect(h.state.call).toBe(before.call);
+    expect(h.state.ui).toEqual({ ...before.ui, lastInputAt: T0 + 400 });
+  });
+
+  it('secondary dismisses the toast first, then alerts', () => {
+    const h = withAlerts();
+    h.phoneConnected(T0 + 300);
+    h.send({ type: 'message/received', message: message('m1'), at: T0 + 400 });
+    expect(h.frame().toast?.kind).toBe('message');
+    h.input('secondary', T0 + 500);
+    expect(h.state.ui.toastDismissedAt).toBe(T0 + 500);
+    expect(h.frame().toast).toBeNull();
+    expect(h.state.alerts.every((a) => a.dismissedAt === null)).toBe(true);
+    h.input('secondary', T0 + 600);
+    expect(h.state.alerts.find((a) => a.key === 'check-engine:P0301')?.dismissedAt).toBe(T0 + 600);
+  });
+
+  it('secondary on a ringing or active call changes nothing but the input time', () => {
+    for (const state of ['ringing', 'dialing', 'active'] as const) {
+      const h = withAlerts();
+      h.send({ type: 'call/update', call: callInfo({ state }), at: T0 + 300 });
+      const before = h.state;
+      h.input('secondary', T0 + 400);
+      expect(h.state.alerts).toBe(before.alerts);
+      expect(h.state.ui.toastDismissedAt).toBeNull();
+    }
+  });
+
+  it('does nothing when there is nothing to dismiss', () => {
+    const h = new Harness();
+    h.input('primary', T0 + 1);
+    h.input('secondary', T0 + 2);
+    expect(h.state.alerts).toEqual([]);
+    expect(h.state.ui.toastDismissedAt).toBeNull();
+  });
+
+  it('pages through the parked dashboard, wrapping both ways', () => {
+    const h = new Harness();
+    // Without live signals: overview, trouble codes, trip, maintenance.
+    h.input('prev-page');
+    expect(h.state.ui.page).toBe(3);
+    h.input('next-page');
+    expect(h.state.ui.page).toBe(0);
+    h.input('next-page');
+    h.input('next-page');
+    expect(h.state.ui.page).toBe(2);
+  });
+
+  it('stays on the chosen page while pages come and go', () => {
+    const h = new Harness();
+    h.obdConnected(T0);
+    h.samples(T0 + 100, { rpm: 800, speed: 0 });
+    // overview, engine, trouble codes, trip, maintenance
+    h.input('prev-page', T0 + 200);
+    h.input('prev-page', T0 + 300);
+    expect(h.frame().diagnostics?.page).toBe('trip');
+    expect(h.state.ui.page).toBe(3);
+    // The engine page disappears when its data goes stale; the driver stays on "Trip".
+    h.idle(T0 + 20_000, 5000);
+    expect(h.frame().diagnostics?.page).toBe('trip');
+    expect(h.state.ui.page).toBe(2);
+    // …and it stays there when the engine page comes back.
+    h.samples(T0 + 21_000, { rpm: 800, speed: 0 });
+    expect(h.frame().diagnostics?.page).toBe('trip');
+    expect(h.state.ui.page).toBe(3);
+  });
+
+  it('shows whichever page takes the place of one that vanished', () => {
+    const h = new Harness();
+    h.obdConnected(T0);
+    h.samples(T0 + 100, { rpm: 800, speed: 0 });
+    h.input('next-page', T0 + 200);
+    expect(h.frame().diagnostics?.page).toBe('engine');
+    h.idle(T0 + 20_000, 5000);
+    expect(h.frame().diagnostics?.page).toBe('trouble-codes');
+  });
+
+  it('toggles blanking', () => {
+    const h = new Harness();
+    h.input('toggle-blank');
+    expect(h.state.ui.blanked).toBe(true);
+    h.input('toggle-blank');
+    expect(h.state.ui.blanked).toBe(false);
+  });
+
+  it('trims brightness in 0.1 steps within ±0.5', () => {
+    const h = new Harness();
+    h.input('brightness-up');
+    h.input('brightness-up');
+    h.input('brightness-up');
+    expect(h.state.ui.brightnessOffset).toBe(0.3);
+    for (let i = 0; i < 5; i++) h.input('brightness-up');
+    expect(h.state.ui.brightnessOffset).toBe(0.5);
+    for (let i = 0; i < 12; i++) h.input('brightness-down');
+    expect(h.state.ui.brightnessOffset).toBe(-0.5);
+  });
+});
+
+describe('maintenance and odometer bookkeeping', () => {
+  it('records a service at the current odometer and recomputes status', () => {
+    const h = new Harness(
+      makeConfig(),
+      persisted({
+        odometerKm: 60_000,
+        maintenanceRecords: [{ itemId: 'oil', odometerKm: 50_000, at: T0 - 300 * DAY }],
+      }),
+    );
+    expect(h.state.maintenance.status.find((s) => s.itemId === 'oil')?.status).toBe('overdue');
+    h.send({ type: 'maintenance/done', itemId: 'oil', odometerKm: null, at: T0 + 1000 });
+    expect(h.state.maintenance.records).toEqual([
+      { itemId: 'oil', odometerKm: 60_000, at: T0 + 1000 },
+    ]);
+    expect(h.state.maintenance.status.find((s) => s.itemId === 'oil')).toMatchObject({
+      status: 'ok',
+      remainingKm: 8000,
+    });
+    expect(h.state.alerts.some((a) => a.key === 'maintenance-due:oil')).toBe(false);
+  });
+
+  it('uses an explicit odometer reading and ignores unknown items', () => {
+    const h = new Harness();
+    h.send({ type: 'maintenance/done', itemId: 'cabin-filter', odometerKm: 12_345, at: T0 + 1 });
+    expect(h.state.maintenance.records).toEqual([
+      { itemId: 'cabin-filter', odometerKm: 12_345, at: T0 + 1 },
+    ]);
+    const before = h.state.maintenance;
+    h.send({ type: 'maintenance/done', itemId: 'flux-capacitor', odometerKm: null, at: T0 + 2 });
+    expect(h.state.maintenance).toBe(before);
+  });
+
+  it('sets the odometer by hand', () => {
+    const h = new Harness(
+      makeConfig(),
+      persisted({ maintenanceRecords: [{ itemId: 'oil', odometerKm: 50_000, at: T0 - DAY }] }),
+    );
+    expect(h.state.maintenance.status.find((s) => s.itemId === 'oil')?.remainingKm).toBeNull();
+    h.send({ type: 'odometer/set', odometerKm: 57_800, at: T0 + 1 });
+    expect(h.state.odometer).toMatchObject({ km: 57_800, source: 'estimated' });
+    expect(h.state.maintenance.status.find((s) => s.itemId === 'oil')).toMatchObject({
+      remainingKm: 200,
+      status: 'due-soon',
+    });
+    h.send({ type: 'odometer/set', odometerKm: -1, at: T0 + 2 });
+    expect(h.state.odometer.km).toBe(57_800);
+  });
+});
+
+describe('config', () => {
+  it('re-evaluates config-dependent state with the new config', () => {
+    const h = new Harness(
+      makeConfig(),
+      persisted({ maintenanceRecords: [{ itemId: 'oil', odometerKm: null, at: T0 - 100 * DAY }] }),
+    );
+    h.obdConnected(T0);
+    h.samples(T0 + 100, { coolantTemp: 105, rpm: 800, speed: 0 });
+    expect(h.state.alerts.some((a) => a.kind === 'coolant')).toBe(false);
+    expect(h.state.alerts.some((a) => a.kind === 'maintenance-due')).toBe(false);
+
+    const next = makeConfig({
+      alerts: { coolantHighC: 100, coolantCriticalC: 110 },
+      maintenance: {
+        items: [
+          {
+            id: 'oil',
+            label: 'Oil',
+            intervalKm: null,
+            intervalDays: 90,
+            warnBeforeKm: 0,
+            warnBeforeDays: 14,
+          },
+        ],
+      },
+      display: { brightness: { mode: 'manual', manualLevel: 0.4 } },
+    });
+    h.send({ type: 'config', config: next, at: T0 + 200 });
+    expect(h.state.maintenance.status).toEqual([
+      expect.objectContaining({ itemId: 'oil', status: 'overdue', remainingDays: -10 }),
+    ]);
+    expect(h.state.env.brightness.level).toBe(0.4);
+    expect(h.state.alerts.map((a) => a.key).sort()).toEqual(['coolant', 'maintenance-due:oil']);
+  });
+});
+
+describe('extractPersisted', () => {
+  it('returns the persistent parts as independent copies', () => {
+    const h = new Harness(
+      makeConfig(),
+      persisted({
+        odometerKm: 1000,
+        learnedGearRatios: [110, 65, 45],
+        avgLPer100km: 6.5,
+        maintenanceRecords: [{ itemId: 'oil', odometerKm: 900, at: T0 - DAY }],
+      }),
+    );
+    h.run(T0 + 2000, { speed: 36 });
+    const out = extractPersisted(h.state);
+    expect(out.odometerKm).toBeCloseTo(1000.018, 6); // 1.8 s at 10 m/s
+    expect(out.learnedGearRatios).toEqual([110, 65, 45]);
+    expect(out.avgLPer100km).toBeCloseTo(6.5);
+    expect(out.maintenanceRecords).toEqual([{ itemId: 'oil', odometerKm: 900, at: T0 - DAY }]);
+    expect(out.learnedGearRatios).not.toBe(h.state.gear.learnedRatios);
+    expect(out.maintenanceRecords[0]).not.toBe(h.state.maintenance.records[0]);
+  });
+
+  it('round-trips through createInitialState', () => {
+    const h = new Harness(makeConfig(), persisted({ odometerKm: 42 }));
+    const again = createInitialState(h.config, extractPersisted(h.state), T0);
+    expect(extractPersisted(again)).toEqual(extractPersisted(h.state));
+  });
+});

@@ -4,10 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0a0c10" />
     <title>HUD Settings</title>
+    <link rel="icon" href="data:," />
+    <!-- Dark before the stylesheet loads, so a phone at night is not flashed white. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #0a0c10;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
+    <noscript>The HUD settings need JavaScript.</noscript>
     <script type="module" src="/src/main-settings.tsx"></script>
   </body>
 </html>

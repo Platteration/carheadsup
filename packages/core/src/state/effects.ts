@@ -1,15 +1,19 @@
 import type { HudConfig } from '../types/config.ts';
 import type { HudEffect } from '../types/effects.ts';
 import type { HudEvent } from '../types/events.ts';
+import type { MaintenanceItemStatus, MaintenanceRecord } from '../types/records.ts';
 import type { HudState } from '../types/state.ts';
-import { notImplemented } from '../todo.ts';
+import { callControls } from './selectors.ts';
 
 /**
  * Side effects implied by the transition `prev --event--> next`. Pure.
  *  - input 'primary' / 'secondary' while a call is ringing → phone/call-action accept / decline
+ *    ('secondary' also hangs up a dialing or active call, matching `CallFrame.canDecline`)
  *  - trip.completedCount increased → trip/completed with trip.lastCompleted
  *  - a maintenance item changed into 'due-soon' or 'overdue' → maintenance/due
  *  - odometer crossed a whole km, learned gear ratios changed, or a service was recorded → persist
+ *    (as does an explicit odometer/set)
+ * Effects are listed in that order; at most one of each type.
  */
 export function deriveEffects(
   prev: HudState,
@@ -17,7 +21,72 @@ export function deriveEffects(
   event: HudEvent,
   config: HudConfig,
 ): HudEffect[] {
-  return notImplemented(
-    `deriveEffects(${prev.now}, ${next.now}, ${event.type}, ${config.version})`,
+  const effects: HudEffect[] = [];
+
+  if (event.type === 'input' && prev.call !== null) {
+    const { canAccept, canDecline } = callControls(prev.call);
+    if (event.action === 'primary' && canAccept) {
+      effects.push({ type: 'phone/call-action', callId: prev.call.id, action: 'accept' });
+    } else if (event.action === 'secondary' && canDecline) {
+      effects.push({ type: 'phone/call-action', callId: prev.call.id, action: 'decline' });
+    }
+  }
+
+  const trip = next.trip.lastCompleted;
+  if (next.trip.completedCount > prev.trip.completedCount && trip !== null) {
+    effects.push({ type: 'trip/completed', trip });
+  }
+
+  const due = newlyDue(prev.maintenance.status, next.maintenance.status);
+  if (due.length > 0) effects.push({ type: 'maintenance/due', items: due });
+
+  if (shouldPersist(prev, next, event)) effects.push({ type: 'persist' });
+  return effects;
+}
+
+/** Items whose status became 'due-soon' or 'overdue' (including due-soon → overdue). */
+function newlyDue(
+  prev: readonly MaintenanceItemStatus[],
+  next: readonly MaintenanceItemStatus[],
+): MaintenanceItemStatus[] {
+  if (prev === next) return [];
+  const before = new Map(prev.map((item) => [item.itemId, item.status]));
+  return next.filter(
+    (item) =>
+      (item.status === 'due-soon' || item.status === 'overdue') &&
+      before.get(item.itemId) !== item.status,
+  );
+}
+
+function shouldPersist(prev: HudState, next: HudState, event: HudEvent): boolean {
+  if (event.type === 'odometer/set' && next.odometer !== prev.odometer) return true;
+  if (crossedWholeKm(prev.odometer.km, next.odometer.km)) return true;
+  if (!sameNumbers(prev.gear.learnedRatios, next.gear.learnedRatios)) return true;
+  return !sameRecords(prev.maintenance.records, next.maintenance.records);
+}
+
+/** The odometer became known or moved up past a whole kilometre. */
+function crossedWholeKm(prev: number | null, next: number | null): boolean {
+  if (next === null || !Number.isFinite(next)) return false;
+  if (prev === null || !Number.isFinite(prev)) return true;
+  return Math.floor(next) > Math.floor(prev);
+}
+
+function sameNumbers(a: readonly number[] | null, b: readonly number[] | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a.length !== b.length) return false;
+  return a.every((v, i) => v === b[i]);
+}
+
+function sameRecords(a: readonly MaintenanceRecord[], b: readonly MaintenanceRecord[]): boolean {
+  if (a === b) return true;
+  return (
+    a.length === b.length &&
+    a.every((r, i) => {
+      const s = b[i];
+      return (
+        s !== undefined && r.itemId === s.itemId && r.odometerKm === s.odometerKm && r.at === s.at
+      );
+    })
   );
 }

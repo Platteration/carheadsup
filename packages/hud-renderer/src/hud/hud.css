@@ -1,0 +1,675 @@
+/*
+ * Projected HUD. Everything is light on pure black (black is transparent on the windshield),
+ * bold, thick-stroked, and sized in `--u`: 1 % of the image height, or 0.6 % of its width on
+ * screens narrower than 5:3, so one design fits 800×480 … 1920×720. Widgets additionally clamp
+ * to their zone with container units (cqh/cqw) so custom layouts never overflow.
+ */
+@import './widgets/widgets.css';
+@import './diagnostics/diagnostics.css';
+
+@property --u {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 4.8px;
+}
+
+.hud {
+  --c-primary: #f2f6ff;
+  --c-secondary: #c3c9d5;
+  --c-dim: #8b919d;
+  --c-faint: #3f444e;
+  --c-accent: #38d2ff;
+  --c-go: #3fe07c;
+  --c-caution: #ffb300;
+  --c-critical: #ff3b30;
+  --font-sans: 'B612', system-ui, sans-serif;
+  --font-mono: 'B612 Mono', ui-monospace, monospace;
+
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  color: var(--c-primary);
+  font-family: var(--font-sans);
+  font-weight: 700;
+  line-height: 1.15;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Night: dimmer and warmer, easier on dark-adapted eyes. */
+.hud--night {
+  --c-primary: #f1d8b8;
+  --c-secondary: #bba78e;
+  --c-dim: #857563;
+  --c-faint: #3b3229;
+  --c-accent: #40b5c6;
+  --c-go: #5bc477;
+  --c-caution: #e99d1d;
+  --c-critical: #ea4631;
+}
+
+.hud *,
+.hud *::before,
+.hud *::after {
+  box-sizing: border-box;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Stage & content */
+
+.hud-stage {
+  position: absolute;
+  inset: 0;
+  container-type: size;
+  overflow: hidden;
+}
+
+.hud-stage--projected {
+  inset: auto;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+
+.hud-content {
+  --u: min(1cqh, 0.6cqw);
+  position: absolute;
+  inset: 0;
+  font-size: calc(var(--u) * 4);
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* 3×3 zone grid */
+
+.hud-grid {
+  position: absolute;
+  top: calc(var(--u) * 5);
+  bottom: calc(var(--u) * 3.5);
+  left: 0;
+  right: 0;
+  width: calc(100% - var(--u) * 10);
+  max-width: calc(var(--u) * 210);
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 30fr) minmax(0, 37fr) minmax(0, 21fr);
+  grid-template-areas:
+    'top-left top top-right'
+    'left center right'
+    'bottom-left bottom bottom-right';
+  column-gap: calc(var(--u) * 3);
+  row-gap: calc(var(--u) * 1.5);
+}
+
+.hud-zone--top-left {
+  grid-area: top-left;
+}
+.hud-zone--top {
+  grid-area: top;
+}
+.hud-zone--top-right {
+  grid-area: top-right;
+}
+.hud-zone--left {
+  grid-area: left;
+}
+.hud-zone--center {
+  grid-area: center;
+}
+.hud-zone--right {
+  grid-area: right;
+}
+.hud-zone--bottom-left {
+  grid-area: bottom-left;
+}
+.hud-zone--bottom {
+  grid-area: bottom;
+}
+.hud-zone--bottom-right {
+  grid-area: bottom-right;
+}
+
+/*
+ * A zone stacks its items in priority order. Items that do not fit wrap into a second flex
+ * column, which starts beyond the zone's right edge and is clipped — so a low-priority widget
+ * disappears whole instead of being cut in half.
+ */
+.hud-zone {
+  container-type: size;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  row-gap: calc(var(--u) * 1.6);
+  column-gap: calc(var(--u) * 4);
+  overflow: hidden;
+}
+
+.hud-zone > * {
+  flex: none;
+  width: 100%;
+  min-width: 0;
+}
+
+.hud-row--top {
+  justify-content: flex-start;
+}
+.hud-row--middle {
+  justify-content: center;
+}
+.hud-row--bottom {
+  justify-content: flex-end;
+}
+
+.hud-col--start {
+  --justify: flex-start;
+  text-align: left;
+}
+.hud-col--center {
+  --justify: center;
+  text-align: center;
+}
+.hud-col--end {
+  --justify: flex-end;
+  text-align: right;
+}
+
+/* Beside the speed, side widgets hug the centre so gear · speed · limit read as one glance. */
+.hud-row--middle.hud-col--start {
+  --justify: flex-end;
+  text-align: right;
+}
+.hud-row--middle.hud-col--end {
+  --justify: flex-start;
+  text-align: left;
+}
+
+.hud-slot {
+  display: flex;
+  justify-content: var(--justify);
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Shared atoms */
+
+.hud-num {
+  /* B612's digits are already tabular (0.65 em); the Mono cut is kept for pure-digit readouts,
+     since its wide colon and point would look gappy in "16:05" or "6.8". */
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-unit {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: calc(var(--u) * 2.8);
+  color: var(--c-secondary);
+  margin-left: 0.3em;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.hud-label {
+  font-size: calc(var(--u) * 2.5);
+  color: var(--c-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+
+.hud-glyph {
+  display: block;
+  flex: none;
+  overflow: visible;
+  stroke-width: var(--glyph-stroke, 2.75);
+}
+
+.hud-maneuver,
+.hud-lane-icon,
+.hud-sign {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+
+.hud-meter {
+  position: relative;
+  height: calc(var(--u) * 1.5);
+  border: calc(var(--u) * 0.4) solid var(--c-faint);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.hud-meter__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  background: currentColor;
+}
+
+/* Tones shared by widgets, alerts, trouble codes, gauges. */
+.hud-tone--neutral {
+  color: var(--c-primary);
+}
+.hud-tone--info {
+  color: var(--c-primary);
+}
+.hud-tone--caution {
+  color: var(--c-caution);
+}
+.hud-tone--warning,
+.hud-tone--critical {
+  color: var(--c-critical);
+}
+.hud-tone--unknown {
+  color: var(--c-dim);
+}
+.hud-tone--caution .hud-unit,
+.hud-tone--warning .hud-unit,
+.hud-tone--critical .hud-unit {
+  color: inherit;
+  opacity: 0.8;
+}
+
+/* Blinking: 1 Hz for critical alerts, 2.5 Hz for collision / shift flash (both under 3 Hz). */
+@keyframes hud-blink {
+  50% {
+    opacity: 0.22;
+  }
+}
+
+.hud-flash {
+  animation: hud-blink 1s step-end infinite;
+}
+
+.hud-flash-fast {
+  animation: hud-blink 0.4s step-end infinite;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Alerts, toast, call */
+
+.hud-alert {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1.6);
+  padding: calc(var(--u) * 1) calc(var(--u) * 1.8);
+  border: calc(var(--u) * 0.6) solid currentColor;
+  border-radius: calc(var(--u) * 1.6);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  text-align: left;
+}
+
+.hud-alert__icon {
+  width: calc(var(--u) * 6);
+  height: calc(var(--u) * 6);
+}
+
+.hud-alert__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.hud-alert__title {
+  font-size: calc(var(--u) * 4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-alert__detail {
+  margin-top: calc(var(--u) * 0.4);
+  font-size: calc(var(--u) * 2.8);
+  line-height: 1.15;
+  color: var(--c-primary);
+  /* Decoded fault descriptions may take two lines; never more. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.hud-toast {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1.6);
+  padding: calc(var(--u) * 1) calc(var(--u) * 1.8);
+  border: calc(var(--u) * 0.45) solid var(--c-faint);
+  border-radius: calc(var(--u) * 1.6);
+  text-align: left;
+}
+
+.hud-toast__icon {
+  width: calc(var(--u) * 5);
+  height: calc(var(--u) * 5);
+  color: var(--c-accent);
+}
+
+.hud-toast--info .hud-toast__icon {
+  color: var(--c-primary);
+}
+
+.hud-toast__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.hud-toast__title {
+  font-size: calc(var(--u) * 3.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-toast__subtitle {
+  font-size: calc(var(--u) * 2.8);
+  color: var(--c-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-call {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--u) * 0.4);
+  padding: calc(var(--u) * 0.8) calc(var(--u) * 2);
+  border: calc(var(--u) * 0.5) solid var(--c-faint);
+  border-radius: calc(var(--u) * 1.8);
+  text-align: center;
+}
+
+.hud-call--ringing {
+  border-color: var(--c-go);
+}
+
+.hud-call__head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--u) * 1.2);
+  max-width: 100%;
+  font-size: calc(var(--u) * 2.5);
+  color: var(--c-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.hud-call__icon {
+  width: calc(var(--u) * 3.4);
+  height: calc(var(--u) * 3.4);
+  color: var(--c-go);
+}
+
+.hud-call__timer {
+  font-size: calc(var(--u) * 3);
+  color: var(--c-primary);
+  letter-spacing: 0;
+}
+
+.hud-call__name {
+  max-width: 100%;
+  font-size: calc(var(--u) * 4.8);
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-call__number {
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: calc(var(--u) * 2.8);
+  color: var(--c-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-call__actions {
+  display: flex;
+  justify-content: center;
+  gap: calc(var(--u) * 5);
+  font-size: calc(var(--u) * 2.9);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.hud-call__action {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--u) * 0.8);
+}
+
+.hud-call__action--decline {
+  color: var(--c-critical);
+}
+
+.hud-call__action--accept {
+  color: var(--c-go);
+}
+
+.hud-call__hint {
+  width: calc(var(--u) * 3.6);
+  height: calc(var(--u) * 3.6);
+  --glyph-stroke: 3.2;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Shift light */
+
+.hud-shift {
+  position: absolute;
+  top: calc(var(--u) * 0.9);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(70%, calc(var(--u) * 150));
+  height: calc(var(--u) * 2.6);
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: calc(var(--u) * 0.8);
+}
+
+.hud-shift__seg {
+  border-radius: calc(var(--u) * 0.6);
+  background: currentColor;
+  opacity: 0.13;
+}
+
+.hud-shift__seg--green {
+  color: var(--c-go);
+}
+.hud-shift__seg--amber {
+  color: var(--c-caution);
+}
+.hud-shift__seg--red {
+  color: var(--c-critical);
+}
+.hud-shift__seg--lit {
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* ADAS */
+
+.hud-blindspot {
+  position: absolute;
+  top: 18%;
+  bottom: 18%;
+  width: calc(var(--u) * 1.3);
+  border-radius: 999px;
+  background: var(--c-caution);
+  box-shadow: 0 0 calc(var(--u) * 2.5) calc(var(--u) * 0.5)
+    color-mix(in srgb, var(--c-caution) 55%, transparent);
+}
+
+.hud-blindspot--left {
+  left: calc(var(--u) * 1.2);
+}
+
+.hud-blindspot--right {
+  right: calc(var(--u) * 1.2);
+}
+
+.hud-collision {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--u) * 2);
+}
+
+.hud-collision__chevrons {
+  width: calc(var(--u) * 12);
+  height: calc(var(--u) * 8);
+}
+
+.hud-collision__text {
+  font-size: calc(var(--u) * 8.5);
+  line-height: 1;
+  letter-spacing: 0.14em;
+}
+
+.hud-collision-border {
+  position: absolute;
+  inset: calc(var(--u) * 0.6);
+  border: calc(var(--u) * 1.1) solid var(--c-critical);
+  border-radius: calc(var(--u) * 2.5);
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Status corner */
+
+.hud-status {
+  position: absolute;
+  top: calc(var(--u) * 1);
+  right: calc(var(--u) * 2);
+  height: calc(var(--u) * 2.8);
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 1);
+  color: var(--c-secondary);
+  opacity: 0.4;
+}
+
+.hud-status__icon {
+  width: calc(var(--u) * 2.8);
+  height: calc(var(--u) * 2.8);
+  --glyph-stroke: 3.2;
+}
+
+.hud-status__obd--disconnected,
+.hud-status__obd--error {
+  color: var(--c-caution);
+}
+
+.hud-status__obd--connecting,
+.hud-status__obd--initializing {
+  animation: hud-blink 2s step-end infinite;
+}
+
+.hud-status__phone--off {
+  color: var(--c-dim);
+}
+
+.hud-status__sim {
+  font-size: calc(var(--u) * 1.8);
+  line-height: 1.25;
+  letter-spacing: 0.08em;
+  padding: 0 calc(var(--u) * 0.5);
+  border: calc(var(--u) * 0.35) solid currentColor;
+  border-radius: calc(var(--u) * 0.5);
+}
+
+.hud-nosignal,
+.hud-blank-indicator {
+  position: absolute;
+  top: calc(var(--u) * 1.6);
+  right: calc(var(--u) * 2.4);
+  width: calc(var(--u) * 1.4);
+  height: calc(var(--u) * 1.4);
+  border-radius: 50%;
+}
+
+.hud-nosignal {
+  background: var(--c-critical);
+  opacity: 0.35;
+}
+
+.hud-blank-indicator {
+  border: calc(var(--u) * 0.4) solid var(--c-dim);
+  opacity: 0.5;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Alignment grid (projection calibration) */
+
+.hud-grid-pattern {
+  --u: min(1cqh, 0.6cqw);
+  position: absolute;
+  inset: 0;
+}
+
+.hud-grid-pattern__svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.hud-grid-pattern__lines {
+  stroke: var(--c-dim);
+  stroke-width: 3;
+}
+
+.hud-grid-pattern__frame {
+  stroke: var(--c-primary);
+  stroke-width: 4;
+}
+
+.hud-grid-pattern__cross {
+  stroke: var(--c-accent);
+  stroke-width: 5;
+}
+
+.hud-grid-pattern__corners {
+  stroke: var(--c-caution);
+  stroke-width: 8;
+}
+
+.hud-grid-pattern__label {
+  position: absolute;
+  font-size: calc(var(--u) * 4);
+  color: var(--c-caution);
+  letter-spacing: 0.1em;
+}
+
+.hud-grid-pattern__label--tl {
+  top: calc(var(--u) * 3);
+  left: calc(var(--u) * 3);
+}
+.hud-grid-pattern__label--tr {
+  top: calc(var(--u) * 3);
+  right: calc(var(--u) * 3);
+}
+.hud-grid-pattern__label--br {
+  bottom: calc(var(--u) * 3);
+  right: calc(var(--u) * 3);
+}
+.hud-grid-pattern__label--bl {
+  bottom: calc(var(--u) * 3);
+  left: calc(var(--u) * 3);
+}
