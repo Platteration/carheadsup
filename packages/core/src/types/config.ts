@@ -95,8 +95,14 @@ export interface ContextConfig {
   highwayDwellMs: number;
   /** Below this speed the vehicle counts as stationary. */
   stationaryKph: number;
-  /** Stationary with engine running for this long ⇒ 'parked' (engine off ⇒ 'parked' immediately). */
+  /** Complete standstill with the engine running for this long ⇒ 'parked'. */
   parkedAfterMs: number;
+  /**
+   * Standstill with the engine off for this long ⇒ 'parked'. Not immediate, so an automatic
+   * start-stop system does not bring up the parked dashboard at every red light. An ECU that
+   * stops answering altogether (ignition off) still parks immediately.
+   */
+  engineOffParkedAfterMs: number;
 }
 
 export type WidgetId =

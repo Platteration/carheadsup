@@ -14,6 +14,7 @@ const CONFIG: ContextConfig = {
   highwayDwellMs: 10_000,
   stationaryKph: 2,
   parkedAfterMs: 120_000,
+  engineOffParkedAfterMs: 30_000,
 };
 
 type Sample = Partial<Omit<ContextInput, 'at'>> & { at: number };
@@ -71,6 +72,7 @@ describe('createContextState', () => {
       highwayCandidateSince: null,
       stillSince: null,
       lastSpeedAt: null,
+      engineOffSince: null,
     });
   });
 });
@@ -102,14 +104,36 @@ describe('updateContext', () => {
   });
 
   describe('parked', () => {
-    it('parks immediately when the engine stops', () => {
-      const s = updateContext(
-        stoppedState(0),
-        input({ at: 2000, speedKph: 0, engineRunning: false }),
-        CONFIG,
-      );
-      expect(s.context).toBe('parked');
-      expect(s.since).toBe(2000);
+    it('parks once the engine has been off at a standstill for engineOffParkedAfterMs', () => {
+      const states = run(stoppedState(0), [
+        { at: 2000, speedKph: 0, engineRunning: false },
+        { at: 31_999, speedKph: 0, engineRunning: false },
+        { at: 32_000, speedKph: 0, engineRunning: false },
+      ]);
+      expect(contexts(states)).toEqual(['stopped', 'stopped', 'parked']);
+      expect(last(states).since).toBe(32_000);
+    });
+
+    it('does not park during an automatic start-stop at a red light', () => {
+      const states = run(cityState(0), [
+        { at: 1000, speedKph: 20 },
+        { at: 3000, speedKph: 0, engineRunning: false },
+        { at: 25_000, speedKph: 0, engineRunning: false },
+        { at: 26_000, speedKph: 0, engineRunning: true },
+        { at: 27_000, speedKph: 8 },
+        // A second stop restarts the engine-off timer from scratch.
+        { at: 40_000, speedKph: 0, engineRunning: false },
+        { at: 65_000, speedKph: 0, engineRunning: false },
+      ]);
+      expect(contexts(states)).toEqual([
+        'city',
+        'stopped',
+        'stopped',
+        'stopped',
+        'city',
+        'stopped',
+        'stopped',
+      ]);
     });
 
     it('parks immediately on engine off with unknown speed', () => {
@@ -153,11 +177,17 @@ describe('updateContext', () => {
     });
 
     it('stays parked when the engine starts until the vehicle actually moves', () => {
-      const parked = updateContext(
-        stoppedState(0),
-        input({ at: 2000, speedKph: 0, engineRunning: false }),
-        CONFIG,
+      const parked = last(
+        run(
+          stoppedState(0),
+          [
+            { at: 1000, speedKph: 0, engineRunning: false },
+            { at: 2000, speedKph: 0, engineRunning: false },
+          ],
+          { ...CONFIG, engineOffParkedAfterMs: 1000 },
+        ),
       );
+      expect(parked.context).toBe('parked');
       const states = run(parked, [
         { at: 3000, speedKph: 0 },
         { at: 4000, speedKph: 3 },

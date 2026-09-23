@@ -298,10 +298,17 @@ function ContextThresholds({ root }: { root: Scope<HudConfig> }) {
         <NumberField
           scope={context}
           k="parkedAfterMs"
-          label="Parked after stopping for"
+          label="Parked after standing still for"
           unit={SECONDS_FROM_MS}
           integer
-          hint="Switching the engine off counts as parked straight away."
+        />
+        <NumberField
+          scope={context}
+          k="engineOffParkedAfterMs"
+          label="Parked after engine off for"
+          unit={SECONDS_FROM_MS}
+          integer
+          hint="Delayed so automatic start-stop does not open the parked dashboard at red lights."
         />
       </FieldGrid>
     </details>

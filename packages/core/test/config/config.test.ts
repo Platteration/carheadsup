@@ -114,6 +114,7 @@ describe('DEFAULT_CONFIG', () => {
       highwayDwellMs: 10000,
       stationaryKph: 2,
       parkedAfterMs: 120000,
+      engineOffParkedAfterMs: 30000,
     });
     expect(c.display).toMatchObject({
       speedLimitSign: 'vienna',

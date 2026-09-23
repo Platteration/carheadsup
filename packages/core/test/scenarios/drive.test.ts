@@ -376,6 +376,9 @@ describe('scenario: a complete drive', () => {
     car.engine = 'off';
     car.voltage = 12.6;
     h.send({ type: 'nav/clear', at: h.now });
+    // Engine off at a standstill looks like start-stop at first: still 'stopped'.
+    expect(h.frame().context).toBe('stopped');
+    car.go(h.now + 31_000, 0);
     frame = h.frame();
     expect(frame.context).toBe('parked');
     expect(frame.diagnostics).toMatchObject({ page: 'overview', pageIndex: 0 });

@@ -23,6 +23,8 @@ export interface ContextState {
   stillSince: number | null;
   /** Timestamp of the last input with a known speed (drives the link-loss grace period). */
   lastSpeedAt: number | null;
+  /** When the engine was last seen stopping while stationary (start-stop vs switched off). */
+  engineOffSince: number | null;
 }
 
 /**
@@ -49,6 +51,7 @@ export function createContextState(now: number): ContextState {
     highwayCandidateSince: null,
     stillSince: null,
     lastSpeedAt: null,
+    engineOffSince: null,
   };
 }
 
@@ -71,9 +74,11 @@ function next(
 
 /**
  * Derive the driving context with hysteresis so the layout does not flicker:
- *  - parked:  engine off while not moving (immediately), stationary with the engine running for
- *             ≥ parkedAfterMs of complete standstill, or link down with no speed. Parked is sticky
- *             until the vehicle actually moves (starting the engine alone does not leave it).
+ *  - parked:  stationary with the engine off for ≥ engineOffParkedAfterMs (so automatic
+ *             start-stop does not flash the parked dashboard at red lights), stationary with the
+ *             engine running for ≥ parkedAfterMs of complete standstill, or no speed at all with
+ *             the engine off / link down (ignition off: immediately). Parked is sticky until the
+ *             vehicle actually moves (starting the engine alone does not leave it).
  *  - stopped: stationary (< stationaryKph, left again only at stationaryKph + hysteresis) but not
  *             yet parked.
  *  - highway: ≥ highwayEnterKph sustained for highwayDwellMs; left below highwayExitKph.
@@ -113,20 +118,22 @@ export function updateContext(
     const stationarySince = state.stationarySince ?? at;
     const stillSince =
       speed < Math.min(config.stationaryKph, STILL_KPH) ? (state.stillSince ?? at) : null;
+    const engineOffSince = input.engineRunning ? null : (state.engineOffSince ?? at);
     const parked =
-      !input.engineRunning ||
       state.context === 'parked' ||
+      (engineOffSince !== null && at - engineOffSince >= config.engineOffParkedAfterMs) ||
       (stillSince !== null && at - stillSince >= config.parkedAfterMs);
     return next(state, parked ? 'parked' : 'stopped', at, {
       stationarySince,
       stillSince,
       highwayCandidateSince: null,
       lastSpeedAt: at,
+      engineOffSince,
     });
   }
 
   // Moving.
-  const moving = { stationarySince: null, stillSince: null, lastSpeedAt: at };
+  const moving = { stationarySince: null, stillSince: null, lastSpeedAt: at, engineOffSince: null };
   if (state.context === 'highway') {
     return speed < config.highwayExitKph
       ? next(state, 'city', at, { ...moving, highwayCandidateSince: null })

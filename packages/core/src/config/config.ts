@@ -201,6 +201,7 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
       highwayDwellMs: 10_000,
       stationaryKph: 2,
       parkedAfterMs: 120_000,
+      engineOffParkedAfterMs: 30_000,
     },
     speedLimitSign: 'vienna',
     mediaToastMs: 5000,

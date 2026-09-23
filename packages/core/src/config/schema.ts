@@ -328,6 +328,7 @@ const contextSchema = withRules(
     highwayDwellMs: int(0, 600_000),
     stationaryKph: num(0.5, 20),
     parkedAfterMs: int(0, 86_400_000),
+    engineOffParkedAfterMs: int(0, 86_400_000),
   }),
   [
     {
