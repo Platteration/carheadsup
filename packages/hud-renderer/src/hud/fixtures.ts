@@ -3,6 +3,7 @@ import type {
   ClockWidget,
   DiagnosticGauge,
   DiagnosticsFrame,
+  DiagnosticsMaintenanceItem,
   DisplayDistance,
   DistanceUnitLabel,
   EtaWidget,
@@ -148,6 +149,27 @@ function gauge(
   decimals = 0,
 ): DiagnosticGauge {
   return { signal, label, value, unit, decimals, min: range[0], max: range[1], status };
+}
+
+/** A dashboard service item; `remainingKm` is negative when overdue by distance. */
+function service(
+  itemId: string,
+  label: string,
+  status: DiagnosticsMaintenanceItem['status'],
+  remainingKm: number | null,
+  remainingDays: number | null,
+): DiagnosticsMaintenanceItem {
+  return {
+    itemId,
+    label,
+    status,
+    remaining:
+      remainingKm === null
+        ? null
+        : { value: remainingKm, unit: 'km', text: `${Math.abs(remainingKm)} km` },
+    remainingDays,
+    dueAtEpochMs: remainingDays === null ? null : FIXTURE_TIME + remainingDays * DAY,
+  };
 }
 
 const VEHICLE: DiagnosticsFrame['vehicle'] = {
@@ -391,19 +413,7 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
         gauge('ambientTemp', 'Ambient', 17, '°C', [-40, 60]),
         gauge('odometer', 'Odometer', 55_790, 'km', [0, 999_999]),
       ],
-      maintenance: [
-        {
-          itemId: 'oil',
-          label: 'Oil & filter',
-          lastDoneAt: FIXTURE_TIME - 345 * DAY,
-          lastDoneKm: 48_210,
-          dueAtKm: 56_210,
-          dueAtEpochMs: FIXTURE_TIME + 20 * DAY,
-          remainingKm: 420,
-          remainingDays: 20,
-          status: 'due-soon',
-        },
-      ],
+      maintenance: [service('oil', 'Oil & filter', 'due-soon', 420, 20)],
     }),
   }),
 
@@ -449,7 +459,7 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
     }),
   }),
 
-  /** Parked: trip summary page (display-unit values come from the trip widget). */
+  /** Parked, engine off, trip not yet closed: the trip page matches the trip-summary widget. */
   'parked-trip': frame({
     context: 'parked',
     widgets: [clock(), TRIP_WIDGET],
@@ -458,14 +468,16 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
       pageIndex: 5,
       title: 'Trip',
       trip: {
-        startedAt: FIXTURE_TIME - 52 * MIN,
-        distanceKm: 42.7,
-        durationS: 3120,
+        completed: false,
+        distance: TRIP_WIDGET.distance,
+        durationS: TRIP_WIDGET.durationS,
         movingS: 2710,
-        fuelUsedL: 3.1,
-        avgLPer100km: 7.3,
-        cost: 5.58,
-        currency: 'EUR',
+        averageEconomy: TRIP_WIDGET.averageEconomy,
+        economyUnit: TRIP_WIDGET.economyUnit,
+        fuelUsed: TRIP_WIDGET.fuelUsed,
+        fuelUnit: TRIP_WIDGET.fuelUnit,
+        cost: TRIP_WIDGET.cost,
+        currency: TRIP_WIDGET.currency,
       },
     }),
   }),
@@ -479,72 +491,12 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
       pageIndex: 6,
       title: 'Maintenance',
       maintenance: [
-        {
-          itemId: 'brake-fluid',
-          label: 'Brake fluid',
-          lastDoneAt: FIXTURE_TIME - 742 * DAY,
-          lastDoneKm: null,
-          dueAtKm: null,
-          dueAtEpochMs: FIXTURE_TIME - 12 * DAY,
-          remainingKm: null,
-          remainingDays: -12,
-          status: 'overdue',
-        },
-        {
-          itemId: 'oil',
-          label: 'Oil & filter',
-          lastDoneAt: FIXTURE_TIME - 345 * DAY,
-          lastDoneKm: 48_210,
-          dueAtKm: 56_210,
-          dueAtEpochMs: FIXTURE_TIME + 20 * DAY,
-          remainingKm: 420,
-          remainingDays: 20,
-          status: 'due-soon',
-        },
-        {
-          itemId: 'tyre-rotation',
-          label: 'Tyre rotation',
-          lastDoneAt: FIXTURE_TIME - 90 * DAY,
-          lastDoneKm: 52_000,
-          dueAtKm: 62_000,
-          dueAtEpochMs: null,
-          remainingKm: 6210,
-          remainingDays: null,
-          status: 'ok',
-        },
-        {
-          itemId: 'air-filter',
-          label: 'Air filter',
-          lastDoneAt: FIXTURE_TIME - 320 * DAY,
-          lastDoneKm: 48_210,
-          dueAtKm: 68_210,
-          dueAtEpochMs: FIXTURE_TIME + 410 * DAY,
-          remainingKm: 12_420,
-          remainingDays: 410,
-          status: 'ok',
-        },
-        {
-          itemId: 'cabin-filter',
-          label: 'Cabin filter',
-          lastDoneAt: null,
-          lastDoneKm: null,
-          dueAtKm: null,
-          dueAtEpochMs: null,
-          remainingKm: null,
-          remainingDays: null,
-          status: 'unknown',
-        },
-        {
-          itemId: 'coolant',
-          label: 'Coolant',
-          lastDoneAt: null,
-          lastDoneKm: null,
-          dueAtKm: null,
-          dueAtEpochMs: null,
-          remainingKm: null,
-          remainingDays: null,
-          status: 'unknown',
-        },
+        service('brake-fluid', 'Brake fluid', 'overdue', null, -12),
+        service('oil', 'Oil & filter', 'due-soon', 420, 20),
+        service('tyre-rotation', 'Tyre rotation', 'ok', 6210, null),
+        service('air-filter', 'Air filter', 'ok', 12_420, 410),
+        service('cabin-filter', 'Cabin filter', 'unknown', null, null),
+        service('coolant', 'Coolant', 'unknown', null, null),
       ],
     }),
   }),
@@ -636,7 +588,7 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
     ],
   }),
 
-  /** New message: sender only — the phone reads it aloud. */
+  /** New message: sender and app only — the phone reads it aloud, and the toast says so. */
   'message-toast': frame({
     context: 'city',
     widgets: [
@@ -650,7 +602,7 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
     toast: {
       kind: 'message',
       title: 'Alex Chen',
-      subtitle: 'WhatsApp',
+      subtitle: 'WhatsApp · reading aloud',
       opacity: 1,
     },
   }),
@@ -703,6 +655,7 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
         type: 'speed-camera',
         distance: distance(800, 'm'),
         speedLimit: 120,
+        limitStyle: 'vienna',
         delayMinutes: null,
         label: 'Speed camera',
       },
@@ -721,6 +674,7 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
         type: 'traffic-jam',
         distance: distance(900, 'm'),
         speedLimit: null,
+        limitStyle: 'vienna',
         delayMinutes: 7,
         label: 'Traffic jam',
       },

@@ -1,16 +1,10 @@
 import '../common/fonts.ts';
 import './hud.css';
-import type {
-  DiagnosticsFrame,
-  HudFrame,
-  ProjectionConfig,
-  TripSummaryWidget,
-  Zone,
-} from '@carheadsup/core';
+import type { DiagnosticsFrame, HudFrame, ProjectionConfig, Zone } from '@carheadsup/core';
 import type { ComponentChildren, RefObject } from 'preact';
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { DiagnosticsView } from './diagnostics/Diagnostics.tsx';
-import { ZONES, groupByZone, signStyleOf, visibleAlerts, zonePosition } from './layout.ts';
+import { ZONES, groupByZone, visibleAlerts, zonePosition } from './layout.ts';
 import { AlertBanner } from './overlays/AlertBanner.tsx';
 import { AlignmentGrid } from './overlays/AlignmentGrid.tsx';
 import { BlindSpot, CollisionBorder, CollisionCue } from './overlays/Adas.tsx';
@@ -22,7 +16,6 @@ import { ProjectionStage } from './ProjectionStage.tsx';
 import type { StageSize } from './ProjectionStage.tsx';
 import { contentBrightness, cx } from './util.ts';
 import { Widget } from './widgets/index.tsx';
-import type { WidgetContext } from './widgets/index.tsx';
 
 export interface HudViewProps {
   /** The frame to draw; null draws nothing but the tiny "no signal" dot. */
@@ -103,7 +96,6 @@ function SafetyOverlays({ frame }: { frame: HudFrame }) {
 
 function DrivingContent({ frame }: { frame: HudFrame }) {
   const groups = groupByZone(frame.widgets);
-  const ctx: WidgetContext = { signStyle: signStyleOf(frame) };
   return (
     <div class="hud-content" data-mode="driving">
       {frame.shiftLight && <ShiftLight shift={frame.shiftLight} />}
@@ -127,7 +119,7 @@ function DrivingContent({ frame }: { frame: HudFrame }) {
           >
             {groups[zone].map((w, i) => (
               <div key={`${w.id}-${i}`} class="hud-slot">
-                <Widget w={w} ctx={ctx} />
+                <Widget w={w} />
               </div>
             ))}
           </ZoneBox>
@@ -158,8 +150,6 @@ function DiagnosticsContent({
   diagnostics: DiagnosticsFrame;
 }) {
   const alerts = visibleAlerts(frame);
-  const tripWidget =
-    frame.widgets.find((w): w is TripSummaryWidget => w.id === 'tripSummary') ?? null;
   const top =
     frame.collision !== 'none' || alerts.length > 0 ? <TopLead frame={frame} /> : undefined;
   const bottom =
@@ -173,7 +163,7 @@ function DiagnosticsContent({
     <div class="hud-content hud-content--diagnostics" data-mode="diagnostics">
       <StatusIcons status={frame.status} />
       <SafetyOverlays frame={frame} />
-      <DiagnosticsView d={diagnostics} tripWidget={tripWidget} top={top} bottom={bottom} />
+      <DiagnosticsView d={diagnostics} top={top} bottom={bottom} />
     </div>
   );
 }

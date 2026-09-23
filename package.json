@@ -14,12 +14,13 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc -p e2e/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test -c e2e/playwright.config.ts",
     "build": "npm run build --workspace @carheadsup/hud-renderer",
     "start": "node packages/hud-server/src/main.ts",
-    "sim": "node packages/hud-server/src/main.ts --sim",
+    "sim": "node packages/hud-server/src/tools/ensure-renderer.ts && node packages/hud-server/src/main.ts --sim",
     "dev": "npm run dev --workspace @carheadsup/hud-renderer",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

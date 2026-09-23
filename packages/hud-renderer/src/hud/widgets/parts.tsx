@@ -5,14 +5,6 @@ import { r2 } from '../icons/geometry.ts';
 import { clamp01, cx, pct } from '../util.ts';
 import type { Tone } from '../util.ts';
 
-/** Context the HUD passes to every widget (things a widget frame does not carry itself). */
-export interface WidgetContext {
-  /** Sign style for small inline limits (camera limits). */
-  signStyle: SpeedLimitSignStyle;
-}
-
-export const DEFAULT_WIDGET_CONTEXT: WidgetContext = { signStyle: 'vienna' };
-
 /** Root element shared by all widgets: stable class and data attributes for styling and tests. */
 export function WidgetRoot({
   id,

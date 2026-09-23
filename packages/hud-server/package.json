@@ -13,7 +13,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "start": "node src/main.ts",
-    "sim": "node src/main.ts --sim"
+    "sim": "node src/tools/ensure-renderer.ts && node src/main.ts --sim"
   },
   "dependencies": {
     "@carheadsup/core": "*",

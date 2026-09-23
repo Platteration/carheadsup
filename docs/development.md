@@ -1,0 +1,207 @@
+# Development
+
+Everything here runs on an ordinary Linux or macOS machine; no car, Pi or phone needed.
+
+- [Setup](#setup)
+- [Everyday workflow](#everyday-workflow)
+- [Tests](#tests)
+- [Screenshots](#screenshots)
+- [Conventions](#conventions)
+- [How to add a widget](#how-to-add-a-widget)
+- [How to add or fix a trouble code](#how-to-add-or-fix-a-trouble-code)
+- [How to add a navigation language](#how-to-add-a-navigation-language)
+
+## Setup
+
+- Node.js **22.18 or newer** (Node runs the TypeScript sources directly; there is no build step
+  for the server packages).
+- `npm install` in the repository root installs all four workspaces.
+- For the Android companion: JDK 17 or newer; the Android SDK only for building the app itself
+  (see [its README](../companion-android/README.md)).
+
+## Everyday workflow
+
+| Command | What it does |
+| --- | --- |
+| `npm run sim` | Builds the web pages if they are missing, then starts the server with the simulator on port 8080 (data in `~/.local/share/carheadsup/sim`). Extra flags go after `--`, e.g. `npm run sim -- --port 8090 --log-level debug`. |
+| `npm run dev` | Vite development server for the web pages with hot reload on <http://localhost:5173/> (`/`, `/settings`, `/dev`). It proxies `/api` and `/ws` to the HUD server at `HUD_SERVER` (default `http://localhost:8080`), so run `npm run sim` next to it. |
+| `npm run build` | Production build of the web pages into `packages/hud-renderer/dist` (what the server serves). `npm run sim` does not rebuild once `dist` exists: rebuild after changing the renderer, or use `npm run dev`. |
+| `npm start` | The server without the simulator (talks to a real adapter per `config.json`). |
+| `npm test` | All tests (vitest). |
+| `npm run typecheck` | `tsc` for every workspace. One package: `npx tsc -p packages/<pkg>/tsconfig.json`. |
+| `npm run format` / `npm run format:check` | Prettier. |
+
+### The developer console (`/dev`)
+
+- **Live** — the real HUD view fed by the server's frame socket, at a chosen panel size (800×480,
+  1024×600, 1280×480, 1920×720) and against a chosen backdrop ("behind the glass": black, night,
+  dusk, day). With `--sim`, the simulator panel drives the car: the scripted scenario or manual
+  throttle and brake, engine on/off, a held gear, injected trouble codes, forced coolant, voltage
+  and fuel level, light level and outside temperature, tyre pressures, phone events (navigation
+  start/stop, incoming and ended call, next track, message, speed camera, phone connect and
+  disconnect) and ADAS events (blind spots, collision levels). The input pad sends the seven
+  driver actions; the event log records what changed in the frames.
+- **Gallery** — every sample frame rendered by the real HUD view; works without a server
+  (`/dev#gallery`). Click a thumbnail to enlarge it; arrow keys step through them.
+
+The same controls are available as the REST call `POST /api/sim`
+([protocol.md](protocol.md#simulator)), which is handy for scripting a scene.
+
+### Sample frames
+
+[`packages/hud-renderer/src/hud/fixtures.ts`](../packages/hud-renderer/src/hud/fixtures.ts)
+holds hand-made `HudFrame`s for every mode (`city-nav`, `highway-exit-lanes`, `incoming-call`,
+`check-engine`, `parked-trouble-codes`, `night-city`, `blanked` …). They feed the gallery, the
+renderer tests and the screenshots, and a contract test checks them against the core types. Any
+of them can be opened full screen without a server, e.g.
+`http://localhost:5173/?fixture=city-nav&preview=1` (`preview=1` ignores mirroring and keystone).
+
+### Replaying drives
+
+The core is pure, so a whole drive is a list of events. The `Harness` in
+[`packages/core/test/state/fixtures.ts`](../packages/core/test/state/fixtures.ts) wraps
+`createInitialState`, `reduce`, `deriveEffects` and `composeFrame`: feed it events with
+timestamps and inspect the state, the effects and the frames.
+[`test/scenarios/drive.test.ts`](../packages/core/test/scenarios/drive.test.ts) is the example
+to copy.
+
+## Tests
+
+```sh
+npm test                                   # everything
+npx vitest run packages/core               # one package
+npx vitest run packages/obd/test/e2e.test.ts
+npm run test:watch                         # watch mode
+```
+
+Tests live in `packages/<pkg>/test/**/*.test.ts(x)`. Files named `*.dom.test.tsx` render Preact
+into happy-dom. What covers what:
+
+- **core** — reducer, composer, alerts, contexts, brightness, sun position, fuel and gear
+  estimation, trips, maintenance, config parsing, protocol validation, the DTC database, and the
+  replayed drives in `test/scenarios`.
+- **obd** — the driver against scripted transports, the poller, the service's reconnect loop,
+  and end-to-end tests (`e2e.test.ts`) of the real driver and poller against the ELM327 emulator
+  and vehicle simulator.
+- **hud-server** — the REST API, auth, static files, both WebSockets, stores, sensors (with fake
+  I²C buses, fake `gpiomon` and real UDP sockets on port 0), the engine; `smoke.test.ts` runs
+  the complete server with the real simulation and sockets, and `main.test.ts` spawns the CLI.
+- **hud-renderer** — widgets, overlays, projection maths, the feed's staleness handling, the
+  settings app against an in-memory mock server, the developer console.
+- **companion-android** — `cd companion-android && ./gradlew :protocol:test` (JDK only). Its
+  `ContractSyncTest` reads the TypeScript contract and fails when message types, enum values, the
+  protocol version or the size limits drift: run it after changing anything in
+  `packages/core/src/types` or `protocol/validate.ts`.
+
+Tests use temporary directories and port 0, and leave no processes behind.
+
+**Browser end-to-end tests** live in [`e2e/`](../e2e) (Playwright, not part of `npm test`): the
+kiosk page, the settings app and the developer console against a real server running the
+simulator on a free port, with the renderer built into a temporary directory first.
+
+```sh
+npx playwright test -c e2e/playwright.config.ts
+```
+
+They need a Chromium binary — `PW_CHROMIUM`, or Playwright's own
+(`npx playwright install chromium`) — and skip themselves without one.
+
+The deployment kit has its own lint, which needs no root and changes nothing:
+`deploy/check.sh` runs `bash -n` (and `shellcheck` when installed) on the scripts,
+`systemd-analyze verify` on the units and `xmllint` on the Avahi file.
+
+## Screenshots
+
+The images in `docs/screenshots/` are generated by scripts (not tests) that start the renderer's
+Vite server and drive headless Chromium with Playwright. If Playwright's own browser is not
+installed, point `PW_CHROMIUM` at a Chromium binary.
+
+```sh
+node packages/hud-renderer/test/hud/capture-screenshots.ts                 # the README set
+node packages/hud-renderer/test/hud/capture-screenshots.ts city-nav roundabout
+node packages/hud-renderer/test/dev/capture-screenshot.ts                  # developer console
+node packages/hud-renderer/test/settings/capture-screenshot.ts             # settings app, phone size
+```
+
+The HUD script renders sample frames at 800×480 and 1280×480 and fails when a widget is clipped by
+its zone (a widget dropped whole for lack of room is only reported — that is the intended
+priority behaviour). The other two accept options (`--tab=live --mock`, `--section=projection`,
+`--full` …); see the comment at the top of each script.
+
+## Conventions
+
+[CLAUDE.md](../CLAUDE.md) is the rulebook. In short:
+
+- **TypeScript that Node can run directly**: only erasable syntax (no `enum`, `namespace` or
+  constructor parameter properties), `.ts` extensions in relative imports, `import type` for
+  types, strict mode with `noUncheckedIndexedAccess`, no `any`.
+- **`packages/core` is pure**: no clock, timers, randomness, I/O or `console`; time comes from
+  events. Same input, same output.
+- **Canonical units inside**, conversion only in `composeFrame`.
+- **Never show stale data as live**: read signals through `freshValue()` / the selectors.
+- **Driver distraction**: no message content, short text while moving, detail only when
+  stopped or parked, critical alerts not dismissible, light on black with no large bright areas.
+- The contract (`packages/core/src/types`) is shared by the server, the renderer and the
+  Android app; change it deliberately and in all three.
+
+## How to add a widget
+
+Say, an oil-temperature widget `oilTemp`.
+
+1. **Contract** — add `'oilTemp'` to `WidgetId` in `core/src/types/config.ts` and to
+   `WIDGET_IDS` in `core/src/config/schema.ts` (a compile-time check fails until both agree);
+   add an `OilTempWidget` interface to `core/src/types/frame.ts` and to the `WidgetFrame` union.
+2. **Composer** — write a builder in `core/src/compose/widgets.ts` and register it in
+   `BUILDERS`. Return `null` whenever the widget is irrelevant or its data is not fresh (use
+   `freshSignal`), convert to display units there, and round.
+3. **Layouts** — place it in the presets in `core/src/config/config.ts` if it belongs there
+   (the preset tests enforce, among other things, at most two widgets per zone and context), and
+   give it a label in `hud-renderer/src/settings/model/layout.ts` (`WIDGET_LABELS`) for the
+   layout editor.
+4. **Renderer** — a component in `hud-renderer/src/hud/widgets/`, registered in
+   `widgets/index.tsx` (the `switch` is exhaustive, so the build tells you), styles in
+   `widgets.css`. Size everything relative to the zone (container units), light on black.
+5. **Fixtures and tests** — add it to a sample frame in `hud/fixtures.ts`, then tests for the
+   builder (`core/test/compose/widgets.test.ts`) and the component
+   (`hud-renderer/test/hud/widgets.test.tsx`); look at the result in the gallery.
+
+## How to add or fix a trouble code
+
+The database is split by range: `core/src/obd/dtc-db-p0.ts` (P0xxx), `dtc-db-p2.ts` (P2xxx and
+P34xx–P3Fxx) and `dtc-db-network.ts` (U0xxx, U3xxx). An entry:
+
+```ts
+P0420: {
+  description: 'Catalyst System Efficiency Below Threshold (Bank 1)',
+  short: 'Catalytic converter efficiency',
+  severity: 'caution',
+},
+```
+
+- `description` follows the SAE J2012 generic wording. Add a code only when you can verify the
+  text against independent sources — a code that is missing still gets a sensible range
+  description, a wrong one misleads the driver.
+- `short` is what the driver reads: at most 32 characters, plain words, no code prefix, following
+  the style notes at the top of each module (bank markers, "signal low/high" …).
+- `severity` follows the rubric in `dtc-ranges.ts` (critical / warning / caution / info).
+- Manufacturer-specific codes (P1xxx, B1xxx …) do not belong here; they are described by range.
+
+The tests in `packages/core/test/obd/` check key format, label length and severity values, and
+pin the descriptions of well-known codes.
+
+## How to add a navigation language
+
+Google Maps' notification text is parsed on the phone, in the companion's `:protocol` module
+([`nav/NavLanguages.kt`](../companion-android/protocol/src/main/kotlin/dev/carheadsup/protocol/nav/NavLanguages.kt)).
+All language knowledge is data: one `NavLanguage` per language with the maneuver keywords
+(turn, keep, exit, roundabout …, each mapped to a `ManeuverKind`), the patterns that extract the
+street, the words for "then", distance units and ETA formats.
+
+1. Capture real notifications from Maps in that language (title, text, sub-text) for as many
+   maneuver kinds as you can.
+2. Add a `NavLanguage` (copy `GERMAN` as a template) and list it in `NavLanguages.ALL`.
+3. Add the captured examples as cases to `GoogleMapsNotificationParserTest` and run
+   `./gradlew :protocol:test`.
+
+Instructions the parser does not understand still yield the distance, the ETA and Maps' own
+arrow icon, so a partial language is already useful.

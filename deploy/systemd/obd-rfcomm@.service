@@ -1,0 +1,31 @@
+# Binds /dev/rfcomm0 to a paired Bluetooth (classic, SPP) OBD-II adapter; the instance is the
+# adapter's MAC address:
+#
+#   sudo systemctl enable --now obd-rfcomm@00:1D:A5:68:98:8B.service
+#
+# (`sudo deploy/install.sh --obd-mac 00:1D:A5:68:98:8B` does the same.) Pair and trust the
+# adapter with bluetoothctl first. The binding is passive: the Bluetooth link is opened when
+# carheadsup opens /dev/rfcomm0 (obd.serialPath) and opened again after it drops, so the adapter
+# may be unplugged or asleep when this unit starts. The device node belongs to the dialout group.
+#
+# Adapters that do not use SPP channel 1 (rare): override ExecStart in a drop-in
+# (`sudo systemctl edit obd-rfcomm@<MAC>`), e.g. `ExecStart=` then
+# `ExecStart=/usr/bin/rfcomm bind rfcomm0 %I 2`.
+
+[Unit]
+Description=Bluetooth OBD-II adapter %I on /dev/rfcomm0
+Documentation=file:///opt/carheadsup/docs/obd.md
+Requires=bluetooth.service
+After=bluetooth.service
+Before=carheadsup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Drop a stale binding left by an earlier run (fails harmlessly when there is none).
+ExecStartPre=-/usr/bin/rfcomm release rfcomm0
+ExecStart=/usr/bin/rfcomm bind rfcomm0 %I 1
+ExecStop=/usr/bin/rfcomm release rfcomm0
+
+[Install]
+WantedBy=multi-user.target

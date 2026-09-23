@@ -1,17 +1,13 @@
 import type { HazardWidget } from '@carheadsup/core';
 import { Glyph, HAZARD_GLYPHS } from '../icons/index.ts';
 import { cx, lookup, splitDistance } from '../util.ts';
-import { DEFAULT_WIDGET_CONTEXT, Num, SpeedSign, Unit, WidgetRoot } from './parts.tsx';
-import type { WidgetContext } from './parts.tsx';
+import { Num, SpeedSign, Unit, WidgetRoot } from './parts.tsx';
 
-/** Road hazard ahead: icon, distance, short label, and the camera limit or traffic delay. */
-export function Hazard({
-  w,
-  ctx = DEFAULT_WIDGET_CONTEXT,
-}: {
-  w: HazardWidget;
-  ctx?: WidgetContext;
-}) {
+/**
+ * Road hazard ahead: icon, distance, short label, and the camera limit (in the frame's sign
+ * style) or the traffic delay.
+ */
+export function Hazard({ w }: { w: HazardWidget }) {
   const distance = w.distance ? splitDistance(w.distance) : null;
   const glyph = lookup(HAZARD_GLYPHS, w.type, 'warning');
   const hasLimit = w.speedLimit !== null && Number.isFinite(w.speedLimit);
@@ -31,7 +27,7 @@ export function Hazard({
         </div>
         {hasLimit && (
           <SpeedSign
-            style={ctx.signStyle}
+            style={w.limitStyle}
             value={w.speedLimit}
             unlimited={false}
             class="hud-hazard__limit"

@@ -1,0 +1,15 @@
+# Environment for carheadsup.service. deploy/install.sh copies this to /etc/default/carheadsup
+# once and never overwrites it. Apply changes with `sudo systemctl restart carheadsup`.
+# Flags on the unit's ExecStart line (--config, --data-dir, --renderer-dir) take precedence.
+# Settings of the HUD itself belong in /etc/carheadsup/config.json (or the settings app).
+
+# debug | info | warn | error
+#CARHEADSUP_LOG_LEVEL=info
+
+# Backlight device directory, "auto" (first writable /sys/class/backlight device) or "off".
+#CARHEADSUP_BACKLIGHT=auto
+
+# Override server.port / server.host without touching the config file. If you change the port,
+# point the kiosk at it too (CARHEADSUP_KIOSK_URL, see carheadsup-kiosk.service).
+#CARHEADSUP_PORT=8080
+#CARHEADSUP_HOST=0.0.0.0

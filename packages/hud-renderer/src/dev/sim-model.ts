@@ -1,5 +1,6 @@
-import { isValidDtc, lookupDtc, normalizeDtc } from '@carheadsup/core';
+import { isValidDtc, normalizeDtc } from '@carheadsup/core';
 import type { InputAction, SimControl } from '@carheadsup/core';
+import type { DtcLookup } from './dtc-lookup.ts';
 
 /** Pure helpers for the dev console's simulator panel and preview. */
 
@@ -86,13 +87,16 @@ export function toggleDtc(current: readonly string[], code: string, on: boolean)
 export type DtcEntryCheck =
   { ok: true; code: string; label: string } | { ok: false; error: string };
 
-/** Validate a typed code for injection and describe it (e.g. "P0420 – Catalytic converter efficiency"). */
-export function checkDtcEntry(text: string): DtcEntryCheck {
+/**
+ * Validate a typed code for injection and describe it (e.g. "P0420 – Catalytic converter
+ * efficiency"); the label is the bare code while the description database is not loaded.
+ */
+export function checkDtcEntry(text: string, lookup: DtcLookup | null = null): DtcEntryCheck {
   const code = normalizeDtc(text);
   if (code === '') return { ok: false, error: 'Type a code such as P0301' };
   if (!isValidDtc(code))
     return { ok: false, error: 'Codes look like P0301, C1234, B0001 or U0100' };
-  return { ok: true, code, label: `${code} – ${lookupDtc(code).short}` };
+  return { ok: true, code, label: lookup ? `${code} – ${lookup(code).short}` : code };
 }
 
 // ---------------------------------------------------------------------------------------------

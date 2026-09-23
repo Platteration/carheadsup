@@ -2,6 +2,7 @@
  * Scripted demo drive for the simulator's 'scenario' mode, plus the speed-tracking "driver"
  * that turns each step's target speed into throttle and brake.
  */
+import { DEFAULT_CONFIG } from '@carheadsup/core';
 import { clamp } from './model.ts';
 
 export interface ScenarioStep {
@@ -17,9 +18,16 @@ export interface ScenarioStep {
   decelMps2?: number;
 }
 
+/** Seconds the demo shows the parked dashboard at the end of each loop (default HUD config). */
+export const DEMO_PARKED_DASHBOARD_S = 15;
+
 /**
  * The looping demo: start-up, a city stretch, a red light, an on-ramp, highway cruising,
- * the exit, arriving and parking with the engine off (~4.8 min per loop).
+ * the exit, arriving and parking with the engine off (~5.1 min per loop).
+ *
+ * The parked step outlasts the HUD's default `display.context.engineOffParkedAfterMs` (30 s,
+ * which keeps start-stop from bringing up the dashboard at red lights) by
+ * {@link DEMO_PARKED_DASHBOARD_S}, so every loop ends on the parked diagnostics dashboard.
  */
 export const DEMO_SCENARIO: readonly ScenarioStep[] = Object.freeze([
   { name: 'warm-up', durationS: 20, engineRunning: true, targetKph: () => 0 },
@@ -52,7 +60,13 @@ export const DEMO_SCENARIO: readonly ScenarioStep[] = Object.freeze([
     engineRunning: true,
     targetKph: (t: number) => (t < 18 ? 30 : 0),
   },
-  { name: 'parked', durationS: 25, engineRunning: false, targetKph: () => 0 },
+  {
+    name: 'parked',
+    durationS:
+      DEFAULT_CONFIG.display.context.engineOffParkedAfterMs / 1000 + DEMO_PARKED_DASHBOARD_S,
+    engineRunning: false,
+    targetKph: () => 0,
+  },
 ]);
 
 export interface DriverCommand {

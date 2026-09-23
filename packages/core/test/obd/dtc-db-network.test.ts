@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { DTC_DATABASE, type DtcDbEntry } from '../../src/obd/dtc-database.ts';
 import { BCU_CODES } from '../../src/obd/dtc-db-network.ts';
 import { isManufacturerSpecificDtc } from '../../src/obd/dtc-ranges.ts';
-import { DTC_SHORT_MAX_LENGTH, lookupDtc } from '../../src/obd/dtc.ts';
+import { DTC_SHORT_MAX_LENGTH } from '../../src/obd/dtc.ts';
+import { lookupDtc } from '../../src/obd/dtc-lookup.ts';
 import type { DtcSeverity } from '../../src/types/vehicle.ts';
 
 const SEVERITIES: ReadonlySet<DtcSeverity> = new Set(['info', 'caution', 'warning', 'critical']);

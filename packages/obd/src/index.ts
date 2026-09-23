@@ -79,7 +79,12 @@ export {
   type VehicleSimulatorOptions,
   type VehicleSnapshot,
 } from './sim/vehicle-sim.ts';
-export { DEMO_SCENARIO, SpeedController, type ScenarioStep } from './sim/scenario.ts';
+export {
+  DEMO_PARKED_DASHBOARD_S,
+  DEMO_SCENARIO,
+  SpeedController,
+  type ScenarioStep,
+} from './sim/scenario.ts';
 export { VEHICLE_MODEL, rpmPerKph } from './sim/model.ts';
 export { SimulationClock, type SimulationClockOptions } from './sim/clock.ts';
 export {

@@ -262,6 +262,13 @@
 
 /* Trip -------------------------------------------------------------------------------------- */
 
+.hud-diag-trip__state {
+  font-size: calc(var(--u) * 3);
+  color: var(--c-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
 .hud-diag-trip {
   flex: 1;
   min-height: 0;

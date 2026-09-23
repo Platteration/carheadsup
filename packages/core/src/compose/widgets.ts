@@ -36,8 +36,6 @@ import type { Hazard, HazardType, Maneuver, NavInfo } from '../types/nav.ts';
 import type { SignalId } from '../types/signals.ts';
 import type { HudState } from '../types/state.ts';
 import {
-  L_PER_UK_GAL,
-  L_PER_US_GAL,
   clamp,
   convertEconomy,
   displayLongDistance,
@@ -50,6 +48,7 @@ import {
   speedUnitLabel,
   temperatureUnitLabel,
 } from '../units.ts';
+import { displayTrip } from './records.ts';
 
 /** A maneuver closer than this is "imminent" (emphasised countdown). */
 export const NAV_IMMINENT_M = 200;
@@ -251,7 +250,10 @@ function navWidget(env: WidgetEnv, zone: Zone): NavWidget | null {
     distance: d === null ? null : formatNavDistance(d, env.config.units.system),
     street: info.street,
     then: info.thenManeuver === null ? null : glanceable(info.thenManeuver, env.moving),
-    iconPng: info.iconPng,
+    // The renderer draws every known maneuver itself; the phone's bitmap is only the fallback
+    // for 'unknown' ones. Leaving it out otherwise keeps up to 44 KiB of base64 out of every
+    // frame (the companion app sends the icon with each update, parsed maneuver or not).
+    iconPng: info.maneuver.type === 'unknown' ? info.iconPng : null,
     imminent: d !== null && d < NAV_IMMINENT_M,
     approach: d !== null && d <= NAV_APPROACH_M ? roundTo(1 - d / NAV_APPROACH_M, 2) : null,
   };
@@ -334,6 +336,7 @@ function hazardWidget({ state, config }: WidgetEnv, zone: Zone): HazardWidget | 
     distance: formatNavDistance(distanceM, system),
     speedLimit:
       limit !== null && Number.isFinite(limit) && limit > 0 ? displaySpeed(limit, system) : null,
+    limitStyle: config.display.speedLimitSign,
     delayMinutes:
       delay !== null && Number.isFinite(delay) && delay > 0 ? Math.ceil(delay / 60) : null,
     label: hazardLabel(hazard),
@@ -426,28 +429,7 @@ function mediaWidget({ state }: WidgetEnv, zone: Zone): MediaWidget | null {
 function tripSummaryWidget({ state, config }: WidgetEnv, zone: Zone): TripSummaryWidget | null {
   const trip = state.trip.current;
   if (trip === null) return null;
-  const { system, fuelEconomy } = config.units;
-  const imperial = system === 'imperial';
-  const distanceUnit = imperial ? 'mi' : 'km';
-  const distance = displayLongDistance(trip.distanceKm, system, 1);
-  const litresPerGallon = fuelEconomy === 'mpg-uk' ? L_PER_UK_GAL : L_PER_US_GAL;
-  const fuel = trip.fuelUsedL;
-  return {
-    id: 'tripSummary',
-    zone,
-    distance: {
-      value: distance,
-      unit: distanceUnit,
-      text: `${distance.toFixed(1)} ${distanceUnit}`,
-    },
-    durationS: trip.durationS,
-    averageEconomy: convertEconomy(trip.avgLPer100km, fuelEconomy),
-    economyUnit: fuelEconomy,
-    fuelUsed: fuel === null ? null : roundTo(imperial ? fuel / litresPerGallon : fuel, 2),
-    fuelUnit: imperial ? 'gal' : 'L',
-    cost: trip.cost,
-    currency: trip.currency,
-  };
+  return { id: 'tripSummary', zone, ...displayTrip(trip, config.units) };
 }
 
 const BUILDERS: { readonly [I in WidgetId]: Builder<I> } = {

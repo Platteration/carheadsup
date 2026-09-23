@@ -1,0 +1,466 @@
+# Configuration
+
+All settings live in one JSON file, `config.json` — `/etc/carheadsup/config.json` on an installed
+Pi, `<data dir>/config.json` otherwise. The contract is `HudConfig` in
+[`packages/core/src/types/config.ts`](../packages/core/src/types/config.ts); the defaults are
+`DEFAULT_CONFIG` in [`packages/core/src/config/config.ts`](../packages/core/src/config/config.ts);
+the allowed ranges are in [`schema.ts`](../packages/core/src/config/schema.ts).
+
+- [Changing settings](#changing-settings)
+- Options: [units](#units) · [vehicle](#vehicle) · [obd](#obd) ·
+  [display.projection](#displayprojection) · [display.brightness](#displaybrightness) ·
+  [display.layout](#displaylayout) · [display.context](#displaycontext) ·
+  [display (other)](#display-other) · [shiftLight](#shiftlight) · [alerts](#alerts) ·
+  [maintenance](#maintenance) · [trip](#trip) · [phone](#phone) · [sensors](#sensors) ·
+  [server](#server)
+- [Layouts](#layouts)
+- [Custom PIDs and TPMS](#custom-pids-and-tpms)
+- [Command line and environment](#command-line-and-environment)
+
+## Changing settings
+
+- **Settings app** (`/settings`, also opened by the companion app): every option below, with
+  validation as you type. Changes apply to the running HUD immediately.
+- **REST API**: `PATCH /api/config` with a partial config (deep-merged) or `PUT /api/config` with
+  a complete one; see [protocol.md](protocol.md#config).
+- **By hand**: stop the service, edit the file, start it again (the server rewrites the file when
+  the settings app saves).
+
+Validation is **lenient and per field**. A value that is missing takes its default; a value of
+the wrong type or out of range keeps its previous (or default) value and is reported, e.g.
+`display.brightness.minLevel: expected number <= 1` — in the server log when loading the file, in
+the API response (`422` with an `errors` list) when saving. Unknown keys are ignored. A file that
+had to be corrected on load is saved in normalised form, with your original kept as
+`config.json.bak`. A broken config never stops the HUD from starting. Arrays (curves, layouts,
+custom PIDs, maintenance items) are validated and replaced as a whole.
+
+Cross-field rules are enforced too: `minLevel ≤ maxLevel`, `nightEnterLux < nightExitLux`,
+`highwayExitKph < highwayEnterKph`, `stationaryKph < highwayExitKph`, `startRpm < shiftRpm ≤
+flashRpm`, `coolantHighC < coolantCriticalC`, both low-voltage thresholds below `voltageHighV`,
+`idleRpm < redlineRpm`, the keystone corners forming a convex quadrilateral, distinct button GPIO
+lines. When a change breaks one, the changed field is reverted.
+
+Units inside the config are always canonical — km/h, km, m, °C, kPa, V, litres, milliseconds —
+whatever `units` says about the display.
+
+## Options
+
+### units
+
+How values are **displayed**; nothing else depends on them.
+
+| Option | Default | Values | Notes |
+| --- | --- | --- | --- |
+| `units.system` | `"metric"` | `metric`, `imperial` | Speed and distance: km/h, km, m — or mph, mi, ft. |
+| `units.fuelEconomy` | `"L/100km"` | `L/100km`, `km/L`, `mpg-us`, `mpg-uk` | Economy readouts and trip averages. |
+| `units.temperature` | `"C"` | `C`, `F` | |
+| `units.pressure` | `"kPa"` | `kPa`, `psi`, `bar` | Tyres and boost. |
+| `units.clock` | `"24h"` | `12h`, `24h` | Clock and ETA. |
+| `units.currency` | `"USD"` | ISO 4217 code | For trip cost, e.g. `EUR`, `GBP`. |
+
+### vehicle
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `vehicle.name` | `"My car"` | 1–60 chars | Shown to the phone and used as the mDNS name ("My car HUD"). |
+| `vehicle.fuelType` | `"gasoline"` | `gasoline`, `diesel`, `e85`, `lpg` | Selects the air–fuel ratio and fuel density for fuel estimation. **Diesel economy needs the fuel-rate PID `5E`**; without it there is no economy, range or trip fuel. |
+| `vehicle.tankCapacityL` | `50` | 1–500 | Usable tank volume; range = remaining litres ÷ recent average consumption. |
+| `vehicle.displacementL` | `2.0` | 0.05–20 | Only for the speed-density estimate (cars without MAF and fuel-rate PIDs). |
+| `vehicle.volumetricEfficiency` | `0.85` | 0.2–1 | Speed-density estimate: raise it if the estimated consumption reads low compared with the pump. |
+| `vehicle.transmission` | `"automatic"` | `manual`, `automatic`, `dct`, `cvt` | Tunes gear inference (torque-converter slip, neutral detection); `cvt` hides the gear. |
+| `vehicle.redlineRpm` | `6500` | 1000–25000 | Tachometer scale. |
+| `vehicle.idleRpm` | `750` | 200–3000 | Idle samples are ignored when learning gear ratios. |
+| `vehicle.gearRatiosRpmPerKph` | `null` | 1–12 decreasing numbers | `null` = learn automatically while driving (stored in `state.json`). Or enter engine rpm per km/h for each gear, 1st first: rpm ÷ speed while cruising steadily in that gear, or gear ratio × final drive × 1000 ÷ (60 × tyre circumference in m). |
+| `vehicle.fuelPricePerL` | `1.8` | ≥ 0 | Per litre, in `units.currency`; trip cost = fuel used × price. |
+| `vehicle.hasTpms` | `false` | | Enables the tyre-pressure widget and alert; needs [custom PIDs](#custom-pids-and-tpms). |
+
+Gear display: when the car reports its gear (PID `A4`) that is shown; otherwise the gear is
+inferred from the rpm/speed ratio against the configured or learned ratios, and marked as
+inferred. Learning needs a few minutes of steady driving in each gear.
+
+### obd
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `obd.transport` | `"serial"` | `serial`, `tcp`, `simulator` | Bluetooth (via rfcomm) and USB adapters are `serial`, Wi-Fi adapters `tcp`. `simulator` runs the built-in emulator (as `--sim` does). |
+| `obd.serialPath` | `"/dev/rfcomm0"` | | Serial device, e.g. `/dev/rfcomm0` (Bluetooth), `/dev/serial/by-id/usb-…` (USB). |
+| `obd.baudRate` | `38400` | 1200–4000000 | Ignored over Bluetooth; USB adapters: see their manual (38400 and 115200 are common). |
+| `obd.tcpHost` | `"192.168.0.10"` | host or IP | Wi-Fi adapters. |
+| `obd.tcpPort` | `35000` | 1–65535 | Wi-Fi adapters. |
+| `obd.protocol` | `"0"` | `"0"`–`"C"`, `"A1"`–`"AC"` | ELM327 `AT SP` value. `0` searches automatically (slow on the first connect); `6` = CAN 11-bit 500 kbit/s, the protocol of most cars since 2008. `A6` = try 6 first, then search. |
+| `obd.timeoutMs` | `1000` | 50–30000 | Per-command answer timeout. Raise it for slow clones. |
+| `obd.reconnectDelayMs` | `3000` | 100–600000 | Delay before reconnecting after a failure; doubles after each consecutive failure, never more than 30 s. |
+| `obd.dtcIntervalMs` | `30000` | 1000–3600000 | How often trouble codes are read (also right after connecting). |
+| `obd.customPids` | `[]` | up to 64 | Manufacturer-specific PIDs, see [below](#custom-pids-and-tpms). |
+
+Changing the transport, device, host, port, baud rate or protocol reconnects the adapter; the
+timeout, DTC interval and custom PIDs apply without reconnecting. More in [obd.md](obd.md).
+
+### display.projection
+
+Fitting the image to the windshield. Easiest in the settings app's *Projection* section with the
+calibration grid on.
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `display.projection.mirrorX` | `true` | | Mirror left–right: needed for a windshield reflection. |
+| `display.projection.mirrorY` | `false` | | Mirror top–bottom (some combiner or mirror arrangements). |
+| `display.projection.rotation` | `0` | `0`, `90`, `180`, `270` | Panel mounted sideways or upside down (e.g. portrait bar displays); the layout uses the rotated size. |
+| `display.projection.scale` | `1` | 0.5–1.5 | Size of the content. |
+| `display.projection.offsetX` | `0` | −0.5–0.5 | Horizontal shift, as a fraction of the image width. |
+| `display.projection.offsetY` | `0` | −0.5–0.5 | Vertical shift, as a fraction of the image height. |
+| `display.projection.corners` | identity | each 0–1 | Keystone: where the content's corners `tl`, `tr`, `br`, `bl` land, as `[x, y]` fractions of the screen. Identity is `tl [0,0]`, `tr [1,0]`, `br [1,1]`, `bl [0,1]`. Must stay a convex quadrilateral in that order. |
+| `display.projection.showGrid` | `false` | | Draw a calibration grid instead of the HUD. |
+
+Projection changes reach the HUD page at once (the `display` message), without reloading.
+
+### display.brightness
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `display.brightness.mode` | `"auto"` | `auto`, `manual` | |
+| `display.brightness.manualLevel` | `0.8` | 0–1 | Level in `manual` mode. |
+| `display.brightness.minLevel` | `0.08` | 0–1 | Floor of the automatic level. |
+| `display.brightness.maxLevel` | `1` | 0–1 | Ceiling of the automatic level. |
+| `display.brightness.curve` | see below | 1–32 points | `[lux, level]` pairs with strictly increasing lux; interpolated on log₁₀(lux). |
+| `display.brightness.riseTimeMs` | `3000` | 0–600000 | Smoothing time constant when getting brighter (slow: no flicker under trees). |
+| `display.brightness.fallTimeMs` | `400` | 0–600000 | Time constant when getting darker (fast: tunnels). |
+| `display.brightness.nightMode` | `"sensor"` | `sensor`, `sun`, `always`, `never` | Source of the night palette. `sensor` falls back to the sun when there is no light reading. |
+| `display.brightness.nightEnterLux` | `50` | 0–100000 | `sensor`: night below this… |
+| `display.brightness.nightExitLux` | `150` | 0–100000 | …and day again above this (hysteresis). |
+| `display.brightness.nightSunElevationDeg` | `-4` | −18–10 | `sun`: night while the sun is below this elevation (degrees). |
+
+The default curve runs from a dark road to direct sun on the windshield:
+
+```json
+"curve": [[1, 0.08], [10, 0.15], [100, 0.3], [1000, 0.55], [10000, 0.85], [100000, 1]]
+```
+
+In `auto` mode the level follows the light sensor through the curve, clamped to
+`minLevel`–`maxLevel` and smoothed. Without a fresh reading it follows the sun instead (day:
+80 % of `maxLevel`, night: twice `minLevel`), using the phone's last GPS position or
+`sensors.fallbackLocation`; with neither it keeps the last level. The driver's
+brightness-up/down input trims the result by ±0.1 per step (at most ±0.5), and the final value
+never drops below 0.05. It is applied as a CSS brightness on the page and, when the display has a
+Linux backlight device, to the backlight.
+
+### display.layout
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `display.layout.preset` | `"standard"` | `minimal`, `standard`, `sport` or `custom`. |
+| `display.layout.widgets` | the `standard` placements | Used only when `preset` is `custom`. |
+
+See [Layouts](#layouts).
+
+### display.context
+
+The thresholds of the [driving contexts](architecture.md#driving-contexts-and-adaptive-clutter).
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `display.context.highwayEnterKph` | `80` | 20–250 | Enter `highway` at or above this speed… |
+| `display.context.highwayDwellMs` | `10000` | 0–600000 | …held for this long. |
+| `display.context.highwayExitKph` | `65` | 10–250 | Leave `highway` below this. |
+| `display.context.stationaryKph` | `2` | 0.5–20 | Below this the car counts as stopped. |
+| `display.context.parkedAfterMs` | `120000` | 0–86400000 | Standing completely still with the engine running this long ⇒ `parked`. |
+| `display.context.engineOffParkedAfterMs` | `30000` | 0–86400000 | Standing still with the engine off this long ⇒ `parked`. Not immediate, so automatic start-stop does not open the dashboard at red lights. An ECU that stops answering (ignition off) parks at once. |
+
+### display (other)
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `display.speedLimitSign` | `"vienna"` | `vienna`, `mutcd` | Red-ring sign (most of the world) or the US/Canada rectangle. |
+| `display.mediaToastMs` | `5000` | 0–60000 | How long song and artist show after a track change (0 = never). |
+| `display.messageToastMs` | `6000` | 0–60000 | How long a message sender shows. |
+| `display.highwayNavRevealM` | `2000` | 0–50000 | On the highway, navigation appears only this close to the next maneuver. |
+| `display.laneRevealM` | `800` | 0–10000 | Lane guidance appears this close to the maneuver. |
+| `display.hazardRevealM` | `1000` | 0–50000 | Hazards appear this close. |
+| `display.maxAlerts` | `2` | 1–5 | Most alert banners on screen at once. |
+
+### shiftLight
+
+A bar along the top that fills from `startRpm` to `shiftRpm` and flashes from `flashRpm`.
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `shiftLight.enabled` | `false` | | |
+| `shiftLight.startRpm` | `4500` | 500–25000 | Bar starts filling. |
+| `shiftLight.shiftRpm` | `6000` | 500–25000 | Bar full: your shift point. |
+| `shiftLight.flashRpm` | `6300` | 500–25000 | Flashing. |
+
+### alerts
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `alerts.coolantHighC` | `110` | 60–150 | "ENGINE HOT" warning (and the coolant readout) from here. Normal operating temperature is about 85–105 °C. |
+| `alerts.coolantCriticalC` | `118` | 60–160 | "OVERHEATING – STOP", critical, cannot be dismissed. |
+| `alerts.coolantHysteresisC` | `3` | 0–20 | Clears this far below the threshold. |
+| `alerts.voltageLowRunningV` | `12.2` | 6–32 | Engine running at or below this for 60 s ⇒ "CHARGING FAULT" (a healthy alternator gives 13.5–14.7 V). |
+| `alerts.voltageLowOffV` | `11.9` | 6–32 | Engine off at or below this for 10 s ⇒ "BATTERY LOW". |
+| `alerts.voltageHighV` | `15.3` | 6–32 | At or above this for 10 s ⇒ "OVERVOLTAGE". |
+| `alerts.voltageHysteresisV` | `0.3` | 0–3 | |
+| `alerts.overspeedToleranceKph` | `3` | 0–50 | The speed turns red above limit + max(this, limit × pct/100)… |
+| `alerts.overspeedTolerancePct` | `5` | 0–50 | …e.g. 50 km/h → red above 53, 120 km/h → above 126. |
+| `alerts.fuelLowPct` | `12` | 0–100 | "FUEL LOW" at or below this tank level. |
+| `alerts.tpmsLowKpa` | `180` | 0–1000 | Tyre (gauge) pressure below which "TYRE PRESSURE LOW" warns. |
+| `alerts.iceRiskC` | `3` | −30–15 | Outside temperature at or below which "ICE RISK" shows for 10 s. |
+| `alerts.showDtcWhileDriving` | `false` | | Show informational and caution check-engine alerts while moving (warnings and worse always show). |
+
+Voltage comes from the adapter's own measurement at the OBD port (`AT RV`), or the ECU's
+supply-voltage PID `42` when the adapter has none.
+
+### maintenance
+
+`maintenance.items` is a list of service items (up to 50); each is due after a distance, a time,
+or whichever comes first. Defaults:
+
+| `id` | `label` | `intervalKm` | `intervalDays` | `warnBeforeKm` | `warnBeforeDays` |
+| --- | --- | --- | --- | --- | --- |
+| `oil` | Oil & filter | 8000 | 365 | 500 | 14 |
+| `tyre-rotation` | Tyre rotation | 10000 | — | 500 | 14 |
+| `air-filter` | Air filter | 20000 | 730 | 1000 | 30 |
+| `brake-fluid` | Brake fluid | — | 730 | 0 | 30 |
+| `cabin-filter` | Cabin filter | 15000 | 365 | 1000 | 30 |
+| `coolant` | Coolant | 100000 | 1825 | 2000 | 30 |
+
+| Field | Range | Notes |
+| --- | --- | --- |
+| `id` | letters, digits, `.`, `-`, `_`; unique | Service records are kept per id. |
+| `label` | 1–60 chars | Shown in alerts and on the dashboard. |
+| `intervalKm` | > 0 or `null` | At least one of `intervalKm` and `intervalDays` is required. |
+| `intervalDays` | 1–36500 or `null` | |
+| `warnBeforeKm` / `warnBeforeDays` | ≥ 0 | "SERVICE DUE" (info) this early; "SERVICE OVERDUE" (caution) once past. |
+
+An item stays *unknown* until its last service is recorded: in the settings app (*Maintenance* →
+mark done, with the odometer) or `POST /api/maintenance/<id>/done`. The odometer comes from the car
+(PID `A6`, on newer cars) or is carried forward by the HUD from the speed; set it once in the
+settings app (`POST /api/odometer`) if your car does not report it. Due items are also pushed to
+the phone.
+
+### trip
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `trip.endAfterEngineOffMs` | `300000` | 0–86400000 | A trip ends after the engine has been off (or the OBD link down) this long, so a fuel stop does not split it. |
+| `trip.minDistanceKm` | `0.2` | 0–100 | Shorter trips are discarded (moving the car in the driveway). |
+
+### phone
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `phone.pairingToken` | `""` | Shared secret the companion must present in its `hello`. Empty = any phone on the network may connect. Changing it disconnects a phone with the old one. |
+| `phone.showMessageSender` | `true` | Show who sent a message (the content is never shown). |
+| `phone.readMessagesAloud` | `true` | Ask the phone to read messages aloud (sent in `welcome`). |
+| `phone.showMedia` | `true` | Song and artist toast on track change. |
+
+### sensors
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `sensors.lightSensor` | `"none"` | `none`, `bh1750`, `veml7700`, `tsl2591` | I²C ambient light sensor. |
+| `sensors.gestureSensor` | `"none"` | `none`, `apds9960` | I²C gesture sensor. |
+| `sensors.i2cBus` | `1` | 0–255 | `/dev/i2c-<n>`; 1 is the 40-pin header. |
+| `sensors.lightSensorGain` | `1` | > 0 – 1000 | Multiplies the lux reading, to compensate for tinted glass or a cover. |
+| `sensors.buttons.primary` | `null` | GPIO 0–1023 | BCM number of the accept / OK button (hold = blank). |
+| `sensors.buttons.secondary` | `null` | | Decline / dismiss button. |
+| `sensors.buttons.next` | `null` | | Next dashboard page button. |
+| `sensors.fallbackLocation` | `null` | `{ "lat": …, "lon": … }` | Location for sun-based brightness and night mode when the phone has not sent one. |
+| `sensors.adasUdpPort` | `null` | 1–65535 | UDP port for an [ADAS module](protocol.md#adas-udp-feed); `null` = off. |
+
+Sensor changes apply without a restart; only the sources whose settings changed are restarted.
+Wiring: [hardware.md](hardware.md#sensors-buttons-and-wiring).
+
+### server
+
+| Option | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `server.port` | `8080` | 1–65535 | HTTP and WebSocket port. Takes effect after a restart; move the kiosk URL with it. |
+| `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. |
+| `server.apiToken` | `""` | ≤ 256 chars | Bearer token required from every client except the Pi itself. Empty = open to the car's network. |
+| `server.mdns` | `true` | | Advertise `_carheadsup._tcp` so the companion finds the HUD. |
+| `server.frameRate` | `15` | 1–60 | Frames per second pushed to the HUD page. Keep it at 2 or more: the page blanks after 1 s without a frame. Lower (10) on a Pi Zero 2 W. |
+
+## Layouts
+
+The projected image is divided into a 3×3 grid of zones: `top-left`, `top`, `top-right`, `left`,
+`center`, `right`, `bottom-left`, `bottom`, `bottom-right`. A layout lists widgets with their zone
+and the driving contexts in which they may appear. Within a zone, **earlier entries have
+priority** when space runs out.
+
+Widgets:
+
+| Widget | Shows | Appears only when |
+| --- | --- | --- |
+| `speed` | Speed; red when over the limit | speed data is fresh |
+| `speedLimit` | Limit sign (or "no limit") | the phone is connected and knows the limit |
+| `tachometer` | RPM bar | the engine runs |
+| `gear` | Gear (reported or inferred) | the gear is known (never for CVTs) |
+| `nav` | Turn arrow, distance, street, "then" | guidance is active (on the highway: within `highwayNavRevealM`) |
+| `lanes` | Lane arrows | the source sends lanes, within `laneRevealM` |
+| `eta` | Arrival time, remaining time and distance | guidance is active |
+| `hazard` | Nearest hazard and its distance | a hazard is within `hazardRevealM` |
+| `fuel` | Instant and average economy, range, level | any of them is known |
+| `coolant` | Coolant temperature | at or above `alerts.coolantHighC` |
+| `voltage` | Supply voltage | outside the alert thresholds |
+| `tpms` | Four tyre pressures | `vehicle.hasTpms`; while moving only when a tyre is low |
+| `clock` | Time | always |
+| `outsideTemp` | Outside temperature, ice-risk mark | the car reports it (PID `46`) |
+| `media` | Song and artist | something is playing on the connected phone |
+| `boost` | Manifold pressure relative to the atmosphere | the car reports MAP (PID `0B`) |
+| `tripSummary` | Trip distance, time, economy, fuel, cost | a trip is in progress |
+
+When parked, the HUD page shows the full-screen diagnostics dashboard instead of the widget grid,
+so the `parked` column below matters only for the frame data (e.g. in the developer console).
+Alerts, toasts, the call card, the shift light and the blind-spot / collision overlays are drawn
+outside the grid by every layout.
+
+### Presets
+
+**minimal** — calm highway driving: only what is needed to drive and navigate.
+
+| Widget | Zone | parked | stopped | city | highway |
+| --- | --- | :-: | :-: | :-: | :-: |
+| `speed` | center |  | ✓ | ✓ | ✓ |
+| `speedLimit` | right |  | ✓ | ✓ | ✓ |
+| `nav` | top-left | ✓ | ✓ | ✓ | ✓ |
+| `lanes` | top |  | ✓ | ✓ | ✓ |
+| `hazard` | top-right |  | ✓ | ✓ | ✓ |
+
+**standard** (default) — minimal plus vehicle health and low-speed comfort information.
+
+| Widget | Zone | parked | stopped | city | highway |
+| --- | --- | :-: | :-: | :-: | :-: |
+| `speed` | center |  | ✓ | ✓ | ✓ |
+| `speedLimit` | right |  | ✓ | ✓ | ✓ |
+| `nav` | top-left | ✓ | ✓ | ✓ | ✓ |
+| `lanes` | top |  | ✓ | ✓ | ✓ |
+| `hazard` | top-right |  | ✓ | ✓ | ✓ |
+| `coolant` | bottom-left | ✓ | ✓ | ✓ | ✓ |
+| `voltage` | bottom-left | ✓ | ✓ | ✓ | ✓ |
+| `tpms` | right | ✓ | ✓ | ✓ | ✓ |
+| `gear` | left |  | ✓ | ✓ |  |
+| `eta` | top-left |  | ✓ | ✓ |  |
+| `fuel` | left | ✓ | ✓ | ✓ |  |
+| `media` | bottom | ✓ | ✓ | ✓ |  |
+| `outsideTemp` | bottom-right | ✓ | ✓ | ✓ |  |
+| `clock` | bottom-right | ✓ | ✓ | ✓ |  |
+| `tripSummary` | bottom | ✓ | ✓ |  |  |
+
+**sport** — a prominent gear, a tachometer and boost, kept on the highway too; comfort
+information moves out of the way.
+
+| Widget | Zone | parked | stopped | city | highway |
+| --- | --- | :-: | :-: | :-: | :-: |
+| `speed` | center |  | ✓ | ✓ | ✓ |
+| `gear` | left |  | ✓ | ✓ | ✓ |
+| `tachometer` | bottom |  | ✓ | ✓ | ✓ |
+| `speedLimit` | right |  | ✓ | ✓ | ✓ |
+| `nav` | top-left | ✓ | ✓ | ✓ | ✓ |
+| `lanes` | top |  | ✓ | ✓ | ✓ |
+| `hazard` | top-right |  | ✓ | ✓ | ✓ |
+| `coolant` | bottom-left | ✓ | ✓ | ✓ | ✓ |
+| `voltage` | bottom-left | ✓ | ✓ | ✓ | ✓ |
+| `tpms` | right | ✓ | ✓ | ✓ | ✓ |
+| `boost` | bottom-right |  | ✓ | ✓ | ✓ |
+| `eta` | top-left |  | ✓ | ✓ |  |
+| `fuel` | top-right | ✓ | ✓ | ✓ |  |
+| `clock` | bottom-right | ✓ | ✓ | ✓ |  |
+| `outsideTemp` | top | ✓ | ✓ |  |  |
+| `media` | bottom | ✓ | ✓ |  |  |
+| `tripSummary` | center | ✓ |  |  |  |
+
+Pair `sport` with `shiftLight.enabled = true`.
+
+### Custom layouts
+
+Set `display.layout.preset` to `"custom"` and edit `display.layout.widgets` — in the settings
+app's *Layout* section (it starts from the standard preset and warns about crowded zones) or by
+hand:
+
+```json
+"layout": {
+  "preset": "custom",
+  "widgets": [
+    { "id": "speed", "zone": "center", "contexts": ["stopped", "city", "highway"] },
+    { "id": "speedLimit", "zone": "right", "contexts": ["stopped", "city", "highway"] },
+    { "id": "nav", "zone": "top-left", "contexts": ["parked", "stopped", "city", "highway"] },
+    { "id": "coolant", "zone": "bottom-left", "contexts": ["stopped", "city", "highway"] },
+    { "id": "clock", "zone": "bottom-right", "contexts": ["stopped", "city"] }
+  ]
+}
+```
+
+Each widget may appear once, each context once per widget; a widget left out is never shown.
+Keep at most two widgets per zone in any one context, and remember that most widgets only appear
+when relevant, so a busy-looking list is usually a calm screen.
+
+## Custom PIDs and TPMS
+
+`obd.customPids` polls manufacturer-specific values — most usefully tyre pressures, which
+standard OBD-II does not cover — and maps each onto one of the HUD's signals.
+
+| Field | Notes |
+| --- | --- |
+| `signal` | Target signal, one of the [signal ids](obd.md#supported-pids) (e.g. `tirePressureFL`). Unique within the list. A custom PID for a standard signal replaces the standard PID. |
+| `mode` | Service as 2 hex digits, e.g. `"22"` (read data by identifier) or `"21"`. |
+| `pid` | PID / data identifier as 2, 4 or 6 hex digits, e.g. `"2A0B"`. |
+| `header` | CAN request header (`AT SH`) of the module that holds the value, 3, 6 or 8 hex digits (e.g. `"750"`, `"7C6"`), or `null` for the default (broadcast) header. |
+| `formula` | Torque-style formula over the response bytes, giving the value in the signal's canonical unit (tyres: kPa gauge). |
+| `intervalMs` | Poll interval, 100–3600000. |
+
+**Formulas**: `A`, `B`, `C` … `Z` are the data bytes after the echoed service and PID (`A` is
+the first); `{A:7}` is bit 7 of `A` (0 = least significant); operators `+ - * / %` and
+parentheses; functions `min`, `max`, `abs`, `round`, `floor`, `ceil`. Examples: `((A*256)+B)/10`,
+`A-40`, `(A*256+B)*0.6895` (0.1 psi → kPa), `{B:0}`. Formulas are parsed by a small dedicated
+parser — never evaluated as JavaScript.
+
+**TPMS example** — the simulator's tyre-pressure module (request header `7C6`, one data
+identifier per wheel, 16-bit value in 0.1 kPa). `--sim` adds exactly these:
+
+```json
+"vehicle": { "hasTpms": true },
+"obd": {
+  "customPids": [
+    { "signal": "tirePressureFL", "mode": "22", "pid": "4001", "header": "7C6", "formula": "((A*256)+B)/10", "intervalMs": 10000 },
+    { "signal": "tirePressureFR", "mode": "22", "pid": "4002", "header": "7C6", "formula": "((A*256)+B)/10", "intervalMs": 10000 },
+    { "signal": "tirePressureRL", "mode": "22", "pid": "4003", "header": "7C6", "formula": "((A*256)+B)/10", "intervalMs": 10000 },
+    { "signal": "tirePressureRR", "mode": "22", "pid": "4004", "header": "7C6", "formula": "((A*256)+B)/10", "intervalMs": 10000 }
+  ]
+}
+```
+
+For a real car, take the module header, identifiers and scaling from a PID list for your exact
+model (Torque / Car Scanner PID packs and owner forums are the usual sources) and convert the
+result to kPa gauge in the formula: psi × 6.895, bar × 100, and subtract the atmospheric
+pressure (about 101 kPa) from absolute values. Tyre pressures change slowly, so poll every 10–30
+seconds to leave the adapter's time for the fast PIDs. A PID that keeps getting no answer is
+polled less and less often (back-off up to a minute).
+
+## Command line and environment
+
+`node packages/hud-server/src/main.ts [options]` (`npm start` runs it without options,
+`npm run sim` with `--sim`):
+
+| Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- |
+| `--sim` | `CARHEADSUP_SIM=1` | off | Run against the built-in vehicle, phone, light-sensor and ADAS simulator. Forces `obd.transport = simulator`, adds the simulated tyre-pressure PIDs and `hasTpms`, without saving that to the config. |
+| `--config <file>` | `CARHEADSUP_CONFIG` | `<data dir>/config.json` | Config file (created with defaults if missing). |
+| `--data-dir <dir>` | `CARHEADSUP_DATA_DIR` | `$XDG_DATA_HOME/carheadsup` or `~/.local/share/carheadsup`; with `--sim` its `sim` subdirectory | State, trips and (by default) the config. |
+| `--port <n>` | `CARHEADSUP_PORT` | `server.port` | Override the port (`0` = any free port). Not saved. |
+| `--host <addr>` | `CARHEADSUP_HOST` | `server.host` | Override the bind address. Not saved. |
+| `--renderer-dir <dir>` | `CARHEADSUP_RENDERER_DIR` | `packages/hud-renderer/dist` | Built web pages to serve. |
+| `--backlight <dir\|auto\|off>` | `CARHEADSUP_BACKLIGHT` | `auto` | Backlight device (e.g. `/sys/class/backlight/rpi_backlight`), `auto` = the first writable device, `off` = never touch it. |
+| `--log-level <level>` | `CARHEADSUP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
+| `-h`, `--help` | | | Usage. |
+| `-v`, `--version` | | | Version. |
+
+Flags win over environment variables, which win over the defaults. `CARHEADSUP_SIM` accepts
+`1/true/yes/on` and `0/false/no/off`. Exit status: 0 after a clean shutdown (`SIGINT`,
+`SIGTERM`), 1 on a fatal error, 2 on invalid arguments. On the Pi the systemd unit passes
+`--config`, `--data-dir` and `--renderer-dir`; set the others in `/etc/default/carheadsup`.
+
+The kiosk launcher reads `CARHEADSUP_KIOSK_URL`, `CARHEADSUP_KIOSK_WAIT_S`,
+`CARHEADSUP_KIOSK_SCALE` and `CARHEADSUP_KIOSK_FLAGS`
+([install guide](install-raspberry-pi.md#the-units)); the renderer's development server reads
+`HUD_SERVER` (where to proxy `/api` and `/ws`, default `http://localhost:8080`).

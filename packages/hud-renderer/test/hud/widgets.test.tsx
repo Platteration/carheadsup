@@ -8,8 +8,7 @@ import { tripStats } from '../../src/hud/widgets/TripSummary.tsx';
 import { SAMPLE_FRAMES } from '../../src/hud/fixtures.ts';
 import { textOf } from './render.ts';
 
-const render = (w: WidgetFrame, signStyle: 'vienna' | 'mutcd' = 'vienna') =>
-  renderToString(<Widget w={w} ctx={{ signStyle }} />);
+const render = (w: WidgetFrame) => renderToString(<Widget w={w} />);
 
 describe('speed', () => {
   it('shows the value and unit, and 0 when stopped', () => {
@@ -283,13 +282,20 @@ describe('hazard', () => {
     type: 'speed-camera' as const,
     distance: { value: 300, unit: 'm' as const, text: '300 m' },
     speedLimit: 50,
+    limitStyle: 'vienna' as const,
     delayMinutes: null,
     label: 'Speed camera',
   };
 
-  it('shows the enforced limit in the configured sign style', () => {
-    expect(render(camera, 'vienna')).toContain('hud-sign--vienna');
-    expect(render(camera, 'mutcd')).toContain('hud-sign--mutcd');
+  it('shows the enforced limit in the frame’s sign style', () => {
+    expect(render(camera)).toContain('hud-sign--vienna');
+    expect(render({ ...camera, limitStyle: 'mutcd' })).toContain('hud-sign--mutcd');
+    expect(textOf(render({ ...camera, limitStyle: 'mutcd' }))).toContain('50');
+  });
+
+  it('falls back to the ring sign for an unknown style from a newer server', () => {
+    const odd = { ...camera, limitStyle: 'hexagon' } as unknown as WidgetFrame;
+    expect(render(odd)).toContain('hud-sign--vienna');
   });
 
   it('shows the delay for traffic and nothing extra otherwise', () => {
@@ -306,15 +312,22 @@ describe('hazard', () => {
     expect(plain).toContain('data-glyph="accident"');
   });
 
-  it('picks the camera-limit style from the frame when rendered in the HUD', async () => {
+  it('uses its own limit style in the HUD, even without a speed-limit widget', async () => {
     const { renderHud } = await import('./render.ts');
+    const base = SAMPLE_FRAMES['imperial-us']!;
     const frame: HudFrame = {
-      ...SAMPLE_FRAMES['imperial-us']!,
-      widgets: [...SAMPLE_FRAMES['imperial-us']!.widgets, { ...camera, zone: 'top-right' }],
+      ...base,
+      widgets: [
+        ...base.widgets.filter((w) => w.id !== 'speedLimit'),
+        { ...camera, limitStyle: 'mutcd' },
+      ],
     };
     const html = renderHud(frame);
     const hazard = html.slice(html.indexOf('data-widget="hazard"'));
     expect(hazard).toContain('hud-sign--mutcd');
+    // …and it is not taken from the speed-limit widget either.
+    const mixed = renderHud({ ...base, widgets: [...base.widgets, camera] });
+    expect(mixed.slice(mixed.indexOf('data-widget="hazard"'))).toContain('hud-sign--vienna');
   });
 });
 

@@ -100,6 +100,9 @@ async function main(): Promise<void> {
     }
     await page.goto(`${base}dev.html#${tab}`);
     await page.waitForSelector(tab === 'gallery' ? '.gallery__grid .hud' : '.preview .hud');
+    // The simulator's trouble-code chips get their labels from a lazily loaded chunk.
+    if (mock && tab !== 'gallery')
+      await page.waitForSelector('.dchip__label', { state: 'attached' });
     await page.waitForTimeout(mock ? 2500 : 1500);
     await page.evaluate(() => document.fonts.ready);
     await mkdir(dirname(out), { recursive: true });

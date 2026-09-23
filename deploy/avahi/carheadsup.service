@@ -1,0 +1,21 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  Static mDNS / DNS-SD advertisement of the HUD for the companion app, for systems without
+  avahi-utils. Normally the HUD server advertises itself through avahi-publish-service (named
+  after the vehicle, following server.port); install this file only when that tool is missing,
+  otherwise the phone sees the HUD twice. deploy/install.sh handles this automatically and
+  replaces the port below with server.port from /etc/carheadsup/config.json.
+
+  Installed as /etc/avahi/services/carheadsup.service; avahi-daemon picks it up by itself.
+  TXT records: v = phone protocol version, path = the phone WebSocket endpoint.
+-->
+<service-group>
+  <name replace-wildcards="yes">%h HUD</name>
+  <service>
+    <type>_carheadsup._tcp</type>
+    <port>8080</port>
+    <txt-record>v=1</txt-record>
+    <txt-record>path=/ws/phone</txt-record>
+  </service>
+</service-group>

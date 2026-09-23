@@ -1,0 +1,45 @@
+# carheadsup kiosk: Chromium showing the HUD (http://localhost:8080/) full screen, inside the
+# cage Wayland compositor on tty1, with no desktop, cursor or screen blanking.
+#
+# Installed to /etc/systemd/system/ by deploy/install.sh together with the PAM stack
+# /etc/pam.d/carheadsup-kiosk. It runs as the unprivileged user carheadsup-kiosk in its own logind
+# session (which grants access to the display and input devices), replaces the login prompt on
+# tty1 and is restarted whenever cage or Chromium exits. cage has no idle timeout, so the panel
+# never blanks by itself; the only blanking is the HUD's own (blank button / B key).
+#
+# Change the page or Chromium flags with a drop-in (`sudo systemctl edit carheadsup-kiosk`):
+#   [Service]
+#   Environment=CARHEADSUP_KIOSK_URL=http://localhost:8081/
+#   Environment=CARHEADSUP_KIOSK_FLAGS=--force-device-scale-factor=1.25
+
+[Unit]
+Description=carheadsup HUD kiosk (Chromium in cage)
+Documentation=file:///opt/carheadsup/docs/install-raspberry-pi.md
+Wants=carheadsup.service dbus.socket systemd-logind.service
+After=carheadsup.service systemd-user-sessions.service plymouth-quit-wait.service dbus.socket systemd-logind.service getty@tty1.service
+# Take over tty1 from the login prompt.
+Conflicts=getty@tty1.service
+ConditionPathExists=/dev/tty0
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=carheadsup-kiosk
+PAMName=carheadsup-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+# cage needs to be the controlling process of the virtual terminal.
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+# -d: no client-side decorations; -s: allow Ctrl+Alt+Fn to switch to a text console for service.
+ExecStart=/usr/bin/cage -d -s -- /opt/carheadsup/deploy/kiosk.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

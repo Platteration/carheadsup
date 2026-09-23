@@ -18,6 +18,7 @@ const REQUIRED = [
   'parked-overview',
   'parked-trouble-codes',
   'parked-trip',
+  'parked-maintenance',
   'night-city',
   'blind-spot-left',
   'collision-warning',
@@ -94,9 +95,18 @@ const EXPECT: Record<string, { text?: string[]; markup?: string[]; absent?: stri
       'Pending',
     ],
   },
-  'parked-trip': { text: ['Trip', '42.7', '52 min', '45 min', '7.3', '3.1', '€5.58'] },
+  'parked-trip': {
+    text: ['Trip', 'In progress', '42.7', '52 min', '45 min', '7.3', '3.1', '€5.58'],
+  },
   'parked-maintenance': {
-    text: ['Brake fluid', 'Overdue', '12 days overdue', 'in 420 km · 20 days', 'No record'],
+    text: [
+      'Brake fluid',
+      'Overdue',
+      '12 days overdue',
+      'in 420 km · 20 days',
+      'in 6210 km',
+      'No record',
+    ],
   },
   'night-city': { text: ['48', '150', 'Baker Street'], markup: ['hud--night', 'brightness(0.35)'] },
   'blind-spot-left': {
@@ -120,7 +130,7 @@ const EXPECT: Record<string, { text?: string[]; markup?: string[]; absent?: stri
     markup: ['hud-tpms__value--low', 'hud-tpms__wheel--low'],
   },
   'message-toast': {
-    text: ['Alex Chen', 'WhatsApp'],
+    text: ['Alex Chen', 'WhatsApp · reading aloud'],
     markup: ['data-toast="message"'],
   },
   blanked: {

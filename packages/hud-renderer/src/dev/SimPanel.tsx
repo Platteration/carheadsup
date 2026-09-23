@@ -1,9 +1,9 @@
-import { lookupDtc } from '@carheadsup/core';
 import type { SimControl, SimDriveMode, SimStatus } from '@carheadsup/core';
 import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { describeError } from '../common/api.ts';
 import { cx } from '../hud/util.ts';
+import { useDtcLookup } from './dtc-lookup.ts';
 import {
   DEFAULT_TYRES_KPA,
   GEAR_CHOICES,
@@ -296,8 +296,9 @@ interface Override {
 
 function FaultControls({ sim, status }: { sim: SimHandle; status: SimStatus | null }) {
   const dtcs = status?.dtcs ?? [];
+  const lookup = useDtcLookup();
   const [entry, setEntry] = useState('');
-  const check = checkDtcEntry(entry);
+  const check = checkDtcEntry(entry, lookup);
   const [coolant, setCoolant] = useState<Override>({ on: false, value: 118 });
   const [voltage, setVoltage] = useState<Override>({ on: false, value: 11.6 });
   const [fuel, setFuel] = useState<Override>({ on: false, value: 8 });
@@ -371,11 +372,11 @@ function FaultControls({ sim, status }: { sim: SimHandle; status: SimStatus | nu
               type="button"
               class={cx('dchip', on && 'dchip--on')}
               aria-pressed={on}
-              title={lookupDtc(code).description}
+              title={lookup?.(code).description}
               onClick={() => void sim.send({ dtcs: toggleDtc(dtcs, code, !on) })}
             >
               <span class="dchip__code">{code}</span>
-              <span class="dchip__label">{lookupDtc(code).short}</span>
+              {lookup && <span class="dchip__label">{lookup(code).short}</span>}
             </button>
           );
         })}

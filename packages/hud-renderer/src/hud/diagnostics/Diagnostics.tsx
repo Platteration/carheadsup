@@ -2,11 +2,10 @@ import type {
   DiagnosticDtc,
   DiagnosticGauge,
   DiagnosticsFrame,
+  DiagnosticsMaintenanceItem,
+  DiagnosticsTrip,
   DtcKind,
-  MaintenanceItemStatus,
   MaintenanceStatusKind,
-  TripSummary as TripSummaryRecord,
-  TripSummaryWidget,
 } from '@carheadsup/core';
 import type { ComponentChildren } from 'preact';
 import { MISSING, formatCurrency, formatDurationS, formatNumber } from '../../common/format.ts';
@@ -125,83 +124,57 @@ interface TripTile {
   unit?: string;
 }
 
-/**
- * Tiles for the trip page. The trip summary widget (when the frame has one) is already in the
- * driver's units and wins; otherwise the dashboard's canonical `TripSummary` (km, L) is shown.
- */
-export function tripTiles(
-  trip: TripSummaryRecord | null,
-  widget: TripSummaryWidget | null,
-): TripTile[] {
-  if (widget) {
-    const distance = splitDistance(widget.distance);
-    const tiles: TripTile[] = [
-      { key: 'distance', label: 'Distance', value: distance.value, unit: distance.unit },
-      { key: 'duration', label: 'Driving time', value: formatDurationS(widget.durationS) },
-    ];
-    if (trip) tiles.push({ key: 'moving', label: 'Moving', value: formatDurationS(trip.movingS) });
-    tiles.push(
-      {
-        key: 'economy',
-        label: 'Average',
-        value: formatNumber(widget.averageEconomy, 1),
-        unit: widget.averageEconomy === null ? undefined : economyUnitLabel(widget.economyUnit),
-      },
-      {
-        key: 'fuel',
-        label: 'Fuel used',
-        value: formatNumber(widget.fuelUsed, 1),
-        unit: widget.fuelUsed === null ? undefined : widget.fuelUnit,
-      },
-      {
-        key: 'cost',
-        label: 'Cost',
-        value: widget.cost === null ? MISSING : formatCurrency(widget.cost, widget.currency),
-      },
-    );
-    return tiles;
-  }
+/** Tiles for the trip page; unknown economy, fuel or cost show as a dash. */
+export function tripTiles(trip: DiagnosticsTrip | null): TripTile[] {
   if (!trip) return [];
+  const distance = splitDistance(trip.distance);
+  const known = (v: number | null): v is number => v !== null && Number.isFinite(v);
   return [
-    { key: 'distance', label: 'Distance', value: formatNumber(trip.distanceKm, 1), unit: 'km' },
+    { key: 'distance', label: 'Distance', value: distance.value, unit: distance.unit },
     { key: 'duration', label: 'Driving time', value: formatDurationS(trip.durationS) },
     { key: 'moving', label: 'Moving', value: formatDurationS(trip.movingS) },
     {
       key: 'economy',
       label: 'Average',
-      value: formatNumber(trip.avgLPer100km, 1),
-      unit: trip.avgLPer100km === null ? undefined : economyUnitLabel('L/100km'),
+      value: formatNumber(trip.averageEconomy, 1),
+      unit: known(trip.averageEconomy) ? economyUnitLabel(trip.economyUnit) : undefined,
     },
     {
       key: 'fuel',
       label: 'Fuel used',
-      value: formatNumber(trip.fuelUsedL, 1),
-      unit: trip.fuelUsedL === null ? undefined : 'L',
+      value: formatNumber(trip.fuelUsed, 1),
+      unit: known(trip.fuelUsed) ? trip.fuelUnit : undefined,
     },
     {
       key: 'cost',
       label: 'Cost',
-      value: trip.cost === null ? MISSING : formatCurrency(trip.cost, trip.currency),
+      value: known(trip.cost) ? formatCurrency(trip.cost, trip.currency) : MISSING,
     },
   ];
 }
 
-function TripPage({ tiles }: { tiles: TripTile[] }) {
-  if (tiles.length === 0) return <Empty>No trip in progress</Empty>;
+function TripPage({ trip }: { trip: DiagnosticsTrip | null }) {
+  if (!trip) return <Empty>No trip in progress</Empty>;
+  const completed = trip.completed === true;
   return (
-    <div class="hud-diag-trip">
-      {tiles.map((t) => (
-        <div key={t.key} class={`hud-diag-trip__tile hud-diag-trip__tile--${t.key}`}>
-          <div class="hud-gauge__body">
-            <div class="hud-gauge__label">{t.label}</div>
-            <div class="hud-diag-trip__value">
-              <span class="hud-num">{t.value}</span>
-              {t.unit && <span class="hud-unit">{t.unit}</span>}
+    <>
+      <div class="hud-diag-trip__state" data-completed={String(completed)}>
+        {completed ? 'Last trip' : 'In progress'}
+      </div>
+      <div class="hud-diag-trip">
+        {tripTiles(trip).map((t) => (
+          <div key={t.key} class={`hud-diag-trip__tile hud-diag-trip__tile--${t.key}`}>
+            <div class="hud-gauge__body">
+              <div class="hud-gauge__label">{t.label}</div>
+              <div class="hud-diag-trip__value">
+                <span class="hud-num">{t.value}</span>
+                {t.unit && <span class="hud-unit">{t.unit}</span>}
+              </div>
             </div>
           </div>
-        </div>
-      ))}
-    </div>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -225,13 +198,16 @@ const MAINTENANCE_TONE: Record<MaintenanceStatusKind, Tone> = {
 /**
  * Remaining distance / time until a service, e.g. "in 1 240 km · 45 days", "12 days overdue",
  * or "in 420 km · 3 days overdue" when only one limit has passed. Null when nothing is known.
- * Distances are the canonical kilometres the dashboard frame carries.
+ * The distance arrives in the driver's units, negative when overdue.
  */
-export function maintenanceRemaining(item: MaintenanceItemStatus): string | null {
+export function maintenanceRemaining(item: DiagnosticsMaintenanceItem): string | null {
   const ahead: string[] = [];
   const overdue: string[] = [];
-  if (item.remainingKm !== null && Number.isFinite(item.remainingKm)) {
-    (item.remainingKm < 0 ? overdue : ahead).push(`${formatNumber(Math.abs(item.remainingKm))} km`);
+  const distance = item.remaining;
+  if (distance && Number.isFinite(distance.value)) {
+    (distance.value < 0 ? overdue : ahead).push(
+      `${formatNumber(Math.abs(distance.value))} ${distance.unit}`,
+    );
   }
   if (item.remainingDays !== null && Number.isFinite(item.remainingDays)) {
     const days = Math.abs(Math.round(item.remainingDays));
@@ -246,7 +222,7 @@ export function maintenanceRemaining(item: MaintenanceItemStatus): string | null
   return parts.length > 0 ? parts.join(' \u00b7 ') : null;
 }
 
-function MaintenanceList({ items }: { items: MaintenanceItemStatus[] }) {
+function MaintenanceList({ items }: { items: DiagnosticsMaintenanceItem[] }) {
   if (items.length === 0) return <Empty>No service items</Empty>;
   return (
     <div class="hud-maint">
@@ -332,18 +308,12 @@ function OverviewNotes({ d }: { d: DiagnosticsFrame }) {
   );
 }
 
-function PageBody({
-  d,
-  tripWidget,
-}: {
-  d: DiagnosticsFrame;
-  tripWidget: TripSummaryWidget | null;
-}) {
+function PageBody({ d }: { d: DiagnosticsFrame }) {
   switch (d.page) {
     case 'trouble-codes':
       return <DtcList dtcs={d.dtcs} milOn={d.milOn} />;
     case 'trip':
-      return <TripPage tiles={tripTiles(d.trip, tripWidget)} />;
+      return <TripPage trip={d.trip} />;
     case 'maintenance':
       return <MaintenanceList items={d.maintenance} />;
     case 'overview':
@@ -360,15 +330,13 @@ function PageBody({
 
 export interface DiagnosticsViewProps {
   d: DiagnosticsFrame;
-  /** Display-unit trip data, preferred over the canonical `d.trip` on the trip page. */
-  tripWidget?: TripSummaryWidget | null;
   /** Alert banners, call card or toast to show above/below the page. */
   top?: ComponentChildren;
   bottom?: ComponentChildren;
 }
 
 /** Full-screen parked dashboard: title and page dots, the page, and the vehicle line. */
-export function DiagnosticsView({ d, tripWidget = null, top, bottom }: DiagnosticsViewProps) {
+export function DiagnosticsView({ d, top, bottom }: DiagnosticsViewProps) {
   const vehicle = vehicleLine(d.vehicle);
   return (
     <div class={cx('hud-diag', `hud-diag--${d.page}`)} data-page={d.page}>
@@ -384,7 +352,7 @@ export function DiagnosticsView({ d, tripWidget = null, top, bottom }: Diagnosti
       </header>
       {top && <div class="hud-diag__top">{top}</div>}
       <main class="hud-diag__body">
-        <PageBody d={d} tripWidget={tripWidget} />
+        <PageBody d={d} />
       </main>
       {bottom && <div class="hud-diag__bottom">{bottom}</div>}
       {vehicle && <footer class="hud-diag__vehicle">{vehicle}</footer>}

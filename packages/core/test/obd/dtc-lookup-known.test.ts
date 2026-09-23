@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DtcDbEntry } from '../../src/obd/dtc-database.ts';
-import { lookupDtc } from '../../src/obd/dtc.ts';
+import { lookupDtc } from '../../src/obd/dtc-lookup.ts';
 
 // The real database is filled by other modules; pin a small, known one so the "known code"
 // path of lookupDtc can be tested deterministically. vi.mock is hoisted above the imports.

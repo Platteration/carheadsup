@@ -1,0 +1,360 @@
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { DEFAULT_CONFIG, EMPTY_PERSISTED_STATE, parseConfig, tripsToCsv } from '@carheadsup/core';
+import type { PersistedState, TripRecord } from '@carheadsup/core';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { SerialQueue, readJsonFile, writeFileAtomic } from '../../src/store/atomic.ts';
+import { ConfigStore, serializeConfig } from '../../src/store/config-store.ts';
+import { PersistStore, parsePersistedState } from '../../src/store/persist-store.ts';
+import { TripStore, isTripRecord } from '../../src/store/trip-store.ts';
+import { MemoryLogger, makeTempDir } from '../helpers.ts';
+
+let dir: string;
+let cleanup: () => Promise<void>;
+let logger: MemoryLogger;
+
+beforeEach(async () => {
+  ({ dir, cleanup } = await makeTempDir());
+  logger = new MemoryLogger();
+});
+
+afterEach(async () => {
+  await cleanup();
+});
+
+function trip(n: number, overrides: Partial<TripRecord> = {}): TripRecord {
+  const startedAt = 1_790_000_000_000 + n * 3_600_000;
+  return {
+    id: `trip-${n}`,
+    startedAt,
+    endedAt: startedAt + 1_200_000,
+    distanceKm: 10 + n,
+    durationS: 1200,
+    movingS: 1000,
+    idleS: 200,
+    fuelUsedL: 0.8,
+    avgLPer100km: 7.2,
+    maxSpeedKph: 90,
+    avgMovingSpeedKph: 36,
+    cost: 1.44,
+    currency: 'EUR',
+    startOdometerKm: 1000 + n * 20,
+    endOdometerKm: 1010 + n * 20,
+    ...overrides,
+  };
+}
+
+describe('writeFileAtomic', () => {
+  it('replaces the file, leaves no temp files and keeps the old one as backup', async () => {
+    const path = join(dir, 'x.json');
+    await writeFileAtomic(path, 'one');
+    await writeFileAtomic(path, 'two', { backupPath: `${path}.bak` });
+    expect(await readFile(path, 'utf8')).toBe('two');
+    expect(await readFile(`${path}.bak`, 'utf8')).toBe('one');
+    expect((await readdir(dir)).sort()).toEqual(['x.json', 'x.json.bak']);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes its temp file and keeps the target when the final rename fails', async () => {
+    const target = join(dir, 'target');
+    await mkdir(join(target, 'child'), { recursive: true });
+    await expect(writeFileAtomic(target, 'x')).rejects.toThrow();
+    expect(await readdir(dir)).toEqual(['target']);
+    expect(await readdir(target)).toEqual(['child']);
+  });
+
+  it('rejects when the directory does not exist', async () => {
+    await expect(writeFileAtomic(join(dir, 'missing-dir', 'f'), 'x')).rejects.toThrow();
+  });
+
+  it('serialises queued tasks and survives failures', async () => {
+    const queue = new SerialQueue();
+    const order: number[] = [];
+    const first = queue.run(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      order.push(1);
+    });
+    const failing = queue.run(async () => {
+      order.push(2);
+      throw new Error('nope');
+    });
+    const third = queue.run(async () => {
+      order.push(3);
+      return 'ok';
+    });
+    await first;
+    await expect(failing).rejects.toThrow('nope');
+    expect(await third).toBe('ok');
+    expect(order).toEqual([1, 2, 3]);
+  });
+
+  it('reports missing and invalid JSON files without throwing', async () => {
+    expect(await readJsonFile(join(dir, 'none.json'))).toEqual({ kind: 'missing' });
+    await writeFile(join(dir, 'bad.json'), '{ nope');
+    expect(await readJsonFile(join(dir, 'bad.json'))).toMatchObject({ kind: 'invalid' });
+  });
+});
+
+describe('ConfigStore', () => {
+  it('creates the file from the defaults when missing', async () => {
+    const store = new ConfigStore(join(dir, 'config.json'), logger);
+    const result = await store.load();
+    expect(result.created).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.config).toEqual(parseConfig(DEFAULT_CONFIG).config);
+    expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(serializeConfig(result.config));
+  });
+
+  it('loads a valid file without rewriting it', async () => {
+    const config = parseConfig(DEFAULT_CONFIG).config;
+    config.vehicle.name = 'Golf';
+    const path = join(dir, 'config.json');
+    await writeFile(path, serializeConfig(config));
+    const before = await stat(path);
+    const result = await new ConfigStore(path, logger).load();
+    expect(result.config.vehicle.name).toBe('Golf');
+    expect((await stat(path)).mtimeMs).toBe(before.mtimeMs);
+    expect(await readdir(dir)).toEqual(['config.json']);
+  });
+
+  it('repairs invalid fields, logs them and keeps the original as .bak', async () => {
+    const path = join(dir, 'config.json');
+    const original = JSON.stringify({
+      vehicle: { name: 'Mine', redlineRpm: 'fast' },
+      server: { frameRate: 500 },
+    });
+    await writeFile(path, original);
+    const result = await new ConfigStore(path, logger).load();
+    expect(result.config.vehicle.name).toBe('Mine');
+    expect(result.config.vehicle.redlineRpm).toBe(DEFAULT_CONFIG.vehicle.redlineRpm);
+    expect(result.config.server.frameRate).toBe(DEFAULT_CONFIG.server.frameRate);
+    expect(result.errors.join('\n')).toMatch(/vehicle\.redlineRpm/);
+    expect(result.errors.join('\n')).toMatch(/server\.frameRate/);
+    expect(logger.text('warn')).toMatch(/vehicle\.redlineRpm/);
+    expect(await readFile(`${path}.bak`, 'utf8')).toBe(original);
+    expect(await readFile(path, 'utf8')).toBe(serializeConfig(result.config));
+  });
+
+  it('falls back to defaults for unparseable JSON without losing the file', async () => {
+    const path = join(dir, 'config.json');
+    await writeFile(path, '{ "vehicle": ');
+    const result = await new ConfigStore(path, logger).load();
+    expect(result.config).toEqual(parseConfig(DEFAULT_CONFIG).config);
+    expect(result.errors[0]).toMatch(/not valid JSON/);
+    expect(logger.text('error')).toMatch(/not valid JSON/);
+    expect(await readFile(`${path}.bak`, 'utf8')).toBe('{ "vehicle": ');
+  });
+
+  it('saves atomically', async () => {
+    const path = join(dir, 'config.json');
+    const store = new ConfigStore(path, logger);
+    const { config } = await store.load();
+    config.units.system = 'imperial';
+    await store.save(config);
+    const reread = await new ConfigStore(path, logger).load();
+    expect(reread.config.units.system).toBe('imperial');
+  });
+
+  it('keeps running with defaults when the file cannot be created', async () => {
+    const store = new ConfigStore(join(dir, 'no', 'such', 'dir', 'config.json'), logger);
+    const result = await store.load();
+    expect(result.created).toBe(true);
+    expect(logger.text('warn')).toMatch(/cannot create/);
+  });
+});
+
+describe('PersistStore', () => {
+  const sample: PersistedState = {
+    odometerKm: 48213.4,
+    learnedGearRatios: [110, 60, 40],
+    avgLPer100km: 6.8,
+    maintenanceRecords: [{ itemId: 'oil', odometerKm: 45000, at: 1_780_000_000_000 }],
+  };
+
+  it('round-trips the state and keeps the previous file as backup', async () => {
+    const store = new PersistStore(join(dir, 'state.json'), logger);
+    expect(await store.load()).toEqual(EMPTY_PERSISTED_STATE);
+    await store.save(sample);
+    await store.save({ ...sample, odometerKm: 48300 });
+    expect(await store.load()).toEqual({ ...sample, odometerKm: 48300 });
+    const backup = JSON.parse(
+      await readFile(join(dir, 'state.json.bak'), 'utf8'),
+    ) as PersistedState;
+    expect(backup.odometerKm).toBe(48213.4);
+  });
+
+  it('recovers from a corrupt file via the backup and moves the corrupt one aside', async () => {
+    const store = new PersistStore(join(dir, 'state.json'), logger);
+    await store.save(sample);
+    await store.save({ ...sample, odometerKm: 48300 });
+    await writeFile(join(dir, 'state.json'), '{"odometerKm": 483'); // torn write
+    expect(await store.load()).toEqual(sample);
+    expect(await readFile(join(dir, 'state.json.corrupt'), 'utf8')).toBe('{"odometerKm": 483');
+    expect(logger.text('warn')).toMatch(/corrupt/);
+  });
+
+  it('uses the backup when the main file is missing (power cut between renames)', async () => {
+    await writeFile(join(dir, 'state.json.bak'), JSON.stringify(sample));
+    expect(await new PersistStore(join(dir, 'state.json'), logger).load()).toEqual(sample);
+  });
+
+  it('falls back to the empty state when both copies are unusable', async () => {
+    await writeFile(join(dir, 'state.json'), '[]');
+    await writeFile(join(dir, 'state.json.bak'), 'garbage');
+    const state = await new PersistStore(join(dir, 'state.json'), logger).load();
+    expect(state).toEqual(EMPTY_PERSISTED_STATE);
+    expect(logger.text('warn')).toMatch(/empty state/);
+  });
+
+  it('repairs invalid fields individually', () => {
+    expect(
+      parsePersistedState({
+        odometerKm: -5,
+        learnedGearRatios: [100, 'x'],
+        avgLPer100km: 7,
+        maintenanceRecords: [
+          { itemId: 'oil', odometerKm: 100, at: 5 },
+          { itemId: '', at: 5 },
+          { itemId: 'tyres', at: 'yesterday' },
+          { itemId: 'brakes', at: 7 },
+        ],
+      }),
+    ).toEqual({
+      state: {
+        odometerKm: null,
+        learnedGearRatios: null,
+        avgLPer100km: 7,
+        maintenanceRecords: [
+          { itemId: 'oil', odometerKm: 100, at: 5 },
+          { itemId: 'brakes', odometerKm: null, at: 7 },
+        ],
+      },
+      errors: [
+        'odometerKm: invalid',
+        'learnedGearRatios: invalid',
+        'maintenanceRecords[1]: invalid',
+        'maintenanceRecords[2]: invalid',
+      ],
+    });
+    expect(parsePersistedState('nope')).toBeNull();
+    expect(parsePersistedState({})).toEqual({ state: EMPTY_PERSISTED_STATE, errors: [] });
+  });
+});
+
+describe('TripStore', () => {
+  async function store(maxTrips?: number): Promise<TripStore> {
+    const s = new TripStore({
+      path: join(dir, 'trips.jsonl'),
+      logger,
+      ...(maxTrips !== undefined ? { maxTrips } : {}),
+    });
+    await s.load();
+    return s;
+  }
+
+  it('appends, lists newest first and pages with before', async () => {
+    const s = await store();
+    for (const n of [3, 1, 4, 2, 5]) await s.append(trip(n));
+    expect(s.list({ limit: 50 }).map((t) => t.id)).toEqual([
+      'trip-5',
+      'trip-4',
+      'trip-3',
+      'trip-2',
+      'trip-1',
+    ]);
+    const page1 = s.list({ limit: 2 });
+    expect(page1.map((t) => t.id)).toEqual(['trip-5', 'trip-4']);
+    const page2 = s.list({ limit: 2, before: page1.at(-1)?.startedAt ?? 0 });
+    expect(page2.map((t) => t.id)).toEqual(['trip-3', 'trip-2']);
+    expect(s.list({ limit: 0 })).toEqual([]);
+
+    const reloaded = await store();
+    expect(reloaded.size).toBe(5);
+    expect(reloaded.list({ limit: 1 })[0]).toEqual(trip(5));
+  });
+
+  it('writes one JSON line per trip', async () => {
+    const s = await store();
+    await s.append(trip(1));
+    await s.append(trip(2));
+    const lines = (await readFile(join(dir, 'trips.jsonl'), 'utf8')).split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[2]).toBe('');
+    expect(JSON.parse(lines[0] ?? '')).toEqual(trip(1));
+  });
+
+  it('returns trips that ended after a time (phone sync)', async () => {
+    const s = await store();
+    for (const n of [1, 2, 3]) await s.append(trip(n));
+    const since = trip(2).endedAt;
+    expect(s.endedAfter(since - 1, 100).map((t) => t.id)).toEqual(['trip-3', 'trip-2']);
+    expect(s.endedAfter(since, 100).map((t) => t.id)).toEqual(['trip-3']);
+    expect(s.endedAfter(0, 1).map((t) => t.id)).toEqual(['trip-3']);
+  });
+
+  it('deletes by id with an atomic rewrite', async () => {
+    const s = await store();
+    for (const n of [1, 2, 3]) await s.append(trip(n));
+    expect(await s.delete('trip-2')).toBe(true);
+    expect(await s.delete('trip-2')).toBe(false);
+    expect(await s.delete('nope')).toBe(false);
+    expect((await store()).list({ limit: 10 }).map((t) => t.id)).toEqual(['trip-3', 'trip-1']);
+  });
+
+  it('skips torn and invalid lines and starts the next append on a new line', async () => {
+    const good = JSON.stringify(trip(1));
+    await writeFile(
+      join(dir, 'trips.jsonl'),
+      `${good}\nnot json\n${JSON.stringify({ id: 'x' })}\n${JSON.stringify(trip(2)).slice(0, 40)}`,
+    );
+    const s = await store();
+    expect(s.list({ limit: 10 }).map((t) => t.id)).toEqual(['trip-1']);
+    expect(logger.text('warn')).toMatch(/skipped 3 unreadable/);
+    await s.append(trip(3));
+    const reloaded = await store();
+    expect(reloaded.list({ limit: 10 }).map((t) => t.id)).toEqual(['trip-3', 'trip-1']);
+  });
+
+  it('replaces a trip appended twice', async () => {
+    const s = await store();
+    await s.append(trip(1));
+    await s.append(trip(1, { distanceKm: 99 }));
+    expect(s.size).toBe(1);
+    expect((await store()).get('trip-1')?.distanceKm).toBe(99);
+  });
+
+  it('enforces the retention cap by dropping the oldest trips', async () => {
+    const s = await store(3);
+    for (const n of [1, 2, 3, 4, 5]) await s.append(trip(n));
+    expect(s.list({ limit: 10 }).map((t) => t.id)).toEqual(['trip-5', 'trip-4', 'trip-3']);
+    const reloaded = await store(3);
+    expect(reloaded.list({ limit: 10 }).map((t) => t.id)).toEqual(['trip-5', 'trip-4', 'trip-3']);
+    // An over-full file (e.g. after lowering the cap) is trimmed on load.
+    const smaller = await store(2);
+    expect(smaller.size).toBe(2);
+  });
+
+  it('rejects malformed trips and strips unknown fields', async () => {
+    const s = await store();
+    await expect(s.append({ id: 'x' } as unknown as TripRecord)).rejects.toThrow(
+      'Not a valid trip',
+    );
+    await s.append({ ...trip(1), extra: 'field' } as TripRecord);
+    expect(Object.keys(s.get('trip-1') ?? {})).not.toContain('extra');
+    expect(isTripRecord(trip(1))).toBe(true);
+    expect(isTripRecord({ ...trip(1), fuelUsedL: 'x' })).toBe(false);
+    expect(isTripRecord({ ...trip(1), startedAt: Number.NaN })).toBe(false);
+  });
+
+  it('exports CSV oldest first using the core formatter', async () => {
+    const s = await store();
+    for (const n of [2, 1]) await s.append(trip(n));
+    expect(s.csv()).toBe(tripsToCsv([trip(1), trip(2)]));
+  });
+
+  it('loads an empty store when the file is missing', async () => {
+    const s = await store();
+    expect(s.size).toBe(0);
+    expect(s.csv()).toBe(tripsToCsv([]));
+  });
+});

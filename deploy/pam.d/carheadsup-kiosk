@@ -1,0 +1,9 @@
+#%PAM-1.0
+# PAM stack for carheadsup-kiosk.service, installed as /etc/pam.d/carheadsup-kiosk by
+# deploy/install.sh. systemd opens this session for the service without asking for a password;
+# pam_systemd registers it with logind on the service's TTY, which gives cage access to the
+# display and input devices.
+auth     required pam_unix.so nullok
+account  required pam_unix.so
+session  required pam_unix.so
+session  required pam_systemd.so

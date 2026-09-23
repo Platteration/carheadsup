@@ -291,6 +291,34 @@ describe('navigation widgets', () => {
     });
   });
 
+  it("carries the phone's maneuver icon only when the maneuver is unknown", () => {
+    const icon =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const h = cityDrive();
+    h.send({
+      type: 'nav/update',
+      nav: navInfo({ maneuver: { type: 'left' }, iconPng: icon }),
+      at: h.now,
+    });
+    // A known maneuver is drawn by the renderer: no image in the frame.
+    expect(widget(h.frame(), 'nav')).toMatchObject({ maneuver: { type: 'left' }, iconPng: null });
+    h.send({
+      type: 'nav/update',
+      nav: navInfo({ maneuver: { type: 'unknown' }, iconPng: icon }),
+      at: h.now,
+    });
+    expect(widget(h.frame(), 'nav')).toMatchObject({
+      maneuver: { type: 'unknown' },
+      iconPng: icon,
+    });
+    h.send({
+      type: 'nav/update',
+      nav: navInfo({ maneuver: { type: 'unknown' }, iconPng: null }),
+      at: h.now,
+    });
+    expect(widget(h.frame(), 'nav')?.iconPng).toBeNull();
+  });
+
   it('keeps instruction text off the screen while moving', () => {
     const h = cityDrive();
     h.send({
@@ -406,6 +434,7 @@ describe('navigation widgets', () => {
       type: 'traffic-jam',
       distance: { value: 900, unit: 'm', text: '900 m' },
       speedLimit: null,
+      limitStyle: 'vienna',
       delayMinutes: 7,
       label: 'Traffic jam',
     });
@@ -415,6 +444,24 @@ describe('navigation widgets', () => {
       distance: { text: '550 m' },
       speedLimit: 120,
       label: 'Speed camera',
+    });
+  });
+
+  it('draws a camera limit in the driver’s sign style and speed unit', () => {
+    const config = makeConfig({
+      units: { system: 'imperial' },
+      display: { speedLimitSign: 'mutcd' },
+    });
+    const h = highwayDrive(config, { speed: 110 });
+    h.send({
+      type: 'hazards/update',
+      hazards: [hazard({ distanceM: 600, speedLimitKph: 104.6 })], // 65 mph
+      at: h.now,
+    });
+    expect(widget(h.frame(), 'hazard')).toMatchObject({
+      type: 'speed-camera',
+      speedLimit: 65,
+      limitStyle: 'mutcd',
     });
   });
 

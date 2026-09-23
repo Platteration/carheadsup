@@ -28,7 +28,6 @@ import {
   formatNavDistance,
   hazardLabel,
   isAlertShownInContext,
-  lookupDtc,
   reduce,
   roundTo,
   type AlertFrame,
@@ -44,6 +43,7 @@ import {
   type WidgetFrameById,
   type WidgetId,
 } from '@carheadsup/core';
+import { lookupDtc } from '@carheadsup/core/dtc';
 import { describe, expect, it } from 'vitest';
 import { FIXTURE_TIME, SAMPLE_FRAMES } from '../../src/hud/fixtures.ts';
 
@@ -239,7 +239,11 @@ describe('sample frames vs composeFrame', () => {
         case 'gear':
           expect(w.gear).toMatch(/^(?:[1-9]|1[0-2]|N)$/);
           break;
-        case 'hazard':
+        case 'hazard': {
+          // Camera limits use the driver's configured sign, like the speed-limit widget.
+          const limit = widget(frame, 'speedLimit');
+          if (limit) expect(w.limitStyle).toBe(limit.style);
+          else expect(w.limitStyle).toBe(DEFAULT_CONFIG.display.speedLimitSign);
           if (w.type !== 'other') {
             expect(w.label).toBe(
               hazardLabel({
@@ -254,6 +258,7 @@ describe('sample frames vs composeFrame', () => {
             );
           }
           break;
+        }
         case 'media':
           expect(w.playing).toBe(true);
           expect(w.title).not.toBe('');
@@ -364,10 +369,37 @@ describe('sample frames vs composeFrame', () => {
       };
       const ranks = d.maintenance.map((m) => statusRank[m.status]);
       expect(ranks).toEqual([...ranks].sort((x, y) => x - y));
+      const longUnit = systemOf(frame) === 'imperial' ? 'mi' : 'km';
       for (const item of d.maintenance) {
         const configured = DEFAULT_CONFIG.maintenance.items.find((i) => i.id === item.itemId);
         expect(configured?.label).toBe(item.label);
         if (d.page === 'overview') expect(['due-soon', 'overdue']).toContain(item.status);
+        // Display-ready: whole units of the driver's system, the text unsigned.
+        if (item.remaining) {
+          expect(item.remaining.unit).toBe(longUnit);
+          expect(Number.isInteger(item.remaining.value)).toBe(true);
+          expect(item.remaining.text).toBe(`${Math.abs(item.remaining.value)} ${longUnit}`);
+        }
+        if (item.remainingDays !== null) expect(Number.isInteger(item.remainingDays)).toBe(true);
+        if (item.status === 'unknown') expect(item.remaining ?? item.remainingDays).toBeNull();
+        if (item.status === 'overdue') {
+          expect(
+            (item.remaining?.value ?? 0) < 0 || (item.remainingDays ?? 0) < 0,
+            `${item.itemId} is overdue by distance or time`,
+          ).toBe(true);
+        }
+      }
+      if (d.trip) {
+        expect(d.page).toBe('trip');
+        expect(d.trip.distance.unit).toBe(longUnit);
+        expect(d.trip.distance.text).toBe(`${d.trip.distance.value.toFixed(1)} ${longUnit}`);
+        expect(d.trip.movingS).toBeLessThanOrEqual(d.trip.durationS);
+        // The trip in progress is the one the trip-summary widget shows.
+        const summary = widget(frame, 'tripSummary');
+        if (!d.trip.completed && summary) {
+          const { id: _id, zone: _zone, ...shown } = summary;
+          expect(d.trip).toMatchObject(shown);
+        }
       }
     },
   );
@@ -416,6 +448,76 @@ function expectAlertsAndWidgets(frame: HudFrame, composed: HudFrame, widgetIds: 
 }
 
 describe('sample frames vs frames composed from the same readings', () => {
+  it('message-toast: a WhatsApp message the phone reads aloud', () => {
+    const config = testConfig();
+    let state = createInitialState(config, EMPTY_PERSISTED_STATE, FIXTURE_TIME - 1000);
+    state = reduce(
+      state,
+      { type: 'phone/link', connected: true, deviceName: 'Pixel', at: FIXTURE_TIME - 1000 },
+      config,
+    );
+    state = reduce(
+      state,
+      {
+        type: 'message/received',
+        message: {
+          id: 'm1',
+          sender: 'Alex Chen',
+          app: 'WhatsApp',
+          receivedAt: FIXTURE_TIME,
+          readingAloud: true,
+        },
+        at: FIXTURE_TIME,
+      },
+      config,
+    );
+    expect(composeFrame(state, config).toast).toEqual(fixture('message-toast').toast);
+  });
+
+  it('speed-camera: the camera and its limit sign as composed', () => {
+    const config = testConfig();
+    const t0 = FIXTURE_TIME - 13_000;
+    let state = createInitialState(config, EMPTY_PERSISTED_STATE, t0);
+    state = reduce(state, { type: 'obd/link', state: 'connected', at: t0 }, config);
+    state = reduce(state, { type: 'phone/link', connected: true, at: t0 }, config);
+    for (let at = t0 + 500; at <= FIXTURE_TIME; at += 500) {
+      state = reduce(
+        state,
+        {
+          type: 'obd/samples',
+          samples: [
+            { signal: 'speed', value: 118 },
+            { signal: 'rpm', value: 2600 },
+          ],
+          at,
+        },
+        config,
+      );
+    }
+    state = reduce(
+      state,
+      {
+        type: 'hazards/update',
+        hazards: [
+          {
+            id: 'cam',
+            type: 'speed-camera',
+            distanceM: 800,
+            speedLimitKph: 120,
+            delaySeconds: null,
+            description: null,
+            updatedAt: FIXTURE_TIME,
+          },
+        ],
+        at: FIXTURE_TIME,
+      },
+      config,
+    );
+    const composed = composeFrame(state, config);
+    expect(composed.context).toBe('highway');
+    expect(composed.widgets).toContainEqual(widget(fixture('speed-camera'), 'hazard'));
+  });
+
   it('engine-hot: coolant 121 °C while driving', () => {
     const config = testConfig();
     const state = drive(
@@ -522,5 +624,17 @@ describe('sample frames vs frames composed from the same readings', () => {
     const composed = composeFrame(state, config).diagnostics;
     expect(composed?.page).toBe('maintenance');
     expect(composed?.maintenance).toEqual(fixture('parked-maintenance').diagnostics?.maintenance);
+
+    // The same schedule for an imperial driver: miles on the dashboard, never kilometres.
+    const imperial = { ...config, units: { ...config.units, system: 'imperial' as const } };
+    const miles = composeFrame(state, imperial).diagnostics?.maintenance ?? [];
+    expect(miles.map((m) => m.remaining?.text ?? null)).toEqual([
+      null,
+      '261 mi',
+      '3859 mi',
+      '7717 mi',
+      null,
+      null,
+    ]);
   });
 });

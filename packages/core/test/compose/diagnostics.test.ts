@@ -5,9 +5,11 @@ import {
   diagnosticsPageKinds,
   gaugeStatus,
 } from '../../src/compose/diagnostics.ts';
-import { lookupDtc } from '../../src/obd/dtc.ts';
+import { composeFrame } from '../../src/compose/compose.ts';
+import { lookupDtc } from '../../src/obd/dtc-lookup.ts';
 import { ALERT_SEVERITY_RANK } from '../../src/types/alerts.ts';
 import type { DiagnosticsFrame } from '../../src/types/frame.ts';
+import { L_PER_US_GAL, convertEconomy, kmToMi, roundTo } from '../../src/units.ts';
 import { Harness, T0, makeConfig, persisted, type SignalValues } from '../state/fixtures.ts';
 
 const DAY = 86_400_000;
@@ -293,28 +295,96 @@ describe('trouble codes', () => {
 });
 
 describe('trip page', () => {
-  it('shows the current trip, then the last completed one', () => {
-    const h = new Harness();
+  /** A 60 km/h drive of one minute at 4 L/h, then parked with the engine off. */
+  function afterDrive(config = makeConfig()): Harness {
+    const h = new Harness(config);
     h.obdConnected(T0);
     h.run(T0 + 60_000, { speed: 60, rpm: 2000, fuelRate: 4 }, 500);
     h.run(h.now + 3000, { speed: 0, rpm: 0 });
     h.idle(h.now + 125_000, 5000);
     expect(h.state.context.context).toBe('parked');
-    const pages = diagnosticsPageKinds(h.state);
-    const tripIndex = pages.indexOf('trip');
-    expect(page(h, tripIndex).trip).toEqual(h.state.trip.current);
+    return h;
+  }
+
+  const tripPage = (h: Harness): DiagnosticsFrame =>
+    page(h, diagnosticsPageKinds(h.state).indexOf('trip'));
+
+  it('shows the trip in progress in the driver’s units, like the trip widget', () => {
+    const h = afterDrive();
+    const current = h.state.trip.current;
+    expect(current).not.toBeNull();
+    const trip = tripPage(h).trip;
+    expect(trip).toEqual({
+      completed: false,
+      distance: {
+        value: roundTo(current?.distanceKm ?? 0, 1),
+        unit: 'km',
+        text: `${(current?.distanceKm ?? 0).toFixed(1)} km`,
+      },
+      durationS: current?.durationS,
+      movingS: current?.movingS,
+      averageEconomy: roundTo(current?.avgLPer100km ?? 0, 1),
+      economyUnit: 'L/100km',
+      fuelUsed: roundTo(current?.fuelUsedL ?? 0, 2),
+      fuelUnit: 'L',
+      cost: current?.cost,
+      currency: current?.currency,
+    });
+    expect(trip?.movingS).toBeGreaterThan(55);
+    expect(trip?.movingS).toBeLessThanOrEqual(trip?.durationS ?? 0);
+  });
+
+  it('then shows the last completed trip, marked as completed', () => {
+    const h = afterDrive();
     h.idle(h.now + 300_000, 5000);
     expect(h.state.trip.current).toBeNull();
     const last = h.state.trip.lastCompleted;
-    expect(page(h, diagnosticsPageKinds(h.state).indexOf('trip')).trip).toEqual({
-      startedAt: last?.startedAt,
-      distanceKm: last?.distanceKm,
+    expect(last).not.toBeNull();
+    expect(tripPage(h).trip).toMatchObject({
+      completed: true,
+      distance: { value: roundTo(last?.distanceKm ?? 0, 1), unit: 'km' },
       durationS: last?.durationS,
       movingS: last?.movingS,
-      fuelUsedL: last?.fuelUsedL,
-      avgLPer100km: last?.avgLPer100km,
+      fuelUsed: roundTo(last?.fuelUsedL ?? 0, 2),
       cost: last?.cost,
-      currency: last?.currency,
+    });
+  });
+
+  it('converts to miles, gallons and mpg for imperial drivers', () => {
+    const config = makeConfig({
+      units: { system: 'imperial', fuelEconomy: 'mpg-us', currency: 'USD' },
+    });
+    const h = afterDrive(config);
+    const current = h.state.trip.current;
+    const miles = roundTo(kmToMi(current?.distanceKm ?? 0), 1);
+    const trip = tripPage(h).trip;
+    expect(trip).toMatchObject({
+      completed: false,
+      distance: { value: miles, unit: 'mi', text: `${miles.toFixed(1)} mi` },
+      economyUnit: 'mpg-us',
+      averageEconomy: convertEconomy(current?.avgLPer100km ?? null, 'mpg-us'),
+      fuelUnit: 'gal',
+      fuelUsed: roundTo((current?.fuelUsedL ?? 0) / L_PER_US_GAL, 2),
+      currency: 'USD',
+    });
+    // The dashboard and the trip-summary widget always agree.
+    const widget = composeFrame(h.state, h.config).widgets.find((w) => w.id === 'tripSummary');
+    expect(widget).toBeDefined();
+    const { id: _id, zone: _zone, ...shown } = widget ?? {};
+    expect(trip).toMatchObject(shown);
+  });
+
+  it('keeps unknown fuel figures unknown', () => {
+    const h = new Harness();
+    h.obdConnected(T0);
+    h.run(T0 + 60_000, { speed: 60, rpm: 2000 }, 500);
+    h.run(h.now + 3000, { speed: 0, rpm: 0 });
+    h.idle(h.now + 125_000, 5000);
+    expect(tripPage(h).trip).toMatchObject({
+      completed: false,
+      averageEconomy: null,
+      fuelUsed: null,
+      cost: null,
     });
   });
 
@@ -325,27 +395,120 @@ describe('trip page', () => {
 });
 
 describe('maintenance page', () => {
-  it('lists every item, most urgent first', () => {
-    const h = new Harness(
-      makeConfig(),
-      persisted({
-        odometerKm: 57_900,
-        maintenanceRecords: [
-          { itemId: 'oil', odometerKm: 50_000, at: T0 - 100 * DAY },
-          { itemId: 'brake-fluid', odometerKm: null, at: T0 - 742 * DAY },
-          { itemId: 'tyre-rotation', odometerKm: 52_000, at: T0 - 90 * DAY },
-        ],
-      }),
-    );
-    const frame = page(h, 3);
+  const records = [
+    { itemId: 'oil', odometerKm: 50_000, at: T0 - 100 * DAY },
+    { itemId: 'brake-fluid', odometerKm: null, at: T0 - 742 * DAY },
+    { itemId: 'tyre-rotation', odometerKm: 52_000, at: T0 - 90 * DAY },
+    { itemId: 'air-filter', odometerKm: 37_000, at: T0 - 10 * DAY },
+  ];
+
+  function maintenancePage(config = makeConfig()): DiagnosticsFrame {
+    const h = new Harness(config, persisted({ odometerKm: 57_900, maintenanceRecords: records }));
+    const frame = page(h, diagnosticsPageKinds(h.state).indexOf('maintenance'));
     expect(frame.page).toBe('maintenance');
-    expect(frame.maintenance.map((m) => [m.itemId, m.status])).toEqual([
+    return frame;
+  }
+
+  it('lists every item, most urgent first', () => {
+    expect(maintenancePage().maintenance.map((m) => [m.itemId, m.status])).toEqual([
+      ['air-filter', 'overdue'],
       ['brake-fluid', 'overdue'],
       ['oil', 'due-soon'],
       ['tyre-rotation', 'ok'],
-      ['air-filter', 'unknown'],
       ['cabin-filter', 'unknown'],
       ['coolant', 'unknown'],
+    ]);
+  });
+
+  it('carries remaining distance and days, not odometer figures', () => {
+    const [air, brake, oil, tyres, cabin] = maintenancePage().maintenance;
+    expect(brake).toEqual({
+      itemId: 'brake-fluid',
+      label: 'Brake fluid',
+      status: 'overdue',
+      remaining: null,
+      remainingDays: -12,
+      dueAtEpochMs: T0 - 12 * DAY,
+    });
+    // Overdue by distance (900 km past 57 000 km) but not by time.
+    expect(air).toMatchObject({
+      status: 'overdue',
+      remaining: { value: -900, unit: 'km', text: '900 km' },
+      remainingDays: 720,
+    });
+    expect(oil).toEqual({
+      itemId: 'oil',
+      label: 'Oil & filter',
+      status: 'due-soon',
+      remaining: { value: 100, unit: 'km', text: '100 km' },
+      remainingDays: 265,
+      dueAtEpochMs: T0 + 265 * DAY,
+    });
+    expect(tyres).toMatchObject({
+      remaining: { value: 4100, unit: 'km', text: '4100 km' },
+      remainingDays: null,
+      dueAtEpochMs: null,
+    });
+    expect(cabin).toEqual({
+      itemId: 'cabin-filter',
+      label: 'Cabin filter',
+      status: 'unknown',
+      remaining: null,
+      remainingDays: null,
+      dueAtEpochMs: null,
+    });
+  });
+
+  it('converts distances to miles, overdue distances negative with an unsigned text', () => {
+    const h = new Harness(
+      makeConfig({ units: { system: 'imperial' } }),
+      persisted({
+        odometerKm: 58_322,
+        maintenanceRecords: [
+          { itemId: 'oil', odometerKm: 50_000, at: T0 - 10 * DAY },
+          { itemId: 'tyre-rotation', odometerKm: 52_000, at: T0 - 10 * DAY },
+        ],
+      }),
+    );
+    const items = page(h, diagnosticsPageKinds(h.state).indexOf('maintenance')).maintenance;
+    expect(items.find((m) => m.itemId === 'oil')).toMatchObject({
+      status: 'overdue',
+      remaining: { value: -200, unit: 'mi', text: '200 mi' }, // 322 km over
+    });
+    expect(items.find((m) => m.itemId === 'tyre-rotation')).toMatchObject({
+      status: 'ok',
+      remaining: { value: 2285, unit: 'mi', text: '2285 mi' }, // 3678 km left
+    });
+  });
+
+  it('never shows a negative zero', () => {
+    const h = new Harness(
+      makeConfig({ units: { system: 'imperial' } }),
+      persisted({
+        odometerKm: 58_000,
+        maintenanceRecords: [{ itemId: 'oil', odometerKm: 50_000, at: T0 }],
+      }),
+    );
+    const oil = page(h, diagnosticsPageKinds(h.state).indexOf('maintenance')).maintenance.find(
+      (m) => m.itemId === 'oil',
+    );
+    expect(oil?.remaining).toEqual({ value: 0, unit: 'mi', text: '0 mi' });
+    expect(Object.is(oil?.remaining?.value, -0)).toBe(false);
+    expect(Object.is(oil?.remainingDays, -0)).toBe(false);
+  });
+
+  it('shows only due and overdue items on the overview, in the driver’s units', () => {
+    const overview = page(
+      new Harness(
+        makeConfig({ units: { system: 'imperial' } }),
+        persisted({ odometerKm: 57_900, maintenanceRecords: records }),
+      ),
+      0,
+    );
+    expect(overview.maintenance.map((m) => [m.itemId, m.remaining])).toEqual([
+      ['air-filter', { value: -559, unit: 'mi', text: '559 mi' }],
+      ['brake-fluid', null],
+      ['oil', { value: 62, unit: 'mi', text: '62 mi' }],
     ]);
   });
 });

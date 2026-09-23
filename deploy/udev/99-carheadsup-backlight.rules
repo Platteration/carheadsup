@@ -1,0 +1,4 @@
+# Let members of the video group (the carheadsup service user is one) set the display backlight,
+# so the HUD can dim a panel that has a Linux backlight device (DSI displays, some HDMI panels).
+# Installed to /etc/udev/rules.d/ by deploy/install.sh.
+ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video $sys$devpath/brightness", RUN+="/bin/chmod g+w $sys$devpath/brightness"

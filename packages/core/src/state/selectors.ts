@@ -1,5 +1,5 @@
 import type { HudConfig } from '../types/config.ts';
-import type { CallInfo, CallState } from '../types/phone.ts';
+import type { CallInfo, CallState, MessageInfo } from '../types/phone.ts';
 import type { SignalId } from '../types/signals.ts';
 import type { HudState, TrackedHazard } from '../types/state.ts';
 import { freshValue } from '../staleness.ts';
@@ -135,6 +135,16 @@ export interface ToastSelection {
 }
 
 /**
+ * The message toast's subtitle: the messaging app, with "reading aloud" appended while the phone
+ * reads the message out ("WhatsApp · reading aloud", or just "Reading aloud" without an app).
+ */
+export function messageToastSubtitle(message: MessageInfo): string | null {
+  const app = message.app?.trim() || null;
+  if (!message.readingAloud) return app;
+  return app === null ? 'Reading aloud' : `${app} · reading aloud`;
+}
+
+/**
  * The toast showing right now, if any: a message sender (within `messageToastMs` of receipt)
  * beats a track change (within `mediaToastMs`). Nothing shows while a call is up, and a toast
  * the driver dismissed after it appeared stays hidden (the next one still shows).
@@ -157,7 +167,7 @@ export function selectToast(state: HudState, config: HudConfig): ToastSelection 
     return {
       kind: 'message',
       title: message.sender,
-      subtitle: message.app,
+      subtitle: messageToastSubtitle(message),
       startedAt: message.receivedAt,
       endsAt: message.receivedAt + config.display.messageToastMs,
     };

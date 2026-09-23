@@ -3,7 +3,7 @@ import type { HudConfig } from '../types/config.ts';
 import type { MaintenanceItemStatus } from '../types/records.ts';
 import type { SignalId, SignalMap } from '../types/signals.ts';
 import type { HudState } from '../types/state.ts';
-import { lookupDtc } from '../obd/dtc.ts';
+import { lookupDtc } from '../obd/dtc-lookup.ts';
 import {
   freshSignal,
   freshSupplyVoltage,

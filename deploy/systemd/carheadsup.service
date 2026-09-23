@@ -1,0 +1,63 @@
+# carheadsup HUD server: OBD-II, phone link, sensors, REST/WebSocket API and the web pages.
+#
+# Installed to /etc/systemd/system/ by deploy/install.sh (which rewrites /usr/bin/node when
+# Node.js lives elsewhere). Keep local changes in a drop-in (`sudo systemctl edit carheadsup`),
+# which survives re-running the installer. Extra CARHEADSUP_* variables (log level, backlight
+# device, port/host overrides) go in /etc/default/carheadsup; flags below take precedence.
+
+[Unit]
+Description=carheadsup HUD server
+Documentation=file:///opt/carheadsup/docs/install-raspberry-pi.md
+# Start without waiting for any network: the HUD must come up in a car with no Wi-Fi at all.
+After=network.target avahi-daemon.service bluetooth.service
+# Keep restarting however often it fails; a dead HUD helps nobody.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=carheadsup
+Group=carheadsup
+WorkingDirectory=/opt/carheadsup
+EnvironmentFile=-/etc/default/carheadsup
+ExecStart=/usr/bin/node /opt/carheadsup/packages/hud-server/src/main.ts --config /etc/carheadsup/config.json --data-dir /var/lib/carheadsup --renderer-dir /opt/carheadsup/packages/hud-renderer/dist
+Restart=always
+RestartSec=2
+# SIGTERM makes the server flush trips and state; each shutdown step has its own 5 s limit.
+TimeoutStopSec=30
+UMask=0077
+
+# --- Hardening -------------------------------------------------------------------------------
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# Data (state.json, trips.jsonl) and the config file, which the settings app rewrites atomically
+# (temporary file + rename, plus config.json.bak), so the whole directory must be writable.
+# The backlight entry is a no-op when the display has no backlight device.
+ReadWritePaths=/var/lib/carheadsup /etc/carheadsup -/sys/class/backlight
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectProc=invisible
+# AF_UNIX: D-Bus for avahi-publish-service; AF_NETLINK: network interface enumeration.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Deliberately not set:
+#   MemoryDenyWriteExecute - V8's JIT compiler needs writable+executable memory.
+#   PrivateDevices, DevicePolicy - the HUD needs /dev/i2c-*, /dev/gpiochip*, /dev/rfcomm*, /dev/tty*.
+#   ProtectKernelTunables - backlight brightness files live under /sys/devices.
+#   ProtectClock - implies a device allow-list that would hide the devices above.
+#   PrivateUsers - breaks the group-based access (i2c, gpio, dialout, video) to those devices.
+
+[Install]
+WantedBy=multi-user.target

@@ -3,10 +3,10 @@ import {
   DTC_SHORT_MAX_LENGTH,
   decodeDtcBytes,
   isValidDtc,
-  lookupDtc,
   normalizeDtc,
   parseDtcPayload,
 } from '../../src/obd/dtc.ts';
+import { lookupDtc } from '../../src/obd/dtc-lookup.ts';
 import { DTC_DATABASE } from '../../src/obd/dtc-database.ts';
 import { describeDtcRange } from '../../src/obd/dtc-ranges.ts';
 import type { DtcInfo, DtcSeverity } from '../../src/types/vehicle.ts';

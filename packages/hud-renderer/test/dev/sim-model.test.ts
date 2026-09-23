@@ -1,4 +1,5 @@
 import { INPUT_ACTIONS } from '@carheadsup/core';
+import { lookupDtc } from '@carheadsup/core/dtc';
 import { describe, expect, it } from 'vitest';
 import { parsePrefs } from '../../src/dev/App.tsx';
 import { fixtureTitle } from '../../src/dev/Gallery.tsx';
@@ -64,15 +65,20 @@ describe('trouble codes', () => {
     expect(toggleDtc(['P0300'], 'U0100', false)).toEqual(['P0300']);
   });
 
-  it('validates typed codes and names them', () => {
-    expect(checkDtcEntry(' p0301 ')).toEqual({
+  it('validates typed codes and names them once the database is loaded', () => {
+    expect(checkDtcEntry(' p0301 ', lookupDtc)).toEqual({
       ok: true,
       code: 'P0301',
-      label: expect.stringMatching(/^P0301 – .+/) as string,
+      label: `P0301 – ${lookupDtc('P0301').short}`,
     });
     expect(checkDtcEntry('')).toEqual({ ok: false, error: 'Type a code such as P0301' });
-    expect(checkDtcEntry('X1234').ok).toBe(false);
+    expect(checkDtcEntry('X1234', lookupDtc).ok).toBe(false);
     expect(checkDtcEntry('P042').ok).toBe(false);
+  });
+
+  it('labels a valid code with the bare code while the database loads', () => {
+    expect(checkDtcEntry('u0100')).toEqual({ ok: true, code: 'U0100', label: 'U0100' });
+    expect(checkDtcEntry('u0100', null)).toEqual({ ok: true, code: 'U0100', label: 'U0100' });
   });
 });
 

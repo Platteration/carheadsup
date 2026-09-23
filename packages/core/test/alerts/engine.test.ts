@@ -8,7 +8,7 @@ import {
   TPMS_HYSTERESIS_KPA,
 } from '../../src/alerts/rules.ts';
 import { isAlertLive } from '../../src/alerts/visibility.ts';
-import { lookupDtc } from '../../src/obd/dtc.ts';
+import { lookupDtc } from '../../src/obd/dtc-lookup.ts';
 import { createInitialState } from '../../src/state/reducer.ts';
 import type { Alert } from '../../src/types/alerts.ts';
 import type { HudConfig } from '../../src/types/config.ts';

@@ -1,4 +1,5 @@
-import { DEFAULT_CONFIG, lookupDtc, mergeConfig, parseConfig } from '@carheadsup/core';
+import { DEFAULT_CONFIG, mergeConfig, parseConfig } from '@carheadsup/core';
+import { lookupDtc } from '@carheadsup/core/dtc';
 import type {
   ApiDiagnostics,
   ApiInfo,

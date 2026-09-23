@@ -10,8 +10,6 @@ import { Lanes } from './Lanes.tsx';
 import { Media } from './Media.tsx';
 import { Nav } from './Nav.tsx';
 import { OutsideTemp } from './OutsideTemp.tsx';
-import { DEFAULT_WIDGET_CONTEXT } from './parts.tsx';
-import type { WidgetContext } from './parts.tsx';
 import { Speed } from './Speed.tsx';
 import { SpeedLimit } from './SpeedLimit.tsx';
 import { Tachometer } from './Tachometer.tsx';
@@ -19,17 +17,10 @@ import { Tpms } from './Tpms.tsx';
 import { TripSummary } from './TripSummary.tsx';
 import { Voltage } from './Voltage.tsx';
 
-export type { WidgetContext } from './parts.tsx';
-export { DEFAULT_WIDGET_CONTEXT, SpeedSign } from './parts.tsx';
+export { SpeedSign } from './parts.tsx';
 
 /** Render one widget frame with the component for its id. Unknown ids render nothing. */
-export function Widget({
-  w,
-  ctx = DEFAULT_WIDGET_CONTEXT,
-}: {
-  w: WidgetFrame;
-  ctx?: WidgetContext;
-}) {
+export function Widget({ w }: { w: WidgetFrame }) {
   switch (w.id) {
     case 'speed':
       return <Speed w={w} />;
@@ -46,7 +37,7 @@ export function Widget({
     case 'eta':
       return <Eta w={w} />;
     case 'hazard':
-      return <Hazard w={w} ctx={ctx} />;
+      return <Hazard w={w} />;
     case 'fuel':
       return <Fuel w={w} />;
     case 'coolant':

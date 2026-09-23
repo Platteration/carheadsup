@@ -182,6 +182,15 @@ export class ObdService {
   }
 
   /**
+   * Read the trouble codes at the start of the next polling cycle instead of waiting up to
+   * `dtcIntervalMs` (e.g. right after the simulator's injected codes changed). A no-op while
+   * no session is polling: a new session reads them as soon as it connects anyway.
+   */
+  requestDtcRead(): void {
+    this.poller?.requestDtcRead();
+  }
+
+  /**
    * Clear trouble codes (service 04). Refused unless connected, and — as a second line of
    * defence behind the server's parked check — while recent samples show the vehicle moving
    * or the engine running.

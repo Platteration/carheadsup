@@ -1,11 +1,53 @@
 import type { HudConfig } from '@carheadsup/core';
 import type { EventSource } from '../sources/types.ts';
+import { AdasUdpSource, defaultUdpSocketFactory, type UdpSocketFactory } from './adas-udp.ts';
+import { GestureSensorSource } from './gesture/source.ts';
+import { nodeSysFs, type SysFs } from './gpio/chip.ts';
+import { GpioButtonSource } from './gpio/source.ts';
+import { openI2cBus, type I2cOpener } from './i2c.ts';
+import { LightSensorSource } from './light/source.ts';
+import { defaultSpawn, type SpawnFn } from './process.ts';
+
+export { AdasUdpSource } from './adas-udp.ts';
+export { GestureSensorSource } from './gesture/source.ts';
+export { GpioButtonSource } from './gpio/source.ts';
+export { LightSensorSource } from './light/source.ts';
+
+/**
+ * Hardware seams, all optional (defaults: the `i2c-bus` package loaded lazily,
+ * `child_process.spawn`, `dgram` and the real sysfs). Tests substitute fakes.
+ */
+export interface SensorIo {
+  openI2c?: I2cOpener;
+  spawn?: SpawnFn;
+  createUdpSocket?: UdpSocketFactory;
+  sysfs?: SysFs;
+  /** Address the ADAS UDP socket binds to (default 0.0.0.0). */
+  adasBindAddress?: string;
+  /** Delay before a failed I2C device is re-initialised (default 10 s). */
+  i2cRetryMs?: number;
+}
 
 /**
  * Hardware input sources enabled by `config.sensors`: ambient light sensor, gesture sensor,
  * GPIO buttons, ADAS UDP feed. Sources whose hardware is absent log once and stay idle rather
  * than failing the HUD.
+ *
+ * One source per kind is always returned — a kind that is disabled ('none', no button lines,
+ * no ADAS port) stays idle — so that enabling a sensor in the settings takes effect through
+ * `updateConfig` without restarting the HUD. `updateConfig` restarts only the sources whose
+ * part of the config changed (a new light-sensor gain applies without a restart at all).
  */
-export function createSensorSources(config: HudConfig): EventSource[] {
-  throw new Error(`createSensorSources(${config.version}) is not implemented yet`);
+export function createSensorSources(config: HudConfig, io: SensorIo = {}): EventSource[] {
+  const open = io.openI2c ?? openI2cBus;
+  const spawn = io.spawn ?? defaultSpawn;
+  return [
+    new LightSensorSource(config, { open, retryMs: io.i2cRetryMs }),
+    new GestureSensorSource(config, { open, retryMs: io.i2cRetryMs }),
+    new GpioButtonSource(config, { spawn, fs: io.sysfs ?? nodeSysFs }),
+    new AdasUdpSource(config, {
+      createSocket: io.createUdpSocket ?? defaultUdpSocketFactory,
+      bindAddress: io.adasBindAddress,
+    }),
+  ];
 }

@@ -259,6 +259,31 @@ describe('ObdService with the simulator', () => {
     await service.stop();
   });
 
+  it('reads trouble codes on request instead of waiting for the DTC interval', async () => {
+    const sim = new VehicleSimulator({ mode: 'manual', engineTempC: 90 });
+    const { clock, service, events } = harness(
+      { transport: 'simulator', dtcIntervalMs: 60_000 },
+      { simulator: sim, emulator: { latencyMs: 0 } },
+    );
+    service.requestDtcRead(); // not connected yet: harmless no-op
+    service.start();
+    await clock.advance(2000);
+    const reads = () => events.filter((e) => e.type === 'obd/dtcs');
+    expect(reads()).toHaveLength(1); // right after connecting
+    expect(reads()[0]).toMatchObject({ milOn: false, stored: [] });
+
+    sim.setControls({ dtcs: ['P0301'] });
+    await clock.advance(5000);
+    expect(reads()).toHaveLength(1); // the next scheduled read is a minute away
+
+    service.requestDtcRead();
+    await clock.advance(300);
+    expect(reads()).toHaveLength(2);
+    expect(reads()[1]).toMatchObject({ milOn: true, stored: ['P0301'] });
+    await service.stop();
+    service.requestDtcRead(); // stopped: still harmless
+  });
+
   it('reconnects immediately when connection settings change, in place otherwise', async () => {
     const sim = new VehicleSimulator({ mode: 'manual', engineTempC: 90 });
     const { clock, service, links } = harness(

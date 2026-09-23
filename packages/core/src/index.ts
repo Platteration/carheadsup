@@ -1,6 +1,10 @@
 /**
  * @carheadsup/core — pure, I/O-free HUD logic shared by the server, renderer and tests.
  * Nothing in this package may touch the network, the filesystem, timers or the clock.
+ *
+ * The trouble-code description database (`lookupDtc`, `DTC_DATABASE`) is a separate entry
+ * point, `@carheadsup/core/dtc`, so browser bundles never carry it unless they ask for it.
+ * The package is declared `"sideEffects": false`: keep module top levels free of side effects.
  */
 export * from './types/signals.ts';
 export * from './types/vehicle.ts';

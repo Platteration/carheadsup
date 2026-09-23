@@ -125,7 +125,7 @@ describe('toast', () => {
     expect(h.frame().toast).toEqual({
       kind: 'message',
       title: 'Alex Chen',
-      subtitle: 'WhatsApp',
+      subtitle: 'WhatsApp · reading aloud',
       opacity: 1,
     });
     h.tick(T0 + 1000 + 5000);
@@ -134,6 +134,22 @@ describe('toast', () => {
     expect(h.frame().toast?.opacity).toBe(0.4);
     h.tick(T0 + 1000 + 6000);
     expect(h.frame().toast).toBeNull();
+  });
+
+  it('says when the phone reads the message aloud', () => {
+    const h = connected();
+    const subtitle = (overrides: Partial<MessageInfo>, id: string, at: number) => {
+      h.send({ type: 'message/received', message: message(id, overrides), at });
+      return h.frame().toast?.subtitle;
+    };
+    expect(subtitle({ readingAloud: false }, 'm1', T0 + 100)).toBe('WhatsApp');
+    expect(subtitle({ readingAloud: true, app: 'Signal' }, 'm2', T0 + 200)).toBe(
+      'Signal · reading aloud',
+    );
+    expect(subtitle({ readingAloud: true, app: null }, 'm3', T0 + 300)).toBe('Reading aloud');
+    expect(subtitle({ readingAloud: true, app: '  ' }, 'm4', T0 + 400)).toBe('Reading aloud');
+    expect(subtitle({ readingAloud: false, app: null }, 'm5', T0 + 500)).toBeNull();
+    expect(subtitle({ readingAloud: false, app: ' Messages ' }, 'm6', T0 + 600)).toBe('Messages');
   });
 
   it('prefers a message over a track change', () => {

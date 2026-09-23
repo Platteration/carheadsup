@@ -4,8 +4,10 @@
   "private": true,
   "description": "Pure, I/O-free HUD domain logic shared by the server, renderer and tests.",
   "type": "module",
+  "sideEffects": false,
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./dtc": "./src/dtc.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

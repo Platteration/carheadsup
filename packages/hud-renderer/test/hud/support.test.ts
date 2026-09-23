@@ -2,13 +2,7 @@ import type { HudFrame, WidgetFrame } from '@carheadsup/core';
 import { describe, expect, it } from 'vitest';
 import { actionForKey } from '../../src/hud/keyboard.ts';
 import { readKioskParams } from '../../src/hud/kiosk.ts';
-import {
-  ZONES,
-  groupByZone,
-  signStyleOf,
-  visibleAlerts,
-  zonePosition,
-} from '../../src/hud/layout.ts';
+import { ZONES, groupByZone, visibleAlerts, zonePosition } from '../../src/hud/layout.ts';
 import { SAMPLE_FRAMES } from '../../src/hud/fixtures.ts';
 import {
   MIN_BRIGHTNESS,
@@ -62,12 +56,6 @@ describe('layout', () => {
     const both: HudFrame = { ...frame, alerts: [frame.alerts[0]!, caution] };
     expect(visibleAlerts(both)).toHaveLength(2);
     expect(visibleAlerts({ ...both, blanked: true }).map((a) => a.severity)).toEqual(['critical']);
-  });
-
-  it('takes the sign style from the speed-limit widget', () => {
-    expect(signStyleOf(SAMPLE_FRAMES['imperial-us']!)).toBe('mutcd');
-    expect(signStyleOf(SAMPLE_FRAMES['city-nav']!)).toBe('vienna');
-    expect(signStyleOf({ ...SAMPLE_FRAMES['city-nav']!, widgets: [] })).toBe('vienna');
   });
 });
 

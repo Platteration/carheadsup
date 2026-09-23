@@ -1,4 +1,4 @@
-import { lookupDtc } from '../obd/dtc.ts';
+import { lookupDtc } from '../obd/dtc-lookup.ts';
 import { SIGNAL_META } from '../obd/pids.ts';
 import { freshSignal, isEngineRunning } from '../state/selectors.ts';
 import { ALERT_SEVERITY_RANK } from '../types/alerts.ts';
@@ -7,14 +7,12 @@ import type {
   DiagnosticDtc,
   DiagnosticGauge,
   DiagnosticsFrame,
+  DiagnosticsMaintenanceItem,
   DiagnosticsPageKind,
+  DiagnosticsTrip,
   GaugeStatus,
 } from '../types/frame.ts';
-import type {
-  MaintenanceItemStatus,
-  MaintenanceStatusKind,
-  TripSummary,
-} from '../types/records.ts';
+import type { MaintenanceItemStatus, MaintenanceStatusKind } from '../types/records.ts';
 import type { SignalId, SignalMeta } from '../types/signals.ts';
 import type { HudState } from '../types/state.ts';
 import type { DtcKind } from '../types/vehicle.ts';
@@ -28,6 +26,7 @@ import {
   kphToMph,
   roundTo,
 } from '../units.ts';
+import { dashboardMaintenanceItem, dashboardTrip } from './records.ts';
 
 /** The parked diagnostics dashboard. */
 
@@ -137,7 +136,7 @@ export function composeDiagnostics(state: HudState, config: HudConfig): Diagnost
         ...frame,
         gauges: overviewGauges(state, config),
         dtcs: diagnosticDtcs(state),
-        maintenance: sortedMaintenance(state.maintenance.status).filter(
+        maintenance: dashboardMaintenance(state, config).filter(
           (item) => item.status === 'due-soon' || item.status === 'overdue',
         ),
       };
@@ -152,9 +151,9 @@ export function composeDiagnostics(state: HudState, config: HudConfig): Diagnost
         dtcs: diagnosticDtcs(state),
       };
     case 'trip':
-      return { ...frame, trip: tripForDashboard(state) };
+      return { ...frame, trip: tripForDashboard(state, config) };
     case 'maintenance':
-      return { ...frame, maintenance: sortedMaintenance(state.maintenance.status) };
+      return { ...frame, maintenance: dashboardMaintenance(state, config) };
   }
 }
 
@@ -330,21 +329,12 @@ export function diagnosticDtcs(state: HudState): DiagnosticDtc[] {
   );
 }
 
-/** The trip in progress, else the last completed one (canonical units, as `TripSummary`). */
-function tripForDashboard(state: HudState): TripSummary | null {
-  const { current, lastCompleted: last } = state.trip;
-  if (current !== null) return current;
-  if (last === null) return null;
-  return {
-    startedAt: last.startedAt,
-    distanceKm: last.distanceKm,
-    durationS: last.durationS,
-    movingS: last.movingS,
-    fuelUsedL: last.fuelUsedL,
-    avgLPer100km: last.avgLPer100km,
-    cost: last.cost,
-    currency: last.currency,
-  };
+/** The trip in progress, else the last completed one, in the driver's units. */
+function tripForDashboard(state: HudState, config: HudConfig): DiagnosticsTrip | null {
+  const { current, lastCompleted } = state.trip;
+  if (current !== null) return dashboardTrip(current, false, config.units);
+  if (lastCompleted !== null) return dashboardTrip(lastCompleted, true, config.units);
+  return null;
 }
 
 const STATUS_ORDER: Readonly<Record<MaintenanceStatusKind, number>> = {
@@ -354,7 +344,13 @@ const STATUS_ORDER: Readonly<Record<MaintenanceStatusKind, number>> = {
   unknown: 3,
 };
 
-/** Most urgent first; configured order within the same status. */
+/** Service items in the driver's units, most urgent first; configured order within a status. */
+function dashboardMaintenance(state: HudState, config: HudConfig): DiagnosticsMaintenanceItem[] {
+  return sortedMaintenance(state.maintenance.status).map((item) =>
+    dashboardMaintenanceItem(item, config.units),
+  );
+}
+
 function sortedMaintenance(status: readonly MaintenanceItemStatus[]): MaintenanceItemStatus[] {
   return status
     .map((item, index) => ({ item, index }))

@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { lookupDtc } from '@carheadsup/core/dtc';
 import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHudApi, memoryTokenStore } from '../../src/common/api.ts';
@@ -85,6 +86,11 @@ describe('dev console', () => {
     );
     expect(text(root.querySelector('.sim-status'))).toContain('48 km/h');
 
+    // Trouble-code labels arrive with the lazily loaded database.
+    await waitFor(() =>
+      text(byText(root, 'button.dchip', 'P0420')).includes(lookupDtc('P0420').short),
+    );
+
     await click(button(root, 'Manual'));
     await click(byText(root, '.dseg__item', '3')!);
     await click(button(root, 'Incoming call'));
@@ -108,6 +114,7 @@ describe('dev console', () => {
     expect(text(root.querySelector('.sim-hint--error'))).toMatch(/Codes look like/);
     await type(custom, 'p0301');
     expect(button(root, 'Inject').disabled).toBe(false);
+    expect(text(byText(root, '.sim-hint', 'P0301'))).toBe(`P0301 – ${lookupDtc('P0301').short}`);
     await act(async () => {
       custom.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });

@@ -160,7 +160,7 @@ describe('scenario: a complete drive', () => {
     expect(h.frame().toast).toEqual({
       kind: 'message',
       title: 'Alex Chen',
-      subtitle: 'WhatsApp',
+      subtitle: 'WhatsApp · reading aloud',
       opacity: 1,
     });
     car.go(messageAt + 5600, 50);
@@ -402,7 +402,8 @@ describe('scenario: a complete drive', () => {
     h.input('prev-page');
     const trip = h.frame().diagnostics;
     expect(trip?.page).toBe('trip');
-    expect(trip?.trip?.distanceKm).toBeGreaterThan(6.5);
+    expect(trip?.trip).toMatchObject({ completed: false, distance: { unit: 'km' } });
+    expect(trip?.trip?.distance.value).toBeGreaterThan(6.5);
     h.input('prev-page');
     expect(h.frame().diagnostics?.dtcs.map((x) => x.code)).toEqual(['P0420']);
 

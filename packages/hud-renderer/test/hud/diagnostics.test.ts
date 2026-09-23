@@ -1,8 +1,20 @@
+import {
+  DEFAULT_CONFIG,
+  EMPTY_PERSISTED_STATE,
+  composeFrame,
+  createInitialState,
+  diagnosticsPageKinds,
+  reduce,
+} from '@carheadsup/core';
 import type {
   DiagnosticGauge,
-  MaintenanceItemStatus,
-  TripSummary,
-  TripSummaryWidget,
+  DiagnosticsMaintenanceItem,
+  DiagnosticsTrip,
+  DisplayDistance,
+  HudConfig,
+  HudEvent,
+  HudState,
+  SignalId,
 } from '@carheadsup/core';
 import { describe, expect, it } from 'vitest';
 import {
@@ -13,7 +25,7 @@ import {
   tripTiles,
   vehicleLine,
 } from '../../src/hud/diagnostics/Diagnostics.tsx';
-import { SAMPLE_FRAMES } from '../../src/hud/fixtures.ts';
+import { FIXTURE_TIME, SAMPLE_FRAMES } from '../../src/hud/fixtures.ts';
 import { renderHud, textOf } from './render.ts';
 
 const GAUGE: DiagnosticGauge = {
@@ -27,17 +39,21 @@ const GAUGE: DiagnosticGauge = {
   status: 'ok',
 };
 
-const ITEM: MaintenanceItemStatus = {
+const ITEM: DiagnosticsMaintenanceItem = {
   itemId: 'oil',
   label: 'Oil & filter',
-  lastDoneAt: null,
-  lastDoneKm: null,
-  dueAtKm: null,
-  dueAtEpochMs: null,
-  remainingKm: null,
-  remainingDays: null,
   status: 'unknown',
+  remaining: null,
+  remainingDays: null,
+  dueAtEpochMs: null,
 };
+
+/** A remaining service distance as the composer sends it (signed value, unsigned text). */
+const left = (value: number, unit: 'km' | 'mi' = 'km'): DisplayDistance => ({
+  value,
+  unit,
+  text: `${Math.abs(value)} ${unit}`,
+});
 
 describe('gaugeGridShape', () => {
   it('keeps tiles large and never exceeds five columns', () => {
@@ -73,45 +89,43 @@ describe('gaugeFraction', () => {
 });
 
 describe('maintenanceRemaining', () => {
-  it('describes what remains', () => {
-    expect(maintenanceRemaining({ ...ITEM, remainingKm: 1240, remainingDays: 45 })).toBe(
+  it('describes what remains, in the units the frame carries', () => {
+    expect(maintenanceRemaining({ ...ITEM, remaining: left(1240), remainingDays: 45 })).toBe(
       'in 1240 km · 45 days',
     );
-    expect(maintenanceRemaining({ ...ITEM, remainingKm: 12_420 })).toBe('in 12 420 km');
+    expect(maintenanceRemaining({ ...ITEM, remaining: left(12_420) })).toBe('in 12\u2009420 km');
+    expect(maintenanceRemaining({ ...ITEM, remaining: left(261, 'mi') })).toBe('in 261 mi');
     expect(maintenanceRemaining({ ...ITEM, remainingDays: 1 })).toBe('in 1 day');
+    expect(maintenanceRemaining({ ...ITEM, remaining: left(0), remainingDays: 0 })).toBe(
+      'in 0 km · 0 days',
+    );
   });
 
   it('describes what is overdue, keeping mixed limits apart', () => {
-    expect(maintenanceRemaining({ ...ITEM, remainingKm: -320, remainingDays: -12 })).toBe(
+    expect(maintenanceRemaining({ ...ITEM, remaining: left(-320), remainingDays: -12 })).toBe(
       '320 km · 12 days overdue',
     );
-    expect(maintenanceRemaining({ ...ITEM, remainingKm: 420, remainingDays: -3 })).toBe(
+    expect(maintenanceRemaining({ ...ITEM, remaining: left(420), remainingDays: -3 })).toBe(
       'in 420 km · 3 days overdue',
+    );
+    expect(maintenanceRemaining({ ...ITEM, remaining: left(-199, 'mi'), remainingDays: 30 })).toBe(
+      'in 30 days · 199 mi overdue',
     );
   });
 
   it('is null when nothing is known', () => {
     expect(maintenanceRemaining(ITEM)).toBeNull();
-    expect(maintenanceRemaining({ ...ITEM, remainingKm: Number.NaN })).toBeNull();
+    expect(maintenanceRemaining({ ...ITEM, remaining: left(Number.NaN) })).toBeNull();
+    expect(maintenanceRemaining({ ...ITEM, remainingDays: Number.POSITIVE_INFINITY })).toBeNull();
   });
 });
 
 describe('tripTiles', () => {
-  const trip: TripSummary = {
-    startedAt: 0,
-    distanceKm: 42.66,
-    durationS: 3120,
-    movingS: 2710,
-    fuelUsedL: null,
-    avgLPer100km: null,
-    cost: null,
-    currency: 'EUR',
-  };
-  const widget: TripSummaryWidget = {
-    id: 'tripSummary',
-    zone: 'bottom',
+  const trip: DiagnosticsTrip = {
+    completed: false,
     distance: { value: 26.5, unit: 'mi', text: '26.5 mi' },
     durationS: 3120,
+    movingS: 2710,
     averageEconomy: 32.3,
     economyUnit: 'mpg-us',
     fuelUsed: 0.82,
@@ -122,8 +136,8 @@ describe('tripTiles', () => {
   const flat = (tiles: ReturnType<typeof tripTiles>) =>
     tiles.map((t) => `${t.label}=${t.value}${t.unit ? ` ${t.unit}` : ''}`);
 
-  it('prefers the display-unit widget', () => {
-    expect(flat(tripTiles(trip, widget))).toEqual([
+  it('shows the trip in the units the frame carries', () => {
+    expect(flat(tripTiles(trip))).toEqual([
       'Distance=26.5 mi',
       'Driving time=52 min',
       'Moving=45 min',
@@ -133,9 +147,10 @@ describe('tripTiles', () => {
     ]);
   });
 
-  it('falls back to the canonical summary with dashes for unknowns', () => {
-    expect(flat(tripTiles(trip, null))).toEqual([
-      'Distance=42.7 km',
+  it('shows dashes without units for unknown economy, fuel and cost', () => {
+    const unknown = { ...trip, averageEconomy: null, fuelUsed: null, cost: Number.NaN };
+    expect(flat(tripTiles(unknown))).toEqual([
+      'Distance=26.5 mi',
       'Driving time=52 min',
       'Moving=45 min',
       'Average=–',
@@ -145,7 +160,7 @@ describe('tripTiles', () => {
   });
 
   it('is empty without a trip', () => {
-    expect(tripTiles(null, null)).toEqual([]);
+    expect(tripTiles(null)).toEqual([]);
   });
 });
 
@@ -176,6 +191,23 @@ describe('dashboard pages', () => {
     const html = renderHud({ ...parked, diagnostics: { ...diag, dtcs: [], milOn: false } });
     expect(textOf(html)).toContain('No trouble codes Check-engine light off');
     expect(html).not.toContain('hud-diag__mil');
+  });
+
+  it('says whether the trip page shows the trip in progress or the last one', () => {
+    const tripFrame = SAMPLE_FRAMES['parked-trip']!;
+    const live = textOf(renderHud(tripFrame));
+    expect(live).toContain('In progress');
+    expect(live).not.toContain('Last trip');
+    const trip = tripFrame.diagnostics!.trip!;
+    const done = renderHud({
+      ...tripFrame,
+      widgets: tripFrame.widgets.filter((w) => w.id !== 'tripSummary'),
+      diagnostics: { ...tripFrame.diagnostics!, trip: { ...trip, completed: true } },
+    });
+    expect(textOf(done)).toContain('Last trip');
+    expect(done).toContain('data-completed="true"');
+    // The page needs no trip widget: everything comes from the dashboard frame.
+    expect(textOf(done)).toContain('42.7 km');
   });
 
   it('handles empty trip, maintenance and gauge pages', () => {
@@ -221,5 +253,79 @@ describe('dashboard pages', () => {
     expect(html.match(/class="hud-diag__dot[ "]/g)).toHaveLength(12);
     const single = renderHud({ ...parked, diagnostics: { ...diag, pageCount: 1, pageIndex: 0 } });
     expect(single).not.toContain('hud-diag__dots');
+  });
+});
+
+describe('dashboard composed end to end in the driver’s units', () => {
+  const DAY = 86_400_000;
+  const imperial: HudConfig = {
+    ...DEFAULT_CONFIG,
+    units: {
+      ...DEFAULT_CONFIG.units,
+      system: 'imperial',
+      fuelEconomy: 'mpg-us',
+      temperature: 'F',
+      pressure: 'psi',
+      currency: 'USD',
+    },
+  };
+
+  function showPage(state: HudState, config: HudConfig, kind: 'trip' | 'maintenance'): string {
+    const page = diagnosticsPageKinds(state).indexOf(kind);
+    const frame = composeFrame({ ...state, ui: { ...state.ui, page } }, config);
+    expect(frame.diagnostics?.page).toBe(kind);
+    return textOf(renderHud(frame));
+  }
+
+  it('shows an imperial driver miles on the maintenance page, never kilometres', () => {
+    const state = createInitialState(
+      imperial,
+      {
+        ...EMPTY_PERSISTED_STATE,
+        odometerKm: 55_790,
+        maintenanceRecords: [
+          { itemId: 'oil', odometerKm: 48_210, at: FIXTURE_TIME - 345 * DAY },
+          { itemId: 'tyre-rotation', odometerKm: 45_000, at: FIXTURE_TIME - 90 * DAY },
+        ],
+      },
+      FIXTURE_TIME,
+    );
+    const text = showPage(state, imperial, 'maintenance');
+    expect(text).toContain('Oil & filter Due soon in 261 mi · 20 days');
+    expect(text).toContain('Tyre rotation Overdue 491 mi overdue'); // 790 km
+    expect(text).not.toMatch(/\bkm\b/);
+  });
+
+  it('shows an imperial driver the trip in miles, gallons and mpg', () => {
+    const t0 = FIXTURE_TIME - 200_000;
+    let state = createInitialState(imperial, EMPTY_PERSISTED_STATE, t0);
+    const send = (event: HudEvent) => {
+      state = reduce(state, event, imperial);
+    };
+    const samples = (at: number, values: Partial<Record<SignalId, number>>) =>
+      send({
+        type: 'obd/samples',
+        samples: Object.entries(values).map(([signal, value]) => ({
+          signal: signal as SignalId,
+          value: value ?? 0,
+        })),
+        at,
+      });
+    send({ type: 'obd/link', state: 'connected', at: t0 });
+    for (let at = t0 + 500; at <= t0 + 60_000; at += 500) {
+      samples(at, { speed: 60, rpm: 2000, fuelRate: 4 });
+    }
+    for (let at = t0 + 60_500; at <= t0 + 63_000; at += 500) samples(at, { speed: 0, rpm: 0 });
+    for (let at = t0 + 65_000; at <= FIXTURE_TIME; at += 5000) send({ type: 'tick', at });
+    expect(state.context.context).toBe('parked');
+    expect(state.trip.current).not.toBeNull();
+
+    const text = showPage(state, imperial, 'trip');
+    expect(text).toContain('In progress');
+    expect(text).toMatch(/Distance 0\.6 mi/);
+    expect(text).toMatch(/Average \d+\.\d mpg/);
+    expect(text).toMatch(/Fuel used \d\.\d gal/);
+    expect(text).toMatch(/Cost \$\d+\.\d\d/);
+    expect(text).not.toMatch(/\bkm\b|\bL\b/);
   });
 });

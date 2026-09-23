@@ -1,0 +1,344 @@
+import { PROTOCOL_VERSION } from '@carheadsup/core';
+import type { TripRecord } from '@carheadsup/core';
+import { afterEach, describe, expect, it } from 'vitest';
+import { HUD_VERSION } from '../../src/meta.ts';
+import { PHONE_CLOSE } from '../../src/ws/phone-channel.ts';
+import { FakeSimulation, TestSocket, startTestServer, waitFor } from '../helpers.ts';
+import type { TestServer, TestServerOptions } from '../helpers.ts';
+
+let current: TestServer | null = null;
+const sockets: TestSocket[] = [];
+
+async function start(options: TestServerOptions = {}): Promise<TestServer> {
+  current = await startTestServer(options);
+  return current;
+}
+
+afterEach(async () => {
+  for (const socket of sockets.splice(0)) socket.close();
+  await current?.stop();
+  current = null;
+});
+
+function phone(t: TestServer): TestSocket {
+  const socket = new TestSocket(`${t.wsBase}/ws/phone`);
+  sockets.push(socket);
+  return socket;
+}
+
+function hello(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    t: 'hello',
+    v: PROTOCOL_VERSION,
+    device: 'Pixel 9',
+    app: 'carheadsup',
+    appVersion: '1.2.3',
+    token: '',
+    ...overrides,
+  };
+}
+
+/** Connect and complete the handshake. */
+async function connected(
+  t: TestServer,
+  overrides: Record<string, unknown> = {},
+): Promise<TestSocket> {
+  const socket = phone(t);
+  await socket.opened;
+  socket.send(hello(overrides));
+  await socket.nextOfType('welcome');
+  return socket;
+}
+
+function trip(n: number): TripRecord {
+  const startedAt = 1_790_000_000_000 + n * 3_600_000;
+  return {
+    id: `trip-${n}`,
+    startedAt,
+    endedAt: startedAt + 600_000,
+    distanceKm: n,
+    durationS: 600,
+    movingS: 500,
+    idleS: 100,
+    fuelUsedL: null,
+    avgLPer100km: null,
+    maxSpeedKph: 80,
+    avgMovingSpeedKph: 40,
+    cost: null,
+    currency: 'USD',
+    startOdometerKm: null,
+    endOdometerKm: null,
+  };
+}
+
+describe('/ws/phone handshake', () => {
+  it('welcomes a phone and reports it connected', async () => {
+    const t = await start({
+      config: { vehicle: { name: 'Golf' }, phone: { readMessagesAloud: false } },
+    });
+    const socket = phone(t);
+    await socket.opened;
+    socket.send(hello());
+    expect(await socket.next()).toEqual({
+      t: 'welcome',
+      v: PROTOCOL_VERSION,
+      hudName: 'Golf',
+      hudVersion: HUD_VERSION,
+      readMessagesAloud: false,
+    });
+    await waitFor(() => t.server.engine.state.phone.connected, 1000, 'phone link');
+    expect(t.server.engine.state.phone).toMatchObject({
+      deviceName: 'Pixel 9',
+      appVersion: '1.2.3',
+    });
+    const info = await (await fetch(`${t.base}/api/info`)).json();
+    expect(info).toMatchObject({ phoneConnected: true });
+  });
+
+  it('checks the pairing token when one is configured', async () => {
+    const t = await start({ config: { phone: { pairingToken: 'K7fQ2mZr' } } });
+    const wrong = phone(t);
+    await wrong.opened;
+    wrong.send(hello({ token: 'guess' }));
+    expect(await wrong.next()).toMatchObject({ t: 'error', code: 'bad-token' });
+    expect(await wrong.closed).toBe(PHONE_CLOSE.badToken);
+    expect(t.server.engine.state.phone.connected).toBe(false);
+
+    const right = await connected(t, { token: 'K7fQ2mZr' });
+    expect(right.ws.readyState).toBe(right.ws.OPEN);
+  });
+
+  it('refuses other protocol versions', async () => {
+    const t = await start();
+    const socket = phone(t);
+    await socket.opened;
+    socket.send(hello({ v: PROTOCOL_VERSION + 1 }));
+    expect(await socket.next()).toMatchObject({ t: 'error', code: 'unsupported-version' });
+    expect(await socket.closed).toBe(PHONE_CLOSE.unsupportedVersion);
+  });
+
+  it('requires hello as the first message', async () => {
+    const t = await start();
+    const socket = phone(t);
+    await socket.opened;
+    socket.send({ t: 'ping' });
+    expect(await socket.next()).toMatchObject({ t: 'error', code: 'bad-message' });
+    expect(await socket.closed).toBe(PHONE_CLOSE.helloRequired);
+
+    const garbage = phone(t);
+    await garbage.opened;
+    garbage.send('{"t":"hello"');
+    expect(await garbage.closed).toBe(PHONE_CLOSE.helloRequired);
+  });
+
+  it('closes sessions that never say hello', async () => {
+    const t = await start({ tuning: { helloTimeoutMs: 100 } });
+    const socket = phone(t);
+    await socket.opened;
+    expect(await socket.next(undefined, 2000)).toMatchObject({ t: 'error', code: 'bad-message' });
+    expect(await socket.closed).toBe(PHONE_CLOSE.helloRequired);
+  });
+
+  it('replaces the active phone with a newer session without flapping the link', async () => {
+    const t = await start();
+    const first = await connected(t, { device: 'Old phone' });
+    const links: boolean[] = [];
+    const unsubscribe = t.server.engine.onFrame((frame) => links.push(frame.status.phone));
+    const second = await connected(t, { device: 'New phone' });
+    expect(await first.closed).toBe(PHONE_CLOSE.replaced);
+    expect(first.closeReason).toBe('replaced');
+    expect(t.server.engine.state.phone).toMatchObject({ connected: true, deviceName: 'New phone' });
+    // Frames composed across the switch-over never showed the phone as disconnected.
+    await waitFor(() => links.length >= 3, 2000, 'frames');
+    unsubscribe();
+    expect(links.every(Boolean)).toBe(true);
+    // Messages from the new session are processed.
+    second.send({ t: 'road', speedLimitKph: 50, source: 'osm' });
+    await waitFor(() => t.server.engine.state.road?.speedLimitKph === 50, 1000, 'road update');
+  });
+
+  it('reports the phone disconnected when its socket closes', async () => {
+    const t = await start();
+    const socket = await connected(t);
+    await waitFor(() => t.server.engine.state.phone.connected, 1000, 'connected');
+    socket.close();
+    await waitFor(() => !t.server.engine.state.phone.connected, 2000, 'disconnected');
+  });
+
+  it('disconnects the phone when the pairing token changes', async () => {
+    const t = await start({ config: { phone: { pairingToken: 'one' } } });
+    const socket = await connected(t, { token: 'one' });
+    const res = await fetch(`${t.base}/api/config`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: { pairingToken: 'two' } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await socket.nextOfType('error')).toMatchObject({ code: 'bad-token' });
+    expect(await socket.closed).toBe(PHONE_CLOSE.badToken);
+    expect(t.server.engine.state.phone.connected).toBe(false);
+  });
+
+  it('pushes due maintenance right after the welcome', async () => {
+    const year = 365 * 86_400_000;
+    const t = await start({
+      files: {
+        'state.json': JSON.stringify({
+          odometerKm: 50_000,
+          learnedGearRatios: null,
+          avgLPer100km: null,
+          maintenanceRecords: [{ itemId: 'oil', odometerKm: 45_000, at: Date.now() - year }],
+        }),
+      },
+    });
+    const socket = await connected(t);
+    const due = await socket.nextOfType('maintenance-due');
+    expect(due['items']).toEqual([expect.objectContaining({ itemId: 'oil', status: 'overdue' })]);
+  });
+});
+
+describe('/ws/phone messages', () => {
+  it('translates phone messages into HUD state', async () => {
+    const t = await start();
+    const socket = await connected(t);
+    socket.send({
+      t: 'nav',
+      active: true,
+      source: 'osmand',
+      maneuver: { type: 'left' },
+      distanceM: 300,
+      street: 'Elm St',
+    });
+    socket.send({ t: 'media', playing: true, title: 'Song', artist: 'Band' });
+    socket.send({ t: 'message', id: 'm1', sender: 'Alex', app: null, readingAloud: true });
+    socket.send({ t: 'location', lat: 48.1, lon: 11.5, accuracyM: 5 });
+    socket.send({ t: 'hazards', items: [{ id: 'h1', type: 'police', distanceM: 900 }] });
+    await waitFor(() => t.server.engine.state.hazards.length === 1, 1000, 'hazards');
+    const state = t.server.engine.state;
+    expect(state.nav?.info).toMatchObject({
+      source: 'osmand',
+      maneuver: { type: 'left' },
+      street: 'Elm St',
+    });
+    expect(state.media?.info).toMatchObject({ title: 'Song', trackKey: 'Song|Band|' });
+    expect(state.messages[0]).toMatchObject({ id: 'm1', sender: 'Alex' });
+    expect(state.env.location).toMatchObject({ lat: 48.1, lon: 11.5 });
+    socket.send({ t: 'nav', active: false, source: 'osmand' });
+    await waitFor(() => t.server.engine.state.nav === null, 1000, 'nav cleared');
+  });
+
+  it('answers ping with pong and trips-request with trips', async () => {
+    const t = await start({
+      files: { 'trips.jsonl': [1, 2, 3].map((n) => `${JSON.stringify(trip(n))}\n`).join('') },
+    });
+    const socket = await connected(t);
+    socket.send({ t: 'ping', id: 7 });
+    expect(await socket.nextOfType('pong')).toEqual({ t: 'pong', id: 7 });
+    socket.send({ t: 'ping' });
+    expect(await socket.nextOfType('pong')).toEqual({ t: 'pong' });
+    socket.send({ t: 'trips-request', since: trip(1).endedAt });
+    const trips = await socket.nextOfType('trips');
+    expect((trips['trips'] as TripRecord[]).map((x) => x.id)).toEqual(['trip-3', 'trip-2']);
+    socket.send({ t: 'trips-request', since: 0 });
+    expect((await socket.nextOfType('trips'))['trips'] as TripRecord[]).toHaveLength(3);
+  });
+
+  it('reports invalid messages but keeps the session, up to 20 in a row', async () => {
+    const t = await start();
+    const socket = await connected(t);
+    socket.send({
+      t: 'message',
+      id: 'm',
+      sender: 'X',
+      app: null,
+      readingAloud: false,
+      body: 'secret text',
+    });
+    const error = await socket.nextOfType('error');
+    expect(error).toMatchObject({ code: 'bad-message' });
+    expect(String(error['message'])).toContain('not allowed');
+    expect(t.server.engine.state.messages).toEqual([]);
+    socket.send({ t: 'ping', id: 1 });
+    expect(await socket.nextOfType('pong')).toEqual({ t: 'pong', id: 1 });
+
+    // A valid message resets the streak; 20 invalid ones in a row end the session.
+    for (let i = 0; i < 19; i += 1) socket.send('nonsense');
+    socket.send({ t: 'ping', id: 2 });
+    expect(await socket.nextOfType('pong')).toEqual({ t: 'pong', id: 2 });
+    for (let i = 0; i < 20; i += 1) socket.send({ t: 'nav' });
+    expect(await socket.closed).toBe(PHONE_CLOSE.tooManyErrors);
+  });
+
+  it('rate-limits a flooding phone without dropping the session', async () => {
+    const t = await start({ tuning: { phoneRatePerSecond: 1, phoneRateBurst: 5 } });
+    const socket = await connected(t); // the hello used one token
+    for (let i = 0; i < 10; i += 1) socket.send({ t: 'ping', id: i });
+    socket.send({ t: 'road', speedLimitKph: 30, source: 'osm' }); // dropped as well
+    await waitFor(() => socket.messages.some((m) => m['t'] === 'error'), 1000, 'rate-limit notice');
+    await new Promise((r) => setTimeout(r, 100));
+    const pongs = socket.messages.filter((m) => m['t'] === 'pong').map((m) => m['id']);
+    expect(pongs).toEqual([0, 1, 2, 3]);
+    // One notice per episode, not one per dropped message.
+    const errors = socket.messages.filter((m) => m['t'] === 'error');
+    expect(errors).toEqual([
+      { t: 'error', code: 'bad-message', message: expect.stringMatching(/Too many/) },
+    ]);
+    expect(t.server.engine.state.road).toBeNull();
+    expect(socket.ws.readyState).toBe(socket.ws.OPEN);
+    // Tokens come back over time.
+    await new Promise((r) => setTimeout(r, 1100));
+    socket.send({ t: 'ping', id: 99 });
+    expect(await socket.next((m) => m['t'] === 'pong' && m['id'] === 99)).toEqual({
+      t: 'pong',
+      id: 99,
+    });
+  });
+
+  it('delivers call actions to the phone when the driver answers a ringing call', async () => {
+    const t = await start();
+    const socket = await connected(t);
+    socket.send({ t: 'call', id: 'call-1', state: 'ringing', callerName: 'Maria', number: null });
+    await waitFor(() => t.server.engine.state.call?.state === 'ringing', 1000, 'ringing');
+    const hud = new TestSocket(`${t.wsBase}/ws/hud`);
+    sockets.push(hud);
+    await hud.opened;
+    hud.send({ t: 'input', action: 'primary' });
+    expect(await socket.nextOfType('call-action')).toEqual({
+      t: 'call-action',
+      callId: 'call-1',
+      action: 'accept',
+    });
+    // The phone's own remote control works too.
+    socket.send({ t: 'input', action: 'secondary' });
+    expect(await socket.nextOfType('call-action')).toEqual({
+      t: 'call-action',
+      callId: 'call-1',
+      action: 'decline',
+    });
+  });
+
+  it('also delivers phone messages to the simulated phone', async () => {
+    const sim = new FakeSimulation();
+    const t = await start({ sim: true, simulation: sim });
+    const socket = await connected(t);
+    socket.send({ t: 'call', id: 'c2', state: 'ringing', callerName: null, number: '+1 555' });
+    await waitFor(() => t.server.engine.state.call !== null, 1000, 'ringing');
+    await fetch(`${t.base}/api/input`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'primary' }),
+    });
+    expect(await socket.nextOfType('call-action')).toMatchObject({
+      callId: 'c2',
+      action: 'accept',
+    });
+    expect(sim.delivered).toContainEqual({ t: 'call-action', callId: 'c2', action: 'accept' });
+  });
+
+  it('closes the phone with 1001 on shutdown', async () => {
+    const t = await start();
+    const socket = await connected(t);
+    await t.server.stop();
+    expect(await socket.closed).toBe(1001);
+  });
+});

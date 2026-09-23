@@ -1,10 +1,4 @@
-import type {
-  AlertFrame,
-  HudFrame,
-  SpeedLimitSignStyle,
-  WidgetFrame,
-  Zone,
-} from '@carheadsup/core';
+import type { AlertFrame, HudFrame, WidgetFrame, Zone } from '@carheadsup/core';
 
 /** The 3×3 zones in reading order (row by row). */
 export const ZONES: readonly Zone[] = [
@@ -65,15 +59,4 @@ export function groupByZone(widgets: readonly WidgetFrame[]): Record<Zone, Widge
  */
 export function visibleAlerts(frame: HudFrame): AlertFrame[] {
   return frame.blanked ? frame.alerts.filter((a) => a.severity === 'critical') : frame.alerts;
-}
-
-/**
- * Sign style for small inline limits (e.g. a speed camera's enforced limit). Hazard frames do not
- * carry it, so it is taken from the frame's speed-limit widget, defaulting to the Vienna ring.
- */
-export function signStyleOf(frame: HudFrame): SpeedLimitSignStyle {
-  for (const w of frame.widgets) {
-    if (w.id === 'speedLimit') return w.style;
-  }
-  return 'vienna';
 }

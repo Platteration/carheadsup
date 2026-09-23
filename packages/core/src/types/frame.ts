@@ -10,7 +10,7 @@ import type {
 } from './config.ts';
 import type { HazardType, Lane, Maneuver } from './nav.ts';
 import type { CallState } from './phone.ts';
-import type { MaintenanceItemStatus, TripSummary } from './records.ts';
+import type { MaintenanceStatusKind } from './records.ts';
 import type { SignalId } from './signals.ts';
 import type { DtcKind, DtcSeverity, ObdLinkState } from './vehicle.ts';
 
@@ -78,6 +78,10 @@ export interface NavWidget extends WidgetBase {
   distance: DisplayDistance | null;
   street: string | null;
   then: Maneuver | null;
+  /**
+   * The nav app's maneuver icon (base64 PNG) to draw instead of a built-in arrow. Only set
+   * when `maneuver.type` is 'unknown': known maneuvers are drawn by the renderer.
+   */
   iconPng: string | null;
   /** Maneuver is close (≈ < 200 m / 0.1 mi) — emphasise and count down. */
   imminent: boolean;
@@ -104,6 +108,8 @@ export interface HazardWidget extends WidgetBase {
   distance: DisplayDistance | null;
   /** Enforced limit for cameras, display units. */
   speedLimit: number | null;
+  /** Sign style for `speedLimit` (the driver's configured speed-limit sign). */
+  limitStyle: SpeedLimitSignStyle;
   /** Expected delay for traffic, whole minutes. */
   delayMinutes: number | null;
   label: string;
@@ -277,6 +283,45 @@ export interface DiagnosticDtc {
 export type DiagnosticsPageKind =
   'overview' | 'engine' | 'fuel' | 'electrical' | 'trouble-codes' | 'trip' | 'maintenance';
 
+/** The trip on the parked dashboard, in the driver's units. */
+export interface DiagnosticsTrip {
+  /** False for the trip in progress, true for the last completed trip (shown when none is active). */
+  completed: boolean;
+  /** One decimal, e.g. "42.7 km" / "26.5 mi". */
+  distance: DisplayDistance;
+  /** Wall-clock driving time, seconds. */
+  durationS: number;
+  /** Time spent moving, seconds. */
+  movingS: number;
+  /** Trip-average economy; null when fuel flow is unknown. */
+  averageEconomy: number | null;
+  economyUnit: FuelEconomyUnit;
+  /** Two decimals; null when fuel flow is unknown. */
+  fuelUsed: number | null;
+  fuelUnit: 'L' | 'gal';
+  /** Fuel cost in `currency`; null when fuel is unknown. */
+  cost: number | null;
+  /** ISO 4217 code. */
+  currency: string;
+}
+
+/** One service item on the parked dashboard, in the driver's units. */
+export interface DiagnosticsMaintenanceItem {
+  itemId: string;
+  label: string;
+  status: MaintenanceStatusKind;
+  /**
+   * Distance left until the service is due, whole km or mi; `value` is negative when overdue by
+   * distance, while `text` is the unsigned magnitude ("320 km") to read as "in 320 km" or
+   * "320 km overdue". Null when the item has no distance interval or no odometer is known.
+   */
+  remaining: DisplayDistance | null;
+  /** Whole days until due, negative when overdue; null when the item has no time interval. */
+  remainingDays: number | null;
+  /** When the service falls due by time (epoch ms); null when not time-based or never done. */
+  dueAtEpochMs: number | null;
+}
+
 export interface DiagnosticsFrame {
   page: DiagnosticsPageKind;
   pageIndex: number;
@@ -285,8 +330,10 @@ export interface DiagnosticsFrame {
   gauges: DiagnosticGauge[];
   dtcs: DiagnosticDtc[];
   milOn: boolean;
-  trip: TripSummary | null;
-  maintenance: MaintenanceItemStatus[];
+  /** Trip page: the trip in progress, else the last completed one; null before the first trip. */
+  trip: DiagnosticsTrip | null;
+  /** Maintenance page: every item; overview: only those due soon or overdue. Most urgent first. */
+  maintenance: DiagnosticsMaintenanceItem[];
   vehicle: {
     vin: string | null;
     adapter: string | null;
