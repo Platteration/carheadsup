@@ -15,6 +15,7 @@ export * from './types/frame.ts';
 export * from './types/state.ts';
 export * from './types/protocol.ts';
 export * from './types/api.ts';
+export * from './types/effects.ts';
 
 export * from './units.ts';
 export * from './staleness.ts';

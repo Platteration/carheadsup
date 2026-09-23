@@ -166,6 +166,8 @@ export interface ProjectionConfig {
     br: [number, number];
     bl: [number, number];
   };
+  /** Draw an alignment grid instead of the HUD (used while calibrating on the windshield). */
+  showGrid: boolean;
 }
 
 export type NightModeSource = 'sensor' | 'sun' | 'always' | 'never';
