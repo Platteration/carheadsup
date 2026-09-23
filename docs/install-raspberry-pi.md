@@ -34,8 +34,17 @@ With [Raspberry Pi Imager](https://www.raspberrypi.com/software/) write **Raspbe
 - your Wi-Fi country, time zone and keyboard layout;
 - SSH enabled (the rest of this guide runs over SSH).
 
-Use Lite: the kiosk replaces the desktop. On the desktop image switch to console boot first
-(`sudo raspi-config nonint do_boot_behaviour B1`).
+Use Lite: the kiosk replaces the desktop. On the desktop image, switch the desktop off before
+step 7:
+
+```sh
+sudo systemctl disable display-manager.service      # the desktop's login manager (lightdm)
+```
+
+Switching to console boot (`raspi-config` → *System Options → Boot / Auto Login → Console*) is
+not enough: it only changes the default boot target, which the installer sets back to
+`graphical.target` to start the kiosk — and that starts an enabled display manager too, which
+then takes the screen from the HUD.
 
 ## 2. Update and enable I2C
 
@@ -178,7 +187,9 @@ After a minute the display shows the HUD — mirrored, because it is meant to be
 ```
 
 as `carheadsup`, restarts it whenever it exits (`Restart=always`), gives it 30 s to save its state
-on stop, and confines it: `NoNewPrivileges`, no capabilities, `ProtectSystem=strict` with
+on stop, waits for the file systems that hold `/var/lib/carheadsup` and `/etc/carheadsup` to be
+mounted (`RequiresMountsFor`, see [read-only root](#read-only-root-file-system)), and confines
+it: `NoNewPrivileges`, no capabilities, `ProtectSystem=strict` with
 `ReadWritePaths=` only for `/var/lib/carheadsup`, `/etc/carheadsup` and `/sys/class/backlight`,
 `ProtectHome`, `PrivateTmp`, restricted address families, namespaces and system calls. Device
 access (I²C, GPIO, serial, backlight) comes from the user's groups. Further `CARHEADSUP_*`
@@ -188,11 +199,15 @@ see [configuration.md](configuration.md#command-line-and-environment).
 **`carheadsup-kiosk.service`** ([source](../deploy/systemd/carheadsup-kiosk.service)) takes over
 `tty1` from the login prompt, opens a logind session for `carheadsup-kiosk` (PAM stack
 `/etc/pam.d/carheadsup-kiosk`) and runs `cage -d -s -- /opt/carheadsup/deploy/kiosk.sh`. The
-[launcher](../deploy/kiosk.sh) waits up to 60 s for the server to answer, then starts Chromium in
-kiosk mode on `http://localhost:8080/` with a fresh profile in RAM (no "restore pages?" prompt
-after a power cut). cage has no idle timeout, so the screen never blanks by itself; if cage or
-Chromium exits, systemd restarts it. Settings (in a drop-in, `sudo systemctl edit
-carheadsup-kiosk`):
+[launcher](../deploy/kiosk.sh) waits until the HUD page loads, then starts Chromium in kiosk mode
+on `http://localhost:8080/` with a fresh profile in RAM (no "restore pages?" prompt after a power
+cut). It never points Chromium at a page that does not load, because the browser's own error page
+would be a bright rectangle on the windshield: while the server does not answer — starting,
+crash-looping, or listening on another port — the screen stays black (cage draws black), however
+long that lasts, and every `CARHEADSUP_KIOSK_WAIT_S` seconds the kiosk's log says why ("no
+answer", "HTTP 503" …). Should a page still fail later, Chromium runs with dark error pages. cage
+has no idle timeout, so the screen never blanks by itself; if cage or Chromium exits, systemd
+restarts it. Settings (in a drop-in, `sudo systemctl edit carheadsup-kiosk`):
 
 ```ini
 [Service]
@@ -201,6 +216,12 @@ Environment=CARHEADSUP_KIOSK_WAIT_S=60
 Environment=CARHEADSUP_KIOSK_SCALE=1
 Environment=CARHEADSUP_KIOSK_FLAGS=
 ```
+
+`CARHEADSUP_KIOSK_WAIT_S` is how often a warning is logged while the kiosk waits (it keeps
+waiting); `CARHEADSUP_KIOSK_SCALE` is Chromium's device scale factor (1 = one CSS pixel per panel
+pixel); `CARHEADSUP_KIOSK_FLAGS` are extra Chromium flags, separated by spaces. When the server
+moves to another port (`server.port`, `CARHEADSUP_PORT`), change `CARHEADSUP_KIOSK_URL` with it —
+until then the kiosk stays black.
 
 `-s` lets you switch to a text console with `Ctrl+Alt+F2` when a keyboard is attached. The kiosk
 page maps keys to HUD inputs (Enter / Escape / arrows / B / + / −, see
@@ -327,6 +348,11 @@ through it. Changes apply immediately. At least:
      >/dev/null && echo "API token: $API_TOKEN  pairing code: $PAIRING"
    ```
 
+   From then on, browsers on other devices need the API token too: the settings app and the
+   developer console ask for it once and keep it in that browser (or open
+   `http://hud.local:8080/settings?token=<token>` or `/dev?token=<token>` once). The kiosk on
+   the Pi itself needs none.
+
 2. **Vehicle**: fuel type, tank size, engine displacement, transmission, redline, fuel price.
 3. **Units**: km/h or mph, economy, temperature, pressure, clock, currency.
 4. **OBD**: serial path or TCP address if not the Bluetooth default.
@@ -335,37 +361,61 @@ through it. Changes apply immediately. At least:
 6. **Sensors and buttons**, **Layout**, **Alerts**, **Maintenance** (enter the date and odometer
    of each item's last service).
 
+Leave *Server → Port* and *Listen address* alone unless you need them: they take effect at the
+next restart, and the kiosk only follows a new port once `CARHEADSUP_KIOSK_URL` says so (it stays
+black until then; see [the units](#the-units)). Ports below 1024 do not work, since the service
+has no privileges.
+
 Every option is described in [configuration.md](configuration.md). To edit the file by hand, stop
-the service first, since it rewrites the file on changes from the settings app:
+the service first, since it rewrites the file on changes from the settings app, and check the
+syntax before you start it again:
 
 ```sh
 sudo systemctl stop carheadsup
 sudoedit /etc/carheadsup/config.json
+sudo python3 -m json.tool /etc/carheadsup/config.json >/dev/null && echo "valid JSON"
 sudo systemctl start carheadsup
 journalctl -u carheadsup -b | grep Config:     # invalid fields are reported and reset
 ```
+
+The server repairs invalid *fields* one by one, but a file that is not valid JSON at all — a
+missing comma or quote, a trailing comma — cannot be read: the HUD then starts with **every**
+setting at its default (the default projection too) and **locked**: the API token and pairing
+code become random values nobody knows, so the phone and other devices cannot connect (the HUD's
+own display works). The file is left as it is and the settings app cannot save. The log says
+"is not valid JSON (…) … Fix it and restart the HUD". To recover, stop the service, fix
+`config.json`, check it as above and start the service.
 
 ## Read-only root file system
 
 Power disappears whenever the ignition goes off. The HUD's own files are written crash-safely,
 but the OS writes elsewhere too. For a car that is switched off without a clean shutdown, make the
-root file system read-only:
+root file system read-only with the overlay of `raspi-config` (the `overlayroot` package): every
+change to the root file system then lives in RAM and is gone at the next power cycle, so the HUD
+needs a file system of its own outside the overlay.
 
-1. Finish configuring first: with the overlay active, changes to `/etc` and `/var` live in RAM
-   and are gone after the next power cycle — including the HUD's config, trips and odometer.
-2. Give the HUD a persistent place: a small separate ext4 partition (or USB stick) labelled
-   `hud-data`, mounted at `/var/lib/carheadsup`, and the config moved there.
+1. **Finish setting up first.** With the overlay active, changes outside the HUD's data
+   partition — `/etc/default/carheadsup`, unit drop-ins, packages, Wi-Fi settings — are lost at
+   the next power cycle.
+2. **Give the HUD a persistent place**: a small separate ext4 partition (or USB stick) labelled
+   `hud-data`, mounted at `/var/lib/carheadsup`, with the existing data and the config moved onto
+   it:
 
    ```sh
-   echo 'LABEL=hud-data /var/lib/carheadsup ext4 defaults,noatime,nofail 0 2' | sudo tee -a /etc/fstab
+   # e.g. a USB stick (this erases it): sudo mkfs.ext4 -L hud-data /dev/sda1
    sudo systemctl stop carheadsup
-   sudo mount /var/lib/carheadsup            # (copy any existing data onto it first)
-   sudo chown carheadsup:carheadsup /var/lib/carheadsup && sudo chmod 0700 /var/lib/carheadsup
-   sudo install -o carheadsup -g carheadsup -m 0600 /etc/carheadsup/config.json /var/lib/carheadsup/config.json
+   sudo mkdir -p /mnt/hud-data && sudo mount LABEL=hud-data /mnt/hud-data
+   sudo cp -a /var/lib/carheadsup/. /mnt/hud-data/          # state.json, trips.jsonl
+   sudo install -o carheadsup -g carheadsup -m 0600 /etc/carheadsup/config.json /mnt/hud-data/config.json
+   sudo chown carheadsup:carheadsup /mnt/hud-data && sudo chmod 0700 /mnt/hud-data
+   sudo umount /mnt/hud-data
+   echo 'LABEL=hud-data /var/lib/carheadsup ext4 defaults,noatime,nofail 0 2' | sudo tee -a /etc/fstab
+   sudo systemctl daemon-reload && sudo mount /var/lib/carheadsup
    sudo systemctl edit carheadsup
    ```
 
-   and in the drop-in, point `--config` at the data directory:
+   and in the drop-in, point `--config` at the data directory (use the Node.js path from
+   `systemctl cat carheadsup` if it is not `/usr/bin/node`):
 
    ```ini
    [Service]
@@ -373,11 +423,47 @@ root file system read-only:
    ExecStart=/usr/bin/node /opt/carheadsup/packages/hud-server/src/main.ts --config /var/lib/carheadsup/config.json --data-dir /var/lib/carheadsup --renderer-dir /opt/carheadsup/packages/hud-renderer/dist
    ```
 
-3. `sudo raspi-config` → *Performance Options → Overlay File System* → enable the overlay (and
-   write-protect the boot partition), reboot.
+   Then `sudo systemctl start carheadsup`. The unit waits for this mount
+   (`RequiresMountsFor=/var/lib/carheadsup`): a USB stick that shows up a few seconds late
+   delays the HUD instead of letting it start on the empty mount point — where it would create
+   default settings without tokens and later write them over your data. If the partition is
+   missing altogether the HUD does not start (`nofail` keeps the rest of the system booting).
+3. **Enable the overlay**: `sudo raspi-config` → *Performance Options → Overlay File System* →
+   enable it (and write-protect the boot partition if you like). Do not reboot yet.
+4. **Keep the data partition out of the overlay.** By default the overlay also covers every other
+   file system in `/etc/fstab` — `hud-data` included: the HUD would read its data but lose every
+   change (settings, odometer, service records, trips) at the next power cut. `raspi-config` put
+   `overlayroot=tmpfs` in `cmdline.txt`; add `recurse=0` so that only the root file system is
+   overlaid, then reboot:
 
-To change the system later (updates, packages, `/boot/firmware`), disable the overlay in
-`raspi-config`, reboot, make the change, and enable it again.
+   ```sh
+   sudo sed -i 's/overlayroot=tmpfs /overlayroot=tmpfs:recurse=0 /' /boot/firmware/cmdline.txt
+   grep -o 'overlayroot=[^ ]*' /boot/firmware/cmdline.txt     # overlayroot=tmpfs:recurse=0
+   sudo reboot
+   ```
+
+5. **Check** after the reboot:
+
+   ```sh
+   findmnt -no FSTYPE,OPTIONS /                     # overlay rw,…
+   findmnt -no FSTYPE,OPTIONS /var/lib/carheadsup   # ext4 rw,noatime,…
+   ```
+
+   The second line must say `ext4` and `rw`. If it says `overlay`, or prints nothing, the HUD's
+   changes are not kept: go back to steps 4 and 2.
+
+**Changing the system later** (updates, packages, `/boot/firmware`): `raspi-config` cannot switch
+this overlay off — its *disable* removes only the exact text `overlayroot=tmpfs ` and reports
+success anyway. Remove the option by hand and reboot:
+
+```sh
+sudo mount -o remount,rw /boot/firmware
+sudo sed -i 's/overlayroot=tmpfs:recurse=0 //' /boot/firmware/cmdline.txt
+sudo reboot
+```
+
+Make the change (if you write-protected the boot partition, `sudo mount -o remount,rw
+/boot/firmware` before anything writes to it, e.g. a kernel update), then repeat steps 3–5.
 
 A lighter alternative without the overlay: a good high-endurance card, the HUD's crash-safe
 writes, and the journal in RAM (`Storage=volatile` in `/etc/systemd/journald.conf`).
@@ -395,14 +481,14 @@ sudo deploy/install.sh
 The installer replaces `/opt/carheadsup`, keeps `/etc/carheadsup` and `/var/lib/carheadsup`,
 leaves an enabled `obd-rfcomm@…` unit enabled (no need to repeat `--obd-mac`) and restarts the
 services. Config files from older versions are read leniently: new options get their defaults,
-and a file that had to be corrected is kept as `config.json.bak`. With a read-only root, disable
-the overlay first.
+and a file that had to be corrected is kept as `config.json.bak`. With a read-only root, switch
+the overlay off first ([changing the system later](#read-only-root-file-system)).
 
 ## Logs
 
 ```sh
 journalctl -u carheadsup -f               # server: OBD link, phone, sensors, config
-journalctl -u carheadsup-kiosk -f         # cage and Chromium
+journalctl -u carheadsup-kiosk -f         # cage, Chromium, and why the kiosk is still waiting
 journalctl -u 'obd-rfcomm@*' -b           # Bluetooth binding
 systemctl status carheadsup carheadsup-kiosk
 ```
@@ -415,9 +501,12 @@ renderer clients pass their token) or message content.
 
 | Symptom | Things to check |
 | --- | --- |
-| Display stays black | `systemctl status carheadsup-kiosk`, `journalctl -u carheadsup-kiosk -b`. Is `graphical.target` the default (`systemctl get-default`)? A desktop display manager competing for the screen? `dtoverlay=vc4-kms-v3d` still in `config.txt` (cage needs KMS)? |
-| Page "The HUD renderer has not been built" | `npm run build` in the checkout, then `sudo deploy/install.sh` again. |
-| Only a tiny red dot in a corner | The page is loaded but receives no frames: the server is down or restarting (`systemctl status carheadsup`), or the kiosk points at the wrong port. |
+| Display stays black | `systemctl status carheadsup-kiosk`, `journalctl -u carheadsup-kiosk -b`. "waiting for http://localhost:8080/ … (no answer)": the kiosk waits for the server — is it running (`systemctl status carheadsup`), and on the port in `CARHEADSUP_KIOSK_URL`? "HTTP 503": the renderer is not built (`npm run build` in the checkout, then `sudo deploy/install.sh`). "HTTP 403": the server does not accept the host name in `CARHEADSUP_KIOSK_URL` (use `localhost`). Otherwise: is `graphical.target` the default (`systemctl get-default`)? A desktop display manager competing for the screen (`sudo systemctl disable display-manager.service`)? `dtoverlay=vc4-kms-v3d` still in `config.txt` (cage needs KMS)? |
+| Page "The HUD renderer has not been built" (in a browser) | `npm run build` in the checkout, then `sudo deploy/install.sh` again. |
+| HUD does not start; `systemctl status carheadsup` says "Dependency failed" | With the [read-only root](#read-only-root-file-system) recipe: the `hud-data` file system is missing or cannot be mounted (`lsblk -f`, `journalctl -b -u var-lib-carheadsup.mount`). |
+| Settings, odometer or trips are back to old values after every start | With a read-only root: the data partition is under the overlay (`findmnt /var/lib/carheadsup` says `overlay`) — see [step 4 of the recipe](#read-only-root-file-system). |
+| All settings back to defaults after a hand edit, the phone cannot connect, settings cannot be saved | The file is not valid JSON (the log says "is not valid JSON"); the HUD runs locked until it is fixed — see [editing by hand](#10-configure-the-hud). |
+| Only a tiny red dot in a corner | The page is loaded but receives no frames: the server is down or restarting (`systemctl status carheadsup`). |
 | Only a tiny ring in a corner | The HUD is blanked: hold the primary button, press B on a keyboard, or send `toggle-blank` from the companion's remote. |
 | Text reads backwards / upside down on the glass | *Projection*: `mirrorX`, `mirrorY`, *Panel rotation*. |
 | OBD never connects | `journalctl -u carheadsup` shows the reason. Ignition on? `/dev/rfcomm0` present (`systemctl status obd-rfcomm@<MAC>`)? Adapter paired *and* trusted? Another device (a phone app) connected to it? For USB: right `obd.serialPath` and `obd.baudRate`? Try `obd.protocol` = `"6"` (CAN 11-bit 500 kbit/s) instead of automatic on a modern car. |
@@ -425,12 +514,14 @@ renderer clients pass their token) or message content.
 | Phone does not find the HUD | Same Wi-Fi? `avahi-browse -rt _carheadsup._tcp` on the Pi lists the advertisement (install `avahi-utils`). Enter `10.42.0.1:8080` manually in the companion's *Setup*. |
 | Phone connects and is dropped at once | Pairing code mismatch: the log says "sent a wrong pairing token". |
 | Settings app asks for a token | `server.apiToken` is set: enter it (it is stored in that browser). |
+| Developer console from another device: "No feed", no live HUD | `server.apiToken` is set: enter it when the console asks, or open `/dev?token=<token>` once. |
+| Browser says "Unknown host name" | The HUD answers only to its IP address, `localhost`, `<hostname>` and `<hostname>.local` (protection against DNS rebinding). Use one of those, or add the name to `CARHEADSUP_ALLOWED_HOSTS` in `/etc/default/carheadsup`. |
 | Light or gesture sensor does nothing | `i2cdetect -y 1` shows the address? I²C enabled? The log says whether the `i2c-bus` module is missing (then rebuild with `build-essential` installed: `npm ci`, `sudo deploy/install.sh`). `id carheadsup` lists the `i2c` group? |
 | Buttons do nothing | `gpiod` installed? BCM numbers (not header pins) in the config? The log names the GPIO chip and lines it watches. |
-| Backlight never dims | `ls /sys/class/backlight` — HDMI panels usually have no backlight device (the page is dimmed instead). For DSI panels: `ls -l /sys/class/backlight/*/brightness` should show group `video` writable (udev rule; reboot after installing). |
+| Backlight never dims | `ls /sys/class/backlight` — HDMI panels usually have no backlight device (the page is dimmed instead). For DSI panels: `ls -l /sys/class/backlight/*/brightness` should show group `video` writable (udev rule; reboot after installing). `journalctl -u carheadsup -b \| grep Backlight`: "no backlight device found" or "no usable device" at start-up is fine if a later line says "controlling …" — the HUD looks again every 10 s, so a display driver or udev rule that comes up after the server is picked up by itself. If "controlling" never follows, fix the permissions (`sudo udevadm trigger --subsystem-match=backlight --action=add` applies the rule without a reboot). |
 | Wrong clock / dates | See [hardware.md](hardware.md#clock): network time or an RTC. |
 | Hotspot not visible | Wi-Fi country set (`--country`)? `nmcli device status`, `rfkill list`. |
-| Port 8080 taken | Set `server.port` (or `CARHEADSUP_PORT`), restart, point the kiosk at it (`CARHEADSUP_KIOSK_URL`) and re-run the installer if it uses the static Avahi file. |
+| Port 8080 taken | Set `server.port` (or `CARHEADSUP_PORT` in `/etc/default/carheadsup`) to a free port of 1024 or above, restart, point the kiosk at it (`CARHEADSUP_KIOSK_URL`; it stays black until then) and re-run the installer if it uses the static Avahi file (it picks up either setting). |
 
 ## Uninstalling
 

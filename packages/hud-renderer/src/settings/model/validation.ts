@@ -144,6 +144,27 @@ export function fieldIssueFromSchema(issue: SchemaIssue): FieldIssue {
   }
 }
 
+/**
+ * Why `token` should not be used as an API or pairing token, or null when it is fine. The API
+ * token travels in `Authorization: Bearer …` headers (browsers and the companion's HTTP client
+ * send only printable ASCII there) and in `?token=` URLs, so a non-ASCII token would lock out
+ * every device, including the one that set it — the HUD refuses those. Spaces would work but are
+ * easily lost when a token is copied or typed on a phone, so new tokens are one word; the same
+ * rule keeps the pairing code easy to type into the companion app.
+ */
+export function tokenProblem(token: string): string | null {
+  if (/\s/.test(token)) return 'No spaces: a token is one word of letters, digits and symbols';
+  if (!/^[\x21-\x7e]*$/.test(token)) {
+    return 'Only plain letters, digits and symbols (no accents or emoji)';
+  }
+  return null;
+}
+
+/** Input transform for token fields: pasted tokens often carry a stray space or line break. */
+export function trimToken(text: string): string {
+  return text.trim();
+}
+
 /** Validate a whole draft; the first problem per path wins. */
 export function validateConfig(draft: HudConfig): IssueMap {
   // reportInput: zod leaves the offending value out of issues by default; the messages need it.

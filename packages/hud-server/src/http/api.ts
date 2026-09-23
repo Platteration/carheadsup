@@ -14,6 +14,7 @@ import type {
 import type { Clock, ClearDtcsOutcome } from '@carheadsup/obd';
 import { clearDtcsRefusal } from '../obd/obd-link.ts';
 import type { Simulation } from '../sources/types.ts';
+import { TripLogUnavailableError } from '../store/trip-store.ts';
 import type { TripStore } from '../store/trip-store.ts';
 import { HttpError } from './respond.ts';
 import type { HttpReply } from './respond.ts';
@@ -168,7 +169,14 @@ export function createApiRouter(deps: ApiDeps): Router {
 
   router.add('DELETE', '/api/trips/:id', async (ctx) => {
     const id = ctx.params['id'] ?? '';
-    if (!(await deps.trips.delete(id))) throw new HttpError(404, `No trip with id "${id}"`);
+    let deleted: boolean;
+    try {
+      deleted = await deps.trips.delete(id);
+    } catch (err) {
+      if (err instanceof TripLogUnavailableError) throw new HttpError(503, err.message);
+      throw err;
+    }
+    if (!deleted) throw new HttpError(404, `No trip with id "${id}"`);
     return ok({ ok: true });
   });
 

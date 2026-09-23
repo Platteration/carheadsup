@@ -104,6 +104,21 @@ export class Drive {
     return this;
   }
 
+  /**
+   * Pull away in an automatic: 1st gear through a torque converter that slips heavily at first
+   * (engine speed flares to `flareRpm`), then the 1→2 upshift at `shiftAtKph` (continue with
+   * `inGear(2, …)`). 1st is left too soon for its ratio to settle.
+   */
+  autoLaunch(shiftAtKph: number, kphPerS = 5, flareRpm = 1800): this {
+    const r1 = this.ratio(1);
+    while (this.kph < shiftAtKph) {
+      this.kph = Math.min(shiftAtKph, this.kph + (kphPerS * this.step) / 1000);
+      this.rpm = Math.max(flareRpm, r1 * this.kph) * (1 + this.slip(this.kph));
+      this.emit(this.kph >= 5 ? 1 : null, 30);
+    }
+    return this;
+  }
+
   /** Accelerate (or decelerate, with a negative rate) in gear. */
   inGear(gear: number, toKph: number, kphPerS: number): this {
     const r = this.ratio(gear);

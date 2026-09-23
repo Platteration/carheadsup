@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { useFocusTrap } from '../common/focus-trap.ts';
 import { SAMPLE_FRAMES, SAMPLE_FRAME_NAMES } from '../hud/fixtures.ts';
 import { HudPreview } from './HudPreview.tsx';
 import type { Backdrop, PanelSize } from './sim-model.ts';
@@ -18,6 +19,9 @@ export function fixtureTitle(name: string): string {
  */
 export function Gallery({ panel, backdrop }: { panel: PanelSize; backdrop: Backdrop }) {
   const [open, setOpen] = useState<string | null>(null);
+  const lightbox = useRef<HTMLDivElement>(null);
+  // Modal: keyboard focus stays in the lightbox and returns to the thumbnail afterwards.
+  useFocusTrap(lightbox, open !== null);
   useEffect(() => {
     if (open === null) return undefined;
     const onKey = (event: KeyboardEvent) => {
@@ -70,6 +74,7 @@ export function Gallery({ panel, backdrop }: { panel: PanelSize; backdrop: Backd
           role="dialog"
           aria-modal="true"
           aria-label={fixtureTitle(open)}
+          ref={lightbox}
           onClick={(e) => e.target === e.currentTarget && setOpen(null)}
         >
           <div class="lightbox__panel">

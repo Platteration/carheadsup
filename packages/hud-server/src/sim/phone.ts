@@ -11,8 +11,12 @@
  *  - highway: speed limits 120/100 and a fixed speed camera in the 100 zone.
  *  - arriving: a message notification (sender only); guidance ends at the destination.
  *
- * Speed limits follow the road segment under the car; a new track plays every 45 s. Manual
- * triggers from the dev console work at any time.
+ * Speed limits follow the road segment under the car (re-sent every 30 s, like the companion);
+ * a new track plays every 45 s. Manual triggers from the dev console work at any time.
+ *
+ * While a real phone is connected (`--sim` with the companion app) the simulated phone steps
+ * aside: it keeps following the scenario but emits nothing — no link changes either — and takes
+ * over again with its full state once the real phone has gone.
  */
 import type {
   CallState,
@@ -50,6 +54,11 @@ export const NAV_UPDATE_MS = 1000;
 const LOCATION_EVERY_TICKS = 5;
 /** Hazard distances are refreshed this often (the HUD dead-reckons in between). */
 export const HAZARD_REFRESH_MS = 10_000;
+/**
+ * The road is re-sent this often even when it has not changed, like the companion does: the HUD
+ * drops a speed limit that has not been refreshed for 75 s (`ROAD_TTL_MS`).
+ */
+export const ROAD_REFRESH_MS = 30_000;
 /** A new track starts this often. */
 export const TRACK_CHANGE_MS = 45_000;
 export const CALL_AUTO_ANSWER_MS = 6000;
@@ -125,6 +134,8 @@ export class SimPhone implements EventSource {
   private unsubscribeStep: (() => void) | null = null;
 
   private connected = true;
+  /** A real phone is connected: emit nothing (see the class comment). */
+  private realPhone = false;
   /** Metres along the scripted route. */
   private position = 0;
   private lastOdometerKm: number | null = null;
@@ -134,6 +145,7 @@ export class SimPhone implements EventSource {
   private navIndex = 0;
   private arrived = false;
   private lastRoadKey: string | null = null;
+  private roadSentAt = Number.NEGATIVE_INFINITY;
 
   private readonly hazards = new Map<string, ActiveHazard>();
   private readonly announced = new Set<string>();
@@ -155,9 +167,14 @@ export class SimPhone implements EventSource {
     this.once = new OnceLogger(options.logger);
   }
 
-  /** Whether the simulated phone link is up. */
+  /** Whether the simulated phone link is up (as set from the dev console). */
   get isConnected(): boolean {
     return this.connected;
+  }
+
+  /** Whether the simulated phone has stepped aside for a real phone. */
+  get isSteppedAside(): boolean {
+    return this.realPhone;
   }
 
   /** Position along the scripted route in metres. */
@@ -171,7 +188,7 @@ export class SimPhone implements EventSource {
     this.slots = new TimerSlots(ctx.timers);
     this.lastOdometerKm = this.odometerKm();
     this.unsubscribeStep = this.vehicle.onStep((step) => this.onStep(step));
-    if (this.connected) {
+    if (this.connected && !this.realPhone) {
       this.emitLink(true);
       this.sendFullState();
     }
@@ -189,6 +206,25 @@ export class SimPhone implements EventSource {
 
   updateConfig(config: { phone: { readMessagesAloud: boolean } }): void {
     this.readMessagesAloud = config.phone.readMessagesAloud;
+  }
+
+  /**
+   * A real phone connected (true) or went away (false). The simulated phone steps aside in
+   * between, and afterwards reconnects with its full state (unless it was disconnected from the
+   * dev console meanwhile).
+   */
+  setRealPhoneConnected(connected: boolean): void {
+    if (connected === this.realPhone) return;
+    this.realPhone = connected;
+    if (connected) {
+      this.logger.info('Simulated phone: a real phone is connected; stepping aside');
+      return;
+    }
+    this.logger.info('Simulated phone: the real phone has gone; taking over again');
+    if (this.ctx !== null && this.connected) {
+      this.emitLink(true);
+      this.sendFullState();
+    }
   }
 
   /** A phone scenario event from the dev console (SimControl.phone). */
@@ -234,6 +270,7 @@ export class SimPhone implements EventSource {
   /** A message from the HUD to "the phone": call-action accept/decline is honoured. */
   deliver(message: HudToPhone): void {
     if (message.t !== 'call-action' || this.ctx === null || !this.connected) return;
+    if (this.realPhone) return; // meant for the real phone
     const call = this.call;
     if (call === null || call.id !== message.callId) return;
     if (message.action === 'accept') this.answerCall();
@@ -313,11 +350,15 @@ export class SimPhone implements EventSource {
   // -------------------------------------------------------------------------------------------
   // Road, navigation, hazards, location
 
+  /** Send the road when it changed, when forced, and every {@link ROAD_REFRESH_MS} regardless. */
   private updateRoad(force: boolean): void {
     const segment = roadAt(this.position);
     const key = `${segment.name}|${segment.speedLimitKph}|${segment.roadClass}`;
-    if (!force && key === this.lastRoadKey) return;
+    const now = this.ctx?.now() ?? 0;
+    const due = now - this.roadSentAt >= ROAD_REFRESH_MS;
+    if (!force && !due && key === this.lastRoadKey) return;
     this.lastRoadKey = key;
+    this.roadSentAt = now;
     this.send({
       t: 'road',
       speedLimitKph: segment.speedLimitKph,
@@ -559,7 +600,7 @@ export class SimPhone implements EventSource {
 
   private emitLink(connected: boolean): void {
     const ctx = this.ctx;
-    if (ctx === null) return;
+    if (ctx === null || this.realPhone) return;
     ctx.emit({
       type: 'phone/link',
       connected,
@@ -569,10 +610,13 @@ export class SimPhone implements EventSource {
     });
   }
 
-  /** Translate and emit a phone message; dropped while the link is down (like a real phone). */
+  /**
+   * Translate and emit a phone message; dropped while the link is down (like a real phone) and
+   * while a real phone is connected.
+   */
   private send(message: PhoneToHud): void {
     const ctx = this.ctx;
-    if (ctx === null || !this.connected) return;
+    if (ctx === null || !this.connected || this.realPhone) return;
     let events: HudEvent[];
     try {
       events = this.translate(message, ctx.now());

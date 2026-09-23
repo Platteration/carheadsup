@@ -162,7 +162,8 @@ class QuantitiesTest {
         val zone = ZoneId.of("Europe/Berlin")
         // 2026-03-29 02:00 → 03:00 (clocks spring forward).
         val clock = Clock.fixed(ZonedDateTime.of(2026, 3, 29, 1, 50, 0, 0, zone).toInstant(), zone)
-        val eta = EtaResolver.resolve(2, 30, clock, remainingSeconds = 600.0)
-        assertEquals(ZonedDateTime.of(2026, 3, 29, 3, 30, 0, 0, zone).toInstant().toEpochMilli(), eta)
+        val afterGap = ZonedDateTime.of(2026, 3, 29, 3, 30, 0, 0, zone).toInstant().toEpochMilli()
+        assertEquals(afterGap, EtaResolver.resolve(2, 30, clock, remainingSeconds = 2_400.0))
+        assertEquals(afterGap, EtaResolver.resolve(2, 30, clock))
     }
 }

@@ -59,9 +59,14 @@ flowchart LR
    message and translates it (`phone/translate.ts`). Sensors, buttons and the ADAS feed emit their
    own events; the engine emits a `tick` every 100 ms; config changes arrive as a `config` event.
 2. **The engine stamps and reduces.** `HudEngine.dispatch` replaces `event.at` with the engine
-   clock — never earlier than the previous event, because the clock of a Pi without a real-time
-   clock can step backwards when NTP arrives — and runs `reduce(state, event, config)`.
-   Events dispatched while an effect is being handled are queued and processed in order.
+   time and runs `reduce(state, event, config)`. The engine time follows the system clock but
+   never goes backwards and never stands still: the clock of a Pi can be stepped by network time
+   — forwards on a Pi without a real-time clock, backwards on one whose clock ran fast — and a
+   frozen time would stop staleness, toasts, alert timers and trip ends, leaving old values on
+   screen as if they were live. A forward step is followed at once; after a backward step the
+   engine time keeps running and converges on the system clock by running slightly slow
+   (`hud-server/src/clock.ts`). Events dispatched while an effect is being handled are queued and
+   processed in order.
 3. **Effects.** `deriveEffects(prev, next, event, config)` decides what should happen outside the
    core: tell the phone to accept or decline a call, save and push a finished trip, push due
    maintenance items, persist the state. The server performs them; the core never does I/O.
@@ -111,11 +116,11 @@ Other data has its own lifetime:
 
 | Data | Rule |
 | --- | --- |
-| The whole HUD | The kiosk page blanks everything but a small "no signal" dot when no frame has arrived for 1 s or the socket is closed (`hud-renderer/src/common/staleness.ts`). |
+| The whole HUD | The kiosk page blanks everything but a small "no signal" dot when the frame time has not advanced for 1 s (two frame intervals at a frame rate below 2, at most 2.5 s) or the socket is closed; after (re)connecting it waits for a second, newer frame, so a server's cached frame is never taken for live (`hud-renderer/src/common/staleness.ts`). |
 | Blind-spot and collision state | Ignored 1 s after the module's last report; the module counts as disconnected after 2 s of silence. |
 | Light-sensor reading | Stops driving the brightness after 5 s; the sun position (or the last level) takes over. |
-| Speed limit | Shown only while the phone is connected. |
-| Route, road, hazards, media, call | Kept for 30 s after the phone disconnects (a Wi-Fi hiccup should not wipe the route), then dropped. |
+| Speed limit | Shown only while the phone is connected, and dropped when the phone has not re-sent the road for 75 s (it does every 30 s while it has location fixes). |
+| Route, road, hazards, media, call | Kept for 30 s after the phone disconnects (a Wi-Fi hiccup should not wipe the route), then dropped — at once when a *different* phone connects. A ringing or dialing call is dropped at the disconnect, and a call card without a phone has no controls. |
 | Hazards | Dropped when the phone has not refreshed them for 2 minutes, or once dead reckoning puts them 50 m behind the car. |
 | Messages | Forgotten 60 s after receipt. |
 | Gear | Hidden as soon as neither rpm + speed nor a reported gear is fresh. |
@@ -131,21 +136,23 @@ The reducer derives one of four contexts from speed, engine state and link state
 
 | Context | When (defaults from `display.context`) |
 | --- | --- |
-| `parked` | Standing still with the engine off for 30 s (`engineOffParkedAfterMs`; delayed so automatic start-stop does not open the dashboard at red lights), standing completely still with the engine running for 2 min (`parkedAfterMs`), or no vehicle data at all with the engine off / link down (ignition off: immediately). Sticky until the car actually moves. |
+| `parked` | Standing completely still with the engine off for 3 min (`engineOffParkedAfterMs`; long, so automatic start-stop does not open the dashboard at red lights), standing completely still with the engine running for 2 min (`parkedAfterMs`), or stopped with no vehicle data at all: at once when the adapter link is down, 10 s after the last speed reading when the link is up but the ECU has fallen silent (ignition off). Sticky until the car actually moves. |
 | `stopped` | Below 2 km/h (`stationaryKph`) but not yet parked; left again only above `stationaryKph` + 2 km/h. |
 | `highway` | At least 80 km/h (`highwayEnterKph`) for 10 s (`highwayDwellMs`); left below 65 km/h (`highwayExitKph`). |
 | `city` | Moving otherwise. |
 
-Two safety exceptions: a car known to be moving is never `parked` (hybrids drive with the engine
-off), and losing vehicle data while moving holds the moving context for 30 s so a momentary
-adapter drop does not throw the full-screen dashboard up at speed.
+Two safety exceptions: a car known to be moving is never `parked` (hybrids drive and creep with
+the engine off, so creeping restarts both parking timers), and a moving context is never left on
+missing data alone — only a speed reading (0 once the adapter is back) ends it, so a dead adapter
+at speed never throws the full-screen dashboard up. The flip side: an adapter that dies at speed
+and comes back to a silent ECU leaves the moving layout up until the next drive.
 
 **Adaptive clutter** has three layers:
 
 1. The layout (a preset or a custom layout, see [configuration](configuration.md#layouts)) lists
    the widgets, their zone on a 3×3 grid and the contexts in which each may appear.
 2. Each widget is shown only when it is relevant and backed by fresh data: coolant and voltage
-   only when out of range, tyre pressures while moving only when one is low, navigation on the
+   only while their alert is up (sharing its hysteresis and persistence time), tyre pressures while moving only when one is low, navigation on the
    highway only within 2 km of the next maneuver (`highwayNavRevealM`), lanes within 800 m
    (`laneRevealM`), hazards within 1 km (`hazardRevealM`), the speed limit only while the phone
    is connected, media only while something plays.
@@ -180,9 +187,10 @@ What the driver sees is decided by `selectDisplayedAlerts` (`core/src/alerts/vis
 - **while moving** (`city`, `highway`), maintenance and OBD-link notices wait until the car
   stops, and check-engine alerts below `warning` are hidden unless `alerts.showDtcWhileDriving`
   is on;
-- most severe first, then most recent, capped at `display.maxAlerts` (2);
+- most severe first, then most recent, capped at `display.maxAlerts` (2) — critical alerts are
+  never cut by the cap;
 - while the driver has blanked the HUD, only `critical` alerts (and the collision warning)
-  break through.
+  break through; the backlight, otherwise at its minimum while blanked, is lit for them.
 
 `primary` acknowledges and `secondary` dismisses the top dismissible alert. **Critical alerts
 cannot be dismissed**, and a dismissed alert comes back if its severity escalates.
@@ -209,16 +217,22 @@ them.
 
 1. Load the config (`--config`, default `<data dir>/config.json`), the persisted state and the
    trip log from the data directory. The config parser is lenient: an invalid field falls back to
-   its default and is logged; a broken file never stops the HUD from starting.
+   its default and is logged; a broken file never stops the HUD from starting. Where falling back
+   would open the HUD up it fails closed instead: an unusable token, or a file that is not valid
+   JSON or cannot be read, runs with random tokens (and in the last two cases the file is left
+   alone and saving is refused until a restart loads it).
 2. Apply runtime overrides that are never saved: `--sim` switches the OBD transport to the
    simulator (and adds its tyre-pressure PIDs), `--port` / `--host` override `server.port` /
    `server.host`.
 3. Build the engine, the OBD link, the sensor sources (light, gesture, GPIO buttons, ADAS UDP —
-   each idles quietly when its hardware is absent or disabled), the frame sinks (backlight), the
-   phone and renderer channels, and the HTTP server; listen; start everything; advertise over
-   mDNS.
-4. On `SIGINT` / `SIGTERM`, stop in reverse order (each step limited to 5 s), writing the
-   persisted state and flushing the trip log.
+   each idles quietly when its hardware is absent or disabled), the frame sinks (backlight; the
+   renderer channel tells the page whether the backlight follows the brightness, so the page
+   does not dim as well), the phone and renderer channels, and the HTTP server; listen; start
+   everything; advertise over mDNS.
+4. On `SIGINT` / `SIGTERM`, write the persisted state (including the trip in progress) first —
+   a supercapacitor or UPS HAT may not last long — then stop everything in reverse order (each
+   step limited to 5 s), write the state once more if it changed meanwhile and flush the trip
+   log.
 
 A config change through the API is validated, saved atomically and pushed to every component
 without a restart: the engine, the OBD service (reconnects if the link settings changed), the
@@ -232,14 +246,21 @@ fails is re-initialised every 10 s; a sink or source that throws is logged and s
 
 ## Persistence
 
-The data directory (`/var/lib/carheadsup` on the Pi, `~/.local/share/carheadsup` by default,
-`…/sim` with `--sim`) holds:
+The data directory (`/var/lib/carheadsup` on the Pi; otherwise `$XDG_DATA_HOME/carheadsup`, by
+default `~/.local/share/carheadsup`, and its `sim` subdirectory with `--sim`) holds:
 
 | File | Contents | Written |
 | --- | --- | --- |
 | `config.json` | The configuration (unless `--config` points elsewhere). Pretty-printed and hand-editable; if the server has to correct it on load, the original is kept as `config.json.bak`. | On every change from the API |
-| `state.json` | Odometer, learned gear ratios, long-run average consumption, service records. | Coalesced 2 s after a change; the odometer at most once a minute while driving; on shutdown |
+| `state.json` | Odometer, learned gear ratios, long-run average consumption, service records, and the trip in progress (`PersistedState.activeTrip`). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends; first thing on shutdown |
 | `trips.jsonl` | One completed trip per line, oldest first; at most 5,000 trips (the oldest are dropped). | Appended when a trip ends |
+
+A trip normally ends only after `trip.endAfterEngineOffMs` (5 min) without the engine or the
+OBD link, but a Pi behind an ignition-sensed power controller shuts down seconds after the
+ignition. So the trip in progress is kept in `state.json`, and at the next start it is either
+closed — with its last activity as the end time, then saved to `trips.jsonl` and pushed to the
+phone if one is connected (a phone can also ask for missed trips with `trips-request`) — when
+the HUD was off longer than that, or continued after a shorter break.
 
 The Pi loses power whenever the ignition goes off, so every write is crash-safe: whole files are
 written to a temporary file, `fsync`ed and renamed over the original, then the directory is
@@ -263,13 +284,32 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
 - **Cross-site protection.** State-changing API requests and all WebSocket upgrades are refused
   when a browser says they come from another site (`Origin` / `Sec-Fetch-Site`), so a web page
   visited on the phone cannot drive the HUD's API.
+- **Host check (DNS rebinding).** The cross-site check compares `Origin` with `Host`, and a web
+  page whose own name is made to resolve to the HUD's address (DNS rebinding) passes it: its
+  origin *is* that name. So every request and WebSocket upgrade must address the HUD by an IP
+  address, `localhost`, the machine's host name or `<hostname>.local` (plus names allowed with
+  `--allowed-hosts` / `CARHEADSUP_ALLOWED_HOSTS`); anything else gets `403`. Without an API
+  token these two checks are all that keeps web pages out; the token also keeps out every other
+  device on the Wi-Fi.
 - **Hardened responses.** A strict Content Security Policy, `X-Frame-Options: DENY`,
   `nosniff`, no referrer; static files are served read-only with path-traversal checks; the web
   pages themselves contain no secrets and are served without authentication.
 - **Input limits.** JSON bodies ≤ 256 KiB; phone messages ≤ 128 Ki characters, validated
   strictly (length-capped strings, no control characters, finite in-range numbers, known enum
-  values); the phone socket is rate limited to 50 messages/s (burst 100); the ADAS feed to
-  50 datagrams/s of at most 4 KiB. Details in [protocol.md](protocol.md).
+  values); the phone socket is rate limited to 50 messages/s (burst 100) and closed when the
+  phone stops reading (1 MiB unsent); the ADAS feed to 50 datagrams/s of at most 4 KiB.
+  Details in [protocol.md](protocol.md).
+- **Connection limits.** Other devices get at most 32 TCP connections each and 128 in total
+  (more are closed at once), 10 s to send request headers and 30 s for a whole request; at most
+  4 renderer sockets each and 16 in total (`503`); at most 2 phone connections each (8 in total)
+  waiting for their `hello`, the oldest being closed for a newcomer. The Pi itself is never
+  limited, so idle or slow connections cannot starve the HUD of file descriptors or lock the
+  paired phone out.
+- **The ADAS feed is not authenticated.** When `sensors.adasUdpPort` is set, the HUD accepts
+  valid datagrams from any device that can reach that port — anyone on the car's Wi-Fi can
+  raise a critical "BRAKE!" alert, and a flood beyond the (shared) 50 datagrams/s limit drowns
+  the real module's messages. Leave it off unless you use a module, and then keep that port to
+  the module ([protocol.md](protocol.md#adas-udp-feed)).
 - **No message content.** The `message` type has no content field and a message carrying
   anything that looks like content (`body`, `text`, `snippet` …) is rejected.
 - **Least privilege on the Pi.** The service runs as the unprivileged `carheadsup` user with a
@@ -284,15 +324,26 @@ SD card) has everything.
 
 - **Frames**: composed on a timer at `server.frameRate` (15 fps) and serialised once for all
   clients; a client whose unsent backlog exceeds 1 MiB skips frames instead of queueing them.
-  The kiosk blanks if frames stop for 1 s, so keep `frameRate` at 2 or more.
+  The kiosk blanks if frames stop for 1 s, so keep `frameRate` at 2 or more. A frame is about
+  0.5–3 KB of JSON (1.3 KB typical), so 15 fps is roughly 20 KB/s per client.
 - **Ticks**: one `tick` event every 100 ms drives fades, staleness, context timers and trip end.
 - **OBD polling**: cycles start at most every 100 ms; each cycle asks for the fast PIDs (speed,
   rpm, throttle, pedal, MAF or MAP, fuel rate) — up to six PIDs per request on CAN — plus at most
   two requests for due medium (1 s), slow (5 s) and very slow (10 s) PIDs. How many cycles per
   second you get depends on the adapter and the car; see [obd.md](obd.md#polling).
 - **Sensors**: light sensor at 5 Hz, gesture sensor polled every 40 ms, backlight written at most
-  10 times a second and only on a change of at least 1 %.
+  10 times a second and only on a change of at least 1 % (looked for every 10 s while missing).
 - **Rendering**: the page is Preact with a single CSS `matrix3d()` transform for mirroring,
   rotation and keystone correction, which the browser composites on the GPU.
 - **Disk**: persistence is coalesced (see above), so the SD card sees a few small writes per
   minute while driving.
+
+Measured figures, as an order of magnitude (x86 server core at 2.1 GHz, Node.js 22, the
+simulator's full 5-minute demo loop at 15 fps; a Raspberry Pi 4 core is several times slower):
+
+| What | Measured |
+| --- | --- |
+| Server process, including the simulated car, adapter and phone | about 2 % of one core, 130 MB resident memory |
+| `composeFrame` for a city frame with navigation | about 2.5 µs |
+| Frame size on `/ws/hud` | 0.5–2.8 KB, median 1.3 KB |
+| HUD page in headless Chromium (1280×480, 15 fps) | about 2 % of the main thread, 2.4 MB JavaScript heap |

@@ -261,10 +261,15 @@ function num(v: number): string {
 
 /**
  * CSS `matrix3d()` for a 2-D homography. The 3×3 matrix is embedded in the 4×4 as
- * [a b 0 c; d e 0 f; 0 0 1 0; g h 0 i] and listed column-major, normalised so i = 1.
+ * [a b 0 c; d e 0 f; 0 0 1 0; g h 0 i] and listed column-major, normalised so |i| = 1.
+ *
+ * The scale factor must be positive: the browser culls everything whose w is not positive, and
+ * when scale / offset move the stage origin past the keystone's horizon, i (w at the origin) is
+ * negative while w over the visible image is still positive. Dividing by i itself would flip
+ * every sign and make the whole HUD disappear.
  */
 export function toCssMatrix3d(m: Mat3): string {
-  const k = Math.abs(m[8]) > EPSILON ? m[8] : 1;
+  const k = Math.abs(m[8]) > EPSILON ? Math.abs(m[8]) : 1;
   const [a, b, c, d, e, f, g, h, i] = m;
   const columns = [
     a / k,

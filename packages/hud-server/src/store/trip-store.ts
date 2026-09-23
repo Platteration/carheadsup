@@ -6,6 +6,19 @@ import { SerialQueue, appendFileDurable, readTextFile, writeFileAtomic } from '.
 /** Trips kept on disk; the oldest are dropped beyond this. */
 export const DEFAULT_MAX_TRIPS = 5000;
 
+/**
+ * The trip log could not be read at start-up, so it is not rewritten (a deletion would replace
+ * the trips that could not be read with the ones in memory).
+ */
+export class TripLogUnavailableError extends Error {
+  constructor(path: string, reason: string) {
+    super(
+      `The trip log ${path} could not be read at start-up (${reason}); restart the HUD once it is readable`,
+    );
+    this.name = 'TripLogUnavailableError';
+  }
+}
+
 const MAX_ID_LENGTH = 256;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -94,6 +107,10 @@ export interface TripStoreOptions {
  * Appends are fsynced; a line torn by a power cut is skipped on the next load (and the next
  * append starts on a fresh line). Deletions and retention trimming rewrite the file atomically.
  * A trip appended twice (same id) replaces the earlier copy. Disk operations are serialised.
+ *
+ * The trip log is not essential: when it cannot be read (EACCES, EIO…) the store starts empty
+ * and keeps new trips in memory, appending them to the file when possible but never rewriting
+ * it, so the unread trips are not lost.
  */
 export class TripStore {
   readonly path: string;
@@ -104,6 +121,8 @@ export class TripStore {
   private sorted: TripRecord[] | null = [];
   /** The file does not end with a newline (torn last line), so the next append must add one. */
   private needsNewline = false;
+  /** Why the file could not be read at load, or null: then it is never rewritten. */
+  private unreadable: string | null = null;
 
   constructor(options: TripStoreOptions) {
     this.path = options.path;
@@ -111,11 +130,26 @@ export class TripStore {
     this.maxTrips = Math.max(1, Math.floor(options.maxTrips ?? DEFAULT_MAX_TRIPS));
   }
 
-  /** Read the file. Missing file = no trips; invalid lines are skipped and counted in a warning. */
+  /**
+   * Read the file. Missing file = no trips; invalid lines are skipped and counted in a warning.
+   * Never rejects: an unreadable file is logged and leaves the store empty (see the class).
+   */
   async load(): Promise<void> {
     this.byId.clear();
     this.sorted = null;
-    const read = await readTextFile(this.path);
+    this.unreadable = null;
+    let read;
+    try {
+      read = await readTextFile(this.path);
+    } catch (err) {
+      this.unreadable = describe(err);
+      // Its end is unknown: start the next append on a fresh line (an empty line is skipped).
+      this.needsNewline = true;
+      this.logger.error(
+        `Trips: cannot read ${this.path} (${this.unreadable}); starting with no trips and leaving the file as it is`,
+      );
+      return;
+    }
     if (read.kind === 'missing') {
       this.needsNewline = false;
       return;
@@ -141,7 +175,12 @@ export class TripStore {
     }
     if (this.byId.size > this.maxTrips) {
       this.trimToCap();
-      await this.queue.run(() => this.rewrite());
+      try {
+        await this.queue.run(() => this.rewrite());
+      } catch (err) {
+        // The file keeps the older trips until a later rewrite succeeds; nothing is lost.
+        this.logger.warn(`Trips: cannot rewrite ${this.path} after trimming: ${describe(err)}`);
+      }
     }
   }
 
@@ -193,7 +232,7 @@ export class TripStore {
     this.sorted = null;
     if (this.byId.size > this.maxTrips) {
       this.trimToCap();
-      return this.queue.run(() => this.rewrite());
+      if (this.unreadable === null) return this.queue.run(() => this.rewrite());
     }
     // A replaced id is appended too: on load the last copy of an id wins.
     return this.queue.run(async () => {
@@ -203,8 +242,14 @@ export class TripStore {
     });
   }
 
-  /** Delete a trip by id. Resolves false when there is no such trip; rejects if the write fails. */
+  /**
+   * Delete a trip by id. Resolves false when there is no such trip; rejects if the write fails
+   * (with {@link TripLogUnavailableError} when the file could not be read at start-up).
+   */
   delete(id: string): Promise<boolean> {
+    if (this.unreadable !== null) {
+      return Promise.reject(new TripLogUnavailableError(this.path, this.unreadable));
+    }
     return this.queue.run(async () => {
       const existing = this.byId.get(id);
       if (existing === undefined) return false;
@@ -249,4 +294,8 @@ export class TripStore {
     await writeFileAtomic(this.path, lines);
     this.needsNewline = false;
   }
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

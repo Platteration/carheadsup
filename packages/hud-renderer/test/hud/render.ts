@@ -6,7 +6,12 @@ import { HudView } from '../../src/hud/HudView.tsx';
 /** Server-render the HUD for assertions on markup. */
 export function renderHud(
   frame: HudFrame | null,
-  props: { projection?: ProjectionConfig | null; preview?: boolean; className?: string } = {},
+  props: {
+    projection?: ProjectionConfig | null;
+    preview?: boolean;
+    hardwareBrightness?: boolean;
+    className?: string;
+  } = {},
 ): string {
   return renderToString(h(HudView, { frame, ...props }));
 }

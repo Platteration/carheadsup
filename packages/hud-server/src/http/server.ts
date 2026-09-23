@@ -11,6 +11,8 @@ export interface RequestHandlerOptions {
   static: StaticServer;
   /** Current `server.apiToken` (read per request, so a changed token applies immediately). */
   apiToken: () => string;
+  /** Whether a `Host` header names this HUD (DNS-rebinding protection; see `isAllowedHost`). */
+  allowedHost: (host: string | undefined) => boolean;
   logger: Logger;
   maxBodyBytes?: number;
 }
@@ -32,10 +34,14 @@ export function parseRequestUrl(target: string | undefined): URL | null {
 /** Methods that never change state (exempt from the cross-site check). */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+/** Answer to a request (or upgrade) addressed to a host name that is not the HUD's. */
+export const UNKNOWN_HOST_MESSAGE =
+  'Unknown host name: open the HUD by its IP address or <hostname>.local (or allow the name with --allowed-hosts)';
+
 /**
- * The HTTP request listener: security headers on everything; `/api/*` → auth, CSRF check and
- * the API router (JSON errors); `/ws/*` without an upgrade → 426; anything else → the static
- * renderer files.
+ * The HTTP request listener: security headers on everything; a `Host` that is not the HUD's →
+ * 403 (DNS rebinding); `/api/*` → auth, CSRF check and the API router (JSON errors); `/ws/*`
+ * without an upgrade → 426; anything else → the static renderer files.
  */
 export function createRequestHandler(
   options: RequestHandlerOptions,
@@ -83,6 +89,10 @@ export function createRequestHandler(
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     applySecurityHeaders(res);
+    if (!options.allowedHost(req.headers.host)) {
+      sendError(res, 403, UNKNOWN_HOST_MESSAGE);
+      return;
+    }
     const url = parseRequestUrl(req.url);
     if (url === null) {
       sendError(res, 400, 'Malformed request target');

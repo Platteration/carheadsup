@@ -46,6 +46,24 @@ describe('deriveEffects — calls', () => {
     }
   });
 
+  it('never sends a call action to a disconnected phone (regression: core-6)', () => {
+    // A ringing call, the phone drops, and an ENGINE HOT warning is up: 'secondary' dismisses
+    // the warning instead of declining a call the phone can no longer hear about.
+    const h = withCall('ringing');
+    h.obdConnected(T0 + 150);
+    h.samples(T0 + 200, { coolantTemp: 112 });
+    h.send({ type: 'phone/link', connected: false, at: T0 + 300 });
+    h.input('primary', T0 + 10_000);
+    h.input('secondary', T0 + 10_100);
+    expect(h.effects.filter((e) => e.type === 'phone/call-action')).toEqual([]);
+    expect(h.state.alerts.find((a) => a.key === 'coolant')?.dismissedAt).not.toBeNull();
+
+    const active = withCall('active');
+    active.send({ type: 'phone/link', connected: false, at: T0 + 300 });
+    active.input('secondary', T0 + 1000);
+    expect(active.lastEffects).toEqual([]);
+  });
+
   it('does nothing for a held or ended call on secondary, or without a call', () => {
     for (const state of ['held', 'ended'] as const) {
       const h = withCall(state);
@@ -135,11 +153,15 @@ describe('deriveEffects — persist', () => {
     expect(persists[0]).toBeLessThan(1000.03);
   });
 
-  it('persists when the odometer first becomes known', () => {
+  it('persists when the odometer first becomes known (once a second reading confirms it)', () => {
     const h = new Harness();
     h.samples(T0 + 1, { odometer: 12_345.6 });
+    expect(h.state.odometer.km).toBeNull();
+    expect(h.lastEffects).toEqual([]);
+    h.samples(T0 + 10_000, { odometer: 12_345.7 });
+    expect(h.state.odometer.km).toBe(12_345.7);
     expect(h.lastEffects).toEqual([{ type: 'persist' }]);
-    h.samples(T0 + 2, { odometer: 12_345.7 });
+    h.samples(T0 + 20_000, { odometer: 12_345.8 });
     expect(h.lastEffects).toEqual([]);
   });
 

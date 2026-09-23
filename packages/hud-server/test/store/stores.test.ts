@@ -4,9 +4,13 @@ import { DEFAULT_CONFIG, EMPTY_PERSISTED_STATE, parseConfig, tripsToCsv } from '
 import type { PersistedState, TripRecord } from '@carheadsup/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SerialQueue, readJsonFile, writeFileAtomic } from '../../src/store/atomic.ts';
-import { ConfigStore, serializeConfig } from '../../src/store/config-store.ts';
+import {
+  ConfigStore,
+  ConfigUnavailableError,
+  serializeConfig,
+} from '../../src/store/config-store.ts';
 import { PersistStore, parsePersistedState } from '../../src/store/persist-store.ts';
-import { TripStore, isTripRecord } from '../../src/store/trip-store.ts';
+import { TripLogUnavailableError, TripStore, isTripRecord } from '../../src/store/trip-store.ts';
 import { MemoryLogger, makeTempDir } from '../helpers.ts';
 
 let dir: string;
@@ -135,14 +139,45 @@ describe('ConfigStore', () => {
     expect(await readFile(path, 'utf8')).toBe(serializeConfig(result.config));
   });
 
-  it('falls back to defaults for unparseable JSON without losing the file', async () => {
+  it('runs locked with the defaults on unparseable JSON, never touching the file', async () => {
     const path = join(dir, 'config.json');
-    await writeFile(path, '{ "vehicle": ');
-    const result = await new ConfigStore(path, logger).load();
-    expect(result.config).toEqual(parseConfig(DEFAULT_CONFIG).config);
+    const broken = '{ "server": { "apiToken": "s3cret" }, "vehicle": ';
+    await writeFile(path, broken);
+    const store = new ConfigStore(path, logger);
+    const result = await store.load();
+    const defaults = parseConfig(DEFAULT_CONFIG).config;
+    expect({ ...result.config, server: defaults.server, phone: defaults.phone }).toEqual(defaults);
+    // Fail closed: its tokens are unknown, so they are random rather than "none" (open).
+    expect(result.config.server.apiToken).toMatch(/^[\w-]{32}$/);
+    expect(result.config.phone.pairingToken).toMatch(/^[\w-]{32}$/);
+    expect(result.config.server.apiToken).not.toBe(result.config.phone.pairingToken);
     expect(result.errors[0]).toMatch(/not valid JSON/);
-    expect(logger.text('error')).toMatch(/not valid JSON/);
-    expect(await readFile(`${path}.bak`, 'utf8')).toBe('{ "vehicle": ');
+    expect(logger.text('error')).toMatch(/not valid JSON.*leaving the file as it is/);
+    // The hand edit stays where it is, to be fixed; nothing replaces it meanwhile.
+    await expect(store.save(defaults)).rejects.toThrow(ConfigUnavailableError);
+    expect(await readFile(path, 'utf8')).toBe(broken);
+    expect(await readdir(dir)).toEqual(['config.json']);
+  });
+
+  it('replaces an unusable token with a random one instead of none', async () => {
+    const path = join(dir, 'config.json');
+    const config = parseConfig(DEFAULT_CONFIG).config;
+    const raw = JSON.parse(serializeConfig(config)) as Record<string, Record<string, unknown>>;
+    raw['server']!['apiToken'] = 'pässwort';
+    raw['phone']!['pairingToken'] = 'x'.repeat(300);
+    await writeFile(path, JSON.stringify(raw));
+    const result = await new ConfigStore(path, logger).load();
+    expect(result.config.server.apiToken).toMatch(/^[\w-]{32}$/);
+    expect(result.config.phone.pairingToken).toMatch(/^[\w-]{32}$/);
+    expect(logger.text('error')).toMatch(/server\.apiToken .*random token/);
+    expect(logger.text('error')).toMatch(/phone\.pairingToken .*random token/);
+    // A valid token is kept as it is.
+    raw['server']!['apiToken'] = 'fine token';
+    raw['phone']!['pairingToken'] = 'schlüssel';
+    await writeFile(path, JSON.stringify(raw));
+    const again = await new ConfigStore(path, logger).load();
+    expect(again.config.server.apiToken).toBe('fine token');
+    expect(again.config.phone.pairingToken).toBe('schlüssel');
   });
 
   it('saves atomically', async () => {
@@ -153,6 +188,18 @@ describe('ConfigStore', () => {
     await store.save(config);
     const reread = await new ConfigStore(path, logger).load();
     expect(reread.config.units.system).toBe('imperial');
+  });
+
+  it('uses the defaults but never overwrites a file it cannot read', async () => {
+    const path = join(dir, 'config.json');
+    await mkdir(join(path, 'keep'), { recursive: true }); // EISDIR, like EACCES or EIO
+    const store = new ConfigStore(path, logger);
+    const result = await store.load();
+    expect(result.config.vehicle).toEqual(parseConfig(DEFAULT_CONFIG).config.vehicle);
+    expect(result.config.server.apiToken).not.toBe(''); // locked, not open
+    expect(logger.text('error')).toMatch(/cannot read/);
+    await expect(store.save(result.config)).rejects.toThrow(/could not be loaded/);
+    expect(await readdir(path)).toEqual(['keep']);
   });
 
   it('keeps running with defaults when the file cannot be created', async () => {
@@ -181,6 +228,16 @@ describe('PersistStore', () => {
       await readFile(join(dir, 'state.json.bak'), 'utf8'),
     ) as PersistedState;
     expect(backup.odometerKm).toBe(48213.4);
+  });
+
+  it('keeps the trip in progress as it is (the core validates it on restore)', async () => {
+    const store = new PersistStore(join(dir, 'state.json'), logger);
+    const activeTrip = { startedAt: 1, lastActivityAt: 2, distanceKm: 3 };
+    await store.save({ ...sample, activeTrip });
+    expect(await store.load()).toEqual({ ...sample, activeTrip });
+    await store.save({ ...sample, activeTrip: null });
+    expect(await store.load()).toEqual(sample);
+    expect(parsePersistedState({ activeTrip: 'nonsense' })?.state).not.toHaveProperty('activeTrip');
   });
 
   it('recovers from a corrupt file via the backup and moves the corrupt one aside', async () => {
@@ -350,6 +407,21 @@ describe('TripStore', () => {
     const s = await store();
     for (const n of [2, 1]) await s.append(trip(n));
     expect(s.csv()).toBe(tripsToCsv([trip(1), trip(2)]));
+  });
+
+  it('starts empty when the file cannot be read, and refuses to rewrite it', async () => {
+    const path = join(dir, 'trips.jsonl');
+    await mkdir(join(path, 'keep'), { recursive: true }); // EISDIR, like EACCES or EIO
+    const s = new TripStore({ path, logger, maxTrips: 1 });
+    await s.load();
+    expect(s.size).toBe(0);
+    expect(logger.text('error')).toMatch(/cannot read/);
+    await expect(s.delete('trip-1')).rejects.toBeInstanceOf(TripLogUnavailableError);
+    // New trips are kept in memory; the appends fail here (a directory) but never rewrite.
+    await expect(s.append(trip(1))).rejects.toThrow();
+    await expect(s.append(trip(2))).rejects.toThrow();
+    expect(s.list({ limit: 10 }).map((t) => t.id)).toEqual(['trip-2']);
+    expect(await readdir(path)).toEqual(['keep']);
   });
 
   it('loads an empty store when the file is missing', async () => {

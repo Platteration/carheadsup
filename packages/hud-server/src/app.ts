@@ -1,15 +1,18 @@
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import type { ApiConfigResult, HudConfig, HudToPhone } from '@carheadsup/core';
+import { mergeConfig } from '@carheadsup/core';
+import type { ApiConfigResult, HudConfig, HudFrame, HudToPhone } from '@carheadsup/core';
 import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
 import { advertiseHud as defaultAdvertiseHud } from './discovery/mdns.ts';
 import { HudEngine, maintenanceDueMessage } from './engine.ts';
 import { createApiRouter } from './http/api.ts';
 import type { ConfigChange } from './http/api.ts';
-import { isAuthorized } from './http/auth.ts';
+import { hudHostNames, isAllowedHost, isAuthorized } from './http/auth.ts';
+import { limitConnections } from './http/connections.ts';
 import { HttpError } from './http/respond.ts';
 import { createRequestHandler } from './http/server.ts';
 import { createStaticServer } from './http/static.ts';
@@ -31,7 +34,7 @@ import type {
   SourceContext,
 } from './sources/types.ts';
 import { SerialQueue, ensureDirectory } from './store/atomic.ts';
-import { ConfigStore, serializeConfig } from './store/config-store.ts';
+import { ConfigStore, ConfigUnavailableError, serializeConfig } from './store/config-store.ts';
 import { PersistStore } from './store/persist-store.ts';
 import { TripStore } from './store/trip-store.ts';
 import { PhoneChannel } from './ws/phone-channel.ts';
@@ -42,6 +45,8 @@ import { WebSocketRouter } from './ws/upgrade.ts';
 export const STOP_STEP_TIMEOUT_MS = 5000;
 /** Grace period for in-flight HTTP requests on shutdown before connections are cut. */
 const HTTP_CLOSE_GRACE_MS = 1000;
+/** Refused connections (over the per-device limits) are logged at most this often. */
+const REFUSAL_LOG_INTERVAL_MS = 60_000;
 
 export const CONFIG_FILE = 'config.json';
 export const STATE_FILE = 'state.json';
@@ -75,6 +80,12 @@ export interface HudServerOptions {
   rendererDir?: string;
   /** Backlight device directory; null = auto-detect, false = disabled. Default null. */
   backlight?: string | null | false;
+  /**
+   * Extra host names the HUD may be reached by (e.g. one the home router's DNS gives it).
+   * IP addresses, localhost, the machine's host name and `<hostname>.local` always work; any
+   * other `Host` is refused (DNS-rebinding protection).
+   */
+  allowedHosts?: readonly string[];
   now?: Clock;
   timers?: Timers;
   logger?: Logger;
@@ -154,8 +165,11 @@ export function createHudServer(options: HudServerOptions): HudServer {
   let mdns: Service | null = null;
   let sources: EventSource[] = [];
   const startedSources: EventSource[] = [];
+  /** Per source: its config updates run one at a time; `next` is the latest not yet applied. */
+  const sourceUpdates = new Map<EventSource, { queue: SerialQueue; next: HudConfig | null }>();
   let sinks: FrameSink[] = [];
   let unsubscribeSinks: (() => void) | null = null;
+  const unsubscribeBrightness: Array<() => void> = [];
   /** The raw start attempt (awaited by shutdown) and its public, cleanup-on-failure wrapper. */
   let startAttempt: Promise<{ port: number }> | null = null;
   let starting: Promise<{ port: number }> | null = null;
@@ -211,6 +225,33 @@ export function createHudServer(options: HudServerOptions): HudServer {
     });
   }
 
+  /**
+   * Hand a new config to a source. Updates of one source never overlap (a source restarting its
+   * driver would otherwise launch two), and a burst of changes is applied as its latest.
+   */
+  function updateSource(source: EventSource, config: HudConfig): void {
+    if (source.updateConfig === undefined) return;
+    let slot = sourceUpdates.get(source);
+    if (slot === undefined) {
+      slot = { queue: new SerialQueue(), next: null };
+      sourceUpdates.set(source, slot);
+    }
+    const queued = slot.next !== null;
+    slot.next = config;
+    if (queued) return; // the queued update picks up this config
+    const current = slot;
+    current.queue
+      .run(async () => {
+        const latest = current.next;
+        current.next = null;
+        if (latest === null || stopping !== null) return;
+        await source.updateConfig?.(latest);
+      })
+      .catch((err: unknown) => {
+        logger.warn(`${source.name}: applying the new config failed: ${describe(err)}`);
+      });
+  }
+
   /** Push a new effective config to every running component. */
   function applyEffective(next: HudConfig): void {
     const previous = effective;
@@ -219,14 +260,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
     obd?.updateConfig(next);
     renderer?.updateConfig(next);
     phone?.updateConfig(next);
-    for (const source of startedSources) {
-      if (source.updateConfig === undefined) continue;
-      Promise.resolve()
-        .then(() => source.updateConfig?.(next))
-        .catch((err: unknown) => {
-          logger.warn(`${source.name}: applying the new config failed: ${describe(err)}`);
-        });
-    }
+    for (const source of startedSources) updateSource(source, next);
     if (previous === null) return;
     if (previous.server.port !== next.server.port || previous.server.host !== next.server.host) {
       logger.warn('Config: the new server address takes effect after a restart');
@@ -234,6 +268,30 @@ export function createHudServer(options: HudServerOptions): HudServer {
     if (previous.server.mdns !== next.server.mdns || previous.vehicle.name !== next.vehicle.name) {
       void restartMdns(next);
     }
+  }
+
+  /** Whether the grid was switched off (or tried to be) during the current moving stretch. */
+  let gridOffWhileMoving = false;
+
+  /**
+   * The calibration grid is for standing still: once the car moves, switch it off in the stored
+   * config, so it does not come back at the next red light. (The renderer never draws it over a
+   * moving car's HUD anyway.) Tried once per moving stretch.
+   */
+  function switchGridOffWhenMoving(frame: HudFrame): void {
+    const moving = frame.context === 'city' || frame.context === 'highway';
+    if (!moving) {
+      gridOffWhileMoving = false;
+      return;
+    }
+    if (gridOffWhileMoving || stored?.display.projection.showGrid !== true) return;
+    gridOffWhileMoving = true;
+    logger.info('Config: the car is moving; switching the calibration grid off');
+    updateConfig((current) =>
+      mergeConfig(current, { display: { projection: { showGrid: false } } }),
+    ).catch((err: unknown) => {
+      logger.warn(`Config: could not switch the calibration grid off: ${describe(err)}`);
+    });
   }
 
   /** Validate, save and apply a config change (serialised, so concurrent PATCHes never race). */
@@ -247,6 +305,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
           await configStore.save(result.config);
         } catch (err) {
           logger.error(`Config: saving ${configPath} failed: ${describe(err)}`);
+          if (err instanceof ConfigUnavailableError) throw new HttpError(503, err.message);
           throw new HttpError(500, `The configuration could not be saved: ${describe(err)}`);
         }
         stored = result.config;
@@ -361,6 +420,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
       getConfig: currentEffective,
       tripsEndedAfter: (since, limit) => tripStore.endedAfter(since, limit),
       dueMaintenance: () => maintenanceDueMessage(hudEngine.state.maintenance.status),
+      // With the simulator, a real phone takes precedence over the simulated one.
+      onPhoneChange: (connected) => simulation?.setRealPhoneConnected(connected),
       version: HUD_VERSION,
       now,
       timers,
@@ -371,10 +432,12 @@ export function createHudServer(options: HudServerOptions): HudServer {
         : {}),
       ...(tuning.phoneRateBurst !== undefined ? { rateBurst: tuning.phoneRateBurst } : {}),
     });
-    renderer = new RendererChannel({
+    const rendererChannel = new RendererChannel({
       engine: hudEngine,
       getConfig: currentEffective,
       simulated,
+      // The kiosk leaves dimming to the backlight while a sink drives one (no double dimming).
+      hardwareBrightness: () => sinks.some((sink) => sink.drivesBrightness === true),
       authorize: (auth, cfg) =>
         isAuthorized({
           remoteAddress: auth.remoteAddress,
@@ -385,11 +448,22 @@ export function createHudServer(options: HudServerOptions): HudServer {
       timers,
       logger,
     });
+    renderer = rendererChannel;
+    for (const sink of sinks) {
+      const unsubscribe = sink.onDrivesBrightnessChange?.(() => rendererChannel.refreshDisplay());
+      if (unsubscribe !== undefined) unsubscribeBrightness.push(unsubscribe);
+    }
     const apiToken = (): string => currentEffective().server.apiToken;
+    const hostNames = hudHostNames(hostname(), [
+      ...(options.allowedHosts ?? []),
+      config.server.host,
+    ]);
+    const allowedHost = (host: string | undefined): boolean => isAllowedHost(host, hostNames);
     wsRouter = new WebSocketRouter({
       renderer,
       phone,
       apiToken,
+      allowedHost,
       timers,
       logger,
       ...(tuning.heartbeatIntervalMs !== undefined
@@ -427,8 +501,23 @@ export function createHudServer(options: HudServerOptions): HudServer {
             },
     });
     const server = createServer(
-      createRequestHandler({ api, static: createStaticServer(rendererDir), apiToken, logger }),
+      createRequestHandler({
+        api,
+        static: createStaticServer(rendererDir),
+        apiToken,
+        allowedHost,
+        logger,
+      }),
     );
+    let lastRefusalLog = Number.NEGATIVE_INFINITY;
+    limitConnections(server, {
+      onRefused: (address) => {
+        const at = now();
+        if (Math.abs(at - lastRefusalLog) < REFUSAL_LOG_INTERVAL_MS) return;
+        lastRefusalLog = at;
+        logger.warn(`HTTP: refusing connections from ${address || '?'} (too many open)`);
+      },
+    });
     server.on('upgrade', wsRouter.handleUpgrade);
     httpServer = server;
     boundPort = await listen(server, config);
@@ -446,6 +535,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
       }
     }
     unsubscribeSinks = hudEngine.onFrame((frame) => {
+      switchGridOffWhenMoving(frame);
       for (const sink of sinks) {
         try {
           sink.onFrame(frame);
@@ -486,6 +576,13 @@ export function createHudServer(options: HudServerOptions): HudServer {
     // Let a start in progress reach a consistent point first (never the wrapper: it awaits us).
     if (startAttempt !== null) await startAttempt.catch(() => {});
     logger.info('HUD server stopping');
+    if (engine !== null) {
+      // Save the odometer, service records and trip in progress first: the steps below may take
+      // seconds each, and a supercap / UPS HAT may not last until the end. (engine.stop() writes
+      // once more at the end if anything changed meanwhile.)
+      const hudEngine = engine;
+      await step('saving state', () => hudEngine.flushPersistence());
+    }
     await step('mDNS restart', () => mdnsQueue.idle());
     if (mdns !== null) {
       const service = mdns;
@@ -501,7 +598,11 @@ export function createHudServer(options: HudServerOptions): HudServer {
       await step('HTTP server', () => closeHttp(server));
     }
     for (const source of [...startedSources].reverse()) {
-      await step(source.name, () => source.stop());
+      await step(source.name, async () => {
+        // After its config update in progress, if any (queued ones are skipped when stopping).
+        await sourceUpdates.get(source)?.queue.idle();
+        await source.stop();
+      });
     }
     if (simulation !== null) {
       const sim = simulation;
@@ -516,6 +617,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
       await step('engine', () => hudEngine.stop());
     }
     unsubscribeSinks?.();
+    for (const unsubscribe of unsubscribeBrightness.splice(0)) unsubscribe();
     for (const sink of [...sinks].reverse()) {
       await step(sink.name, () => sink.stop());
     }

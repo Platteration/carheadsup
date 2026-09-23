@@ -148,6 +148,37 @@ describe('dev console', () => {
     ]);
   });
 
+  it('shows the overrides, ADAS and tyre state the HUD reports, e.g. after a reload', async () => {
+    const hud = new MockHud({ simulated: true });
+    hud.sim = {
+      ...hud.sim!,
+      coolantOverrideC: 121,
+      fuelLevelOverridePct: null,
+      tirePressuresKpa: { fl: 230, fr: 230, rl: 165, rr: 230 },
+      adas: { blindSpotLeft: false, blindSpotRight: true, collision: 'caution' },
+      phone: { connected: true, steppedAside: true },
+    };
+    const root = start(hud);
+    const toggle = (label: string) =>
+      byText(root, 'label.dswitch', label)!.querySelector<HTMLInputElement>('input')!;
+    await waitFor(() => toggle('Coolant').checked);
+    expect(text(byText(root, '.override', 'Coolant'))).toContain('121 °C');
+    expect(toggle('Fuel').checked).toBe(false);
+    expect(toggle('Blind spot left').checked).toBe(false);
+    expect(toggle('Blind spot right').checked).toBe(true);
+    expect(byText(root, '.dseg__item', 'Caution')!.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle('Report TPMS').checked).toBe(true);
+    const rearLeft = byText(root, 'label.tyre', 'Rear left')!.querySelector('input')!;
+    expect(rearLeft.value).toBe('165');
+    expect(text(root.querySelector('.sim-status'))).toContain('Real phone connected');
+    expect(text(root.querySelector('.live__side'))).toContain('the simulated phone stays silent');
+
+    // Another console releases the coolant override: this one follows at its next poll.
+    hud.sim = { ...hud.sim, coolantOverrideC: null };
+    await waitFor(() => !toggle('Coolant').checked, 3000);
+    expect(simBodies(hud)).toEqual([]);
+  });
+
   it('hides the simulator on a real vehicle', async () => {
     const root = start(new MockHud({ simulated: false }));
     await waitFor(() =>
@@ -188,20 +219,143 @@ describe('dev console', () => {
     ]);
   });
 
+  it('never lets an older status poll undo a newer simulator command', async () => {
+    const hud = new MockHud({ simulated: true });
+    // Hold the reply to one status poll: the HUD answered it before the command was applied.
+    let hold = false;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let heldIssued = false;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const response = await hud.fetch(input, init);
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (hold && (init?.method ?? 'GET') === 'GET' && url.endsWith('/api/sim')) {
+        hold = false;
+        heldIssued = true;
+        await held;
+      }
+      return response;
+    };
+    localStorage.setItem(
+      'carheadsup.dev',
+      JSON.stringify({ tab: 'live', panel: 0, backdrop: 'night' }),
+    );
+    mounted = mount(
+      <DevApp
+        api={createHudApi({ fetch, tokens: memoryTokenStore() })}
+        feedOptions={{ url: 'ws://hud.test/ws/hud', createSocket: FakeSocket.factory }}
+      />,
+    );
+    const root = mounted.container;
+    const chip = (code: string) => byText<HTMLButtonElement>(root, '.dchip', code)!;
+    await waitFor(
+      () => chip('P0420') && !root.querySelector<HTMLFieldSetElement>('.sim-fields')?.disabled,
+    );
+    hold = true;
+    await waitFor(() => heldIssued, 3000);
+    await click(chip('P0420'));
+    await waitFor(() => chip('P0420').getAttribute('aria-pressed') === 'true');
+    release();
+    await settle(50);
+    expect(chip('P0420').getAttribute('aria-pressed')).toBe('true');
+    await click(chip('P0300'));
+    await waitFor(() => simBodies(hud).length === 2);
+    expect(simBodies(hud)).toEqual([{ dtcs: ['P0420'] }, { dtcs: ['P0420', 'P0300'] }]);
+  });
+
+  it('asks for the access token and uses it for the API and the live feed', async () => {
+    const hud = new MockHud({ simulated: true, token: 'abc' });
+    const tokens = memoryTokenStore();
+    localStorage.setItem(
+      'carheadsup.dev',
+      JSON.stringify({ tab: 'live', panel: 0, backdrop: 'night' }),
+    );
+    mounted = mount(
+      <DevApp
+        api={createHudApi({ fetch: hud.fetch, tokens })}
+        feedOptions={{ url: 'ws://hud.test/ws/hud', createSocket: FakeSocket.factory }}
+      />,
+    );
+    const root = mounted.container;
+    await waitFor(() =>
+      text(root.querySelector('.live__side')).includes('asks for an access token'),
+    );
+    expect(FakeSocket.latest().url).toBe('ws://hud.test/ws/hud');
+    await type(root.querySelector<HTMLInputElement>('input[aria-label="Access token"]')!, 'abc');
+    await click(button(root.querySelector('.live__side')!, 'Use'));
+    await waitFor(() => !root.querySelector<HTMLFieldSetElement>('.sim-fields')!.disabled);
+    expect(tokens.get()).toBe('abc');
+    expect(FakeSocket.latest().url).toBe('ws://hud.test/ws/hud?token=abc');
+    await click(button(root, 'Accept'));
+    await waitFor(() => hud.requests.some((r) => r.path === '/api/input'));
+    expect(hud.requests.find((r) => r.path === '/api/input')?.authorization).toBe('Bearer abc');
+  });
+
+  it('passes a stored token to the live feed from the start', () => {
+    const hud = new MockHud({ simulated: true, token: 's3cret' });
+    mounted = mount(
+      <DevApp
+        api={createHudApi({ fetch: hud.fetch, tokens: memoryTokenStore('s3cret') })}
+        feedOptions={{ url: 'ws://hud.test/ws/hud', createSocket: FakeSocket.factory }}
+      />,
+    );
+    expect(FakeSocket.instances.map((s) => s.url)).toEqual(['ws://hud.test/ws/hud?token=s3cret']);
+  });
+
+  it('keeps the shortcuts working after a button was clicked', async () => {
+    const hud = new MockHud({ simulated: true });
+    const root = start(hud);
+    const inputs = () =>
+      hud.requests.filter((r) => r.path === '/api/input').map((r) => r.body as { action: string });
+    const page = button(root, 'Page ▶');
+    page.focus();
+    await click(page);
+    await press(page, 'ArrowRight');
+    await press(page, 'b');
+    await press(page, '+');
+    // Enter and Space press the focused button itself, not the "accept" shortcut.
+    await press(page, 'Enter');
+    await press(page, ' ');
+    const tab = byText(root, '.dev-tab', 'Live')!;
+    tab.focus();
+    await press(tab, 'ArrowRight');
+    // A slider keeps its arrow keys.
+    const slider = root.querySelector<HTMLInputElement>('input[type="range"]');
+    if (slider) await press(slider, 'ArrowLeft');
+    await waitFor(() => inputs().length === 5);
+    await settle(20);
+    expect(inputs().map((b) => b.action)).toEqual([
+      'next-page',
+      'next-page',
+      'toggle-blank',
+      'brightness-up',
+      'next-page',
+    ]);
+  });
+
   it('previews live frames and logs what changes between them', async () => {
     const root = start(new MockHud({ simulated: true }));
     const socket = FakeSocket.latest();
+    // A live server: every frame is composed later than the one before.
+    let tick = 0;
+    const live = (name: string) => {
+      tick += 66;
+      return { t: 'frame', frame: { ...SAMPLE_FRAMES[name]!, at: SAMPLE_FRAMES[name]!.at + tick } };
+    };
     await act(async () => {
       socket.open();
-      socket.receiveJson({ t: 'frame', frame: SAMPLE_FRAMES['city-nav'] });
+      socket.receiveJson(live('city-nav'));
+      socket.receiveJson(live('city-nav'));
     });
     await waitFor(() => root.querySelector('.feed-badge--live'));
     expect(text(root.querySelector('.preview-caption'))).toContain('Context city');
     await act(async () => {
-      socket.receiveJson({ t: 'frame', frame: SAMPLE_FRAMES['check-engine'] });
+      socket.receiveJson(live('check-engine'));
     });
     await act(async () => {
-      socket.receiveJson({ t: 'frame', frame: SAMPLE_FRAMES['incoming-call'] });
+      socket.receiveJson(live('incoming-call'));
     });
     const log = await waitFor(() => {
       const entries = [...root.querySelectorAll('.event__text')].map((e) => text(e));
@@ -218,6 +372,29 @@ describe('dev console', () => {
     ]);
     await click(button(root, 'Clear'));
     expect(root.querySelector('.event__text')).toBeNull();
+  });
+
+  it('keeps keyboard focus in the gallery lightbox and returns it to the thumbnail', async () => {
+    const hud = new MockHud();
+    hud.offline = true;
+    const root = start(hud, 'gallery');
+    const card = root.querySelectorAll<HTMLButtonElement>('.gallery__card')[2]!;
+    card.focus();
+    await click(card);
+    const box = root.querySelector<HTMLElement>('.lightbox')!;
+    const close = button(box, 'Close');
+    expect(document.activeElement).toBe(close);
+    await act(async () => {
+      close.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }),
+      );
+    });
+    expect(document.activeElement).toBe(close);
+    card.focus();
+    expect(box.contains(document.activeElement)).toBe(true);
+    await press(window, 'Escape');
+    expect(root.querySelector('.lightbox')).toBeNull();
+    expect(document.activeElement).toBe(card);
   });
 
   it('switches tabs, panel size and backdrop, remembering them', async () => {

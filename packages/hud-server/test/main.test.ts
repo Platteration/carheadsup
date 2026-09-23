@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -110,6 +112,42 @@ describe('carheadsup CLI', () => {
         expect(line).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z (DEBUG|INFO |WARN |ERROR) /);
       }
     } finally {
+      await temp.cleanup();
+    }
+  }, 20_000);
+
+  it('explains a busy port in one line instead of a stack trace', async () => {
+    const temp = await makeTempDir();
+    const blocker = createServer();
+    try {
+      await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
+      const port = (blocker.address() as AddressInfo).port;
+      await writeFile(
+        join(temp.dir, 'config.json'),
+        JSON.stringify(testConfig({ obd: { transport: 'simulator' }, server: { mdns: false } })),
+      );
+      const run = launch([
+        '--data-dir',
+        temp.dir,
+        '--port',
+        String(port),
+        '--host',
+        '127.0.0.1',
+        '--backlight',
+        'off',
+      ]);
+      expect(await run.exited).toBe(1);
+      const errors = run
+        .output()
+        .split('\n')
+        .filter((line) => line.includes('ERROR'));
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatch(/Fatal: Cannot listen on 127\.0\.0\.1:\d+: .*EADDRINUSE/);
+      expect(errors[0]).toMatch(new RegExp(`port ${port} is already in use`));
+      // No stack frames.
+      expect(run.output()).not.toMatch(/:\d+:\d+\)|app\.ts:\d+/);
+    } finally {
+      blocker.close();
       await temp.cleanup();
     }
   }, 20_000);

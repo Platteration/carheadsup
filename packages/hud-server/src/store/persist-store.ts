@@ -1,6 +1,6 @@
 import { rename } from 'node:fs/promises';
 import { EMPTY_PERSISTED_STATE } from '@carheadsup/core';
-import type { MaintenanceRecord, PersistedState } from '@carheadsup/core';
+import type { MaintenanceRecord, PersistedState, PersistedStateWithTrip } from '@carheadsup/core';
 import type { Logger } from '@carheadsup/obd';
 import { SerialQueue, isNotFound, readJsonFile, writeFileAtomic } from './atomic.ts';
 
@@ -18,19 +18,21 @@ const MAX_GEARS = 12;
 /**
  * Validate data read from `state.json` field by field. Returns null when it is not a JSON object
  * at all (treated as corruption); otherwise invalid fields fall back to their empty values and
- * are listed in `errors`, and invalid maintenance records are dropped individually.
+ * are listed in `errors`, and invalid maintenance records are dropped individually. The trip in
+ * progress (`activeTrip`) is passed on as it is when present; the core validates it on restore.
  */
 export function parsePersistedState(
   value: unknown,
-): { state: PersistedState; errors: string[] } | null {
+): { state: PersistedStateWithTrip; errors: string[] } | null {
   if (!isRecord(value)) return null;
   const errors: string[] = [];
-  const state: PersistedState = {
+  const state: Omit<PersistedState, 'activeTrip'> & { activeTrip?: unknown } = {
     odometerKm: null,
     learnedGearRatios: null,
     avgLPer100km: null,
     maintenanceRecords: [],
   };
+  if (isRecord(value['activeTrip'])) state.activeTrip = value['activeTrip'];
 
   const odometer = value['odometerKm'];
   if (finiteNonNegative(odometer) && odometer <= MAX_ODOMETER_KM) state.odometerKm = odometer;
@@ -80,12 +82,14 @@ function emptyState(): PersistedState {
 }
 
 /**
- * `state.json`: the odometer, learned gear ratios, long-run consumption and service records.
+ * `state.json`: the odometer, learned gear ratios, long-run consumption, service records and the
+ * trip in progress.
  *
- * Every save renames the previous file to `state.json.bak` before the new one takes its place
- * (both steps atomic), so there is always a complete earlier copy. Loading is corruption
- * tolerant: an unreadable main file is moved aside to `state.json.corrupt` and the backup is
- * used; with neither, the HUD starts from EMPTY_PERSISTED_STATE.
+ * Every save keeps the previous file as `state.json.bak` before the new one takes its place
+ * (both steps atomic, see `writeFileAtomic`), so there is always a complete earlier copy.
+ * Loading is corruption tolerant: an unreadable main file is moved aside to
+ * `state.json.corrupt` and the backup is used; with neither, the HUD starts from
+ * EMPTY_PERSISTED_STATE.
  */
 export class PersistStore {
   readonly path: string;
@@ -101,7 +105,7 @@ export class PersistStore {
     this.logger = logger;
   }
 
-  async load(): Promise<PersistedState> {
+  async load(): Promise<PersistedStateWithTrip> {
     const main = await this.tryLoad(this.path);
     if (main.kind === 'ok') return main.state;
     if (main.kind === 'corrupt') {
@@ -129,7 +133,7 @@ export class PersistStore {
   }
 
   /** Atomically write `state` (the previous file becomes the backup). Serialised. */
-  save(state: PersistedState): Promise<void> {
+  save(state: PersistedStateWithTrip): Promise<void> {
     const text = `${JSON.stringify(state, null, 2)}\n`;
     return this.queue.run(() => writeFileAtomic(this.path, text, { backupPath: this.backupPath }));
   }
@@ -137,7 +141,9 @@ export class PersistStore {
   private async tryLoad(
     path: string,
   ): Promise<
-    { kind: 'ok'; state: PersistedState } | { kind: 'missing' } | { kind: 'corrupt'; error: string }
+    | { kind: 'ok'; state: PersistedStateWithTrip }
+    | { kind: 'missing' }
+    | { kind: 'corrupt'; error: string }
   > {
     let read;
     try {

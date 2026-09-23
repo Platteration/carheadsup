@@ -5,12 +5,15 @@ import android.app.Person
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationCompat
 import dev.carheadsup.protocol.messaging.MessagingNotificationContent
 import dev.carheadsup.protocol.messaging.StyleMessage
 import dev.carheadsup.protocol.nav.NavNotificationContent
+import dev.carheadsup.protocol.phone.CallHintType
+import dev.carheadsup.protocol.phone.CallerHint
 
 /** Converts posted notifications into the pure-Kotlin inputs of the :protocol parsers. */
 internal object NotificationContent {
@@ -19,6 +22,13 @@ internal object NotificationContent {
 
     /** The posting app's ApplicationInfo, added to every notification's extras by the system. */
     private const val EXTRA_APP_INFO = "android.appInfo"
+
+    /** `Notification.EXTRA_CALL_TYPE` and the `Notification.CallStyle.CALL_TYPE_*` values (API 31). */
+    private const val EXTRA_CALL_TYPE = "android.callType"
+    private const val CALL_TYPE_UNKNOWN = 0
+    private const val CALL_TYPE_INCOMING = 1
+    private const val CALL_TYPE_ONGOING = 2
+    private const val TEL_SCHEME = "tel:"
 
     fun nav(sbn: StatusBarNotification): NavNotificationContent {
         val notification = sbn.notification
@@ -60,22 +70,43 @@ internal object NotificationContent {
                 )
             },
             selfName = style?.user?.name?.toString(),
+            hasReplyAction = notification.actions?.any { action -> !action.remoteInputs.isNullOrEmpty() } == true,
         )
     }
 
-    /** The caller named by a dialer's incoming-call notification (Android 12+ CallStyle), if any. */
-    fun callerName(sbn: StatusBarNotification): String? {
+    /**
+     * The caller named by a call notification (Android 12+ CallStyle), with the kind of call it
+     * shows and the person's `tel:` number, if any. Any app's call notification qualifies (VoIP
+     * apps post them too); [dev.carheadsup.protocol.phone.CallStateTracker] decides whether it
+     * describes the tracked phone call.
+     */
+    fun callerHint(sbn: StatusBarNotification): CallerHint? {
         val notification = sbn.notification
         if (notification.category != Notification.CATEGORY_CALL) return null
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
-        val person =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                notification.extras.getParcelable(Notification.EXTRA_CALL_PERSON, Person::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                notification.extras.getParcelable(Notification.EXTRA_CALL_PERSON) as? Person
+        val extras = notification.extras
+        val person: Person =
+            (
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    extras.getParcelable(Notification.EXTRA_CALL_PERSON, Person::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    extras.getParcelable(Notification.EXTRA_CALL_PERSON) as? Person
+                }
+                ) ?: return null
+        val name = person.name?.toString()?.trim()?.ifEmpty { null } ?: return null
+        val number =
+            person.uri
+                ?.takeIf { it.startsWith(TEL_SCHEME, ignoreCase = true) }
+                ?.substring(TEL_SCHEME.length)
+                ?.let(Uri::decode)
+        val type =
+            when (extras.getInt(EXTRA_CALL_TYPE, CALL_TYPE_UNKNOWN)) {
+                CALL_TYPE_INCOMING -> CallHintType.INCOMING
+                CALL_TYPE_ONGOING -> CallHintType.ONGOING
+                else -> CallHintType.UNKNOWN
             }
-        return person?.name?.toString()?.trim()?.ifEmpty { null }
+        return CallerHint(name, number, type)
     }
 
     /** "WhatsApp" for com.whatsapp: from the ApplicationInfo in the extras, else the package manager. */

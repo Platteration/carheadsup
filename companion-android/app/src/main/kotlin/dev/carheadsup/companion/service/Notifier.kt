@@ -18,6 +18,7 @@ import dev.carheadsup.companion.hud.LinkStatus
 import dev.carheadsup.companion.ui.MainActivity
 import dev.carheadsup.protocol.HudMaintenanceDue
 import dev.carheadsup.protocol.MaintenanceDueStatus
+import dev.carheadsup.protocol.api.MaintenanceAlertGate
 import dev.carheadsup.protocol.api.MaintenanceItemStatus
 import dev.carheadsup.protocol.api.TripFormatter
 import dev.carheadsup.protocol.api.TripRecord
@@ -25,6 +26,9 @@ import dev.carheadsup.protocol.api.TripRecord
 /** Notification channels and the app's notifications. */
 class Notifier(private val context: Context) {
     private val manager = NotificationManagerCompat.from(context)
+
+    /** The HUD re-sends due items after every `welcome`; each is only alerted about once a day. */
+    private val maintenanceAlerts = MaintenanceAlertGate()
 
     fun createChannels() {
         val system = context.getSystemService(NotificationManager::class.java)
@@ -112,7 +116,15 @@ class Notifier(private val context: Context) {
     }
 
     fun maintenanceDue(message: HudMaintenanceDue, formatter: TripFormatter) {
+        val now = System.currentTimeMillis()
+        val alert = maintenanceAlerts.toAlert(message, now).map { it.itemId to it.status }.toSet()
+        val shown = shownNotificationIds()
         for (item in message.items) {
+            val id = ID_MAINTENANCE_BASE + (item.itemId.hashCode() and 0xFFFF)
+            val loud = (item.itemId to item.status) in alert
+            // Alerted before (the list comes again after every reconnect): refresh the text of a
+            // reminder that is still shown, silently, and leave a dismissed one dismissed.
+            if (!loud && id !in shown) continue
             val status =
                 context.getString(
                     if (item.status == MaintenanceDueStatus.OVERDUE) {
@@ -138,11 +150,19 @@ class Notifier(private val context: Context) {
                     .setContentIntent(openApp())
                     .setAutoCancel(true)
                     .setOnlyAlertOnce(true)
+                    .setSilent(!loud)
                     .setCategory(NotificationCompat.CATEGORY_REMINDER)
                     .build()
             // One notification per item, updated in place rather than stacked.
-            notify(ID_MAINTENANCE_BASE + (item.itemId.hashCode() and 0xFFFF), notification)
+            notify(id, notification)
         }
+    }
+
+    /** Ids of this app's notifications currently shown. */
+    private fun shownNotificationIds(): Set<Int> = try {
+        context.getSystemService(NotificationManager::class.java).activeNotifications.map { it.id }.toSet()
+    } catch (e: RuntimeException) {
+        emptySet()
     }
 
     @SuppressLint("MissingPermission")

@@ -23,10 +23,11 @@ const CAN_OBD: Record<string, string[]> = {
 async function connected(
   obd: Record<string, string[]> = CAN_OBD,
   extra: Record<string, string[]> = {},
+  options: Partial<Record<keyof typeof FAST, number>> = {},
 ): Promise<{ elm: Elm327; transport: ScriptedTransport }> {
   const transport = cloneAdapter(obd, extra);
   await transport.open();
-  const elm = new Elm327(transport, FAST);
+  const elm = new Elm327(transport, { ...FAST, ...options });
   await elm.initialize({ protocol: '0' });
   return { elm, transport };
 }
@@ -435,5 +436,200 @@ describe('Elm327 framing, timeouts and resynchronisation', () => {
     expect(transport.closed).toBe(true);
     await sleep(FAST.timeoutMs + 20); // the cancelled timeout must not fire into anything
     expect(elm.closed).toBe(true);
+  });
+});
+
+describe('Elm327 regressions', () => {
+  it('restores the header when the receive filter is rejected after AT SH succeeded (obd-1)', async () => {
+    const { elm, transport } = await connected(
+      { ...CAN_OBD, '224001': ['7CE 05 62 40 01 08 FC'] },
+      { ATCRA7CE: ['?'] },
+    );
+    const before = transport.commands.length;
+    expect((await errorOf(elm.raw('22', '4001', '7C6'))).code).toBe('UNSUPPORTED');
+    // The filter was never set, so only the header needs restoring.
+    expect(transport.commands.slice(before)).toEqual(['ATSH7C6', 'ATCRA7CE', 'ATSH7DF']);
+    expect(elm.closed).toBe(false);
+    expect((await elm.queryMode01([0x0d, 0x0c])).values.speed).toBe(50);
+  });
+
+  it('restores the header when the reply to AT SH is lost although it was applied (obd-1)', async () => {
+    const { elm, transport } = await connected();
+    const handler = transport.handler;
+    transport.handler = (command) => (command === 'ATSH7C6' ? null : handler(command));
+    const before = transport.commands.length;
+    expect((await errorOf(elm.raw('22', '4001', '7C6'))).code).toBe('TIMEOUT');
+    // Resync probe, then the restore.
+    expect(transport.commands.slice(before)).toEqual(['ATSH7C6', 'ATRV', 'ATSH7DF']);
+    expect(elm.closed).toBe(false);
+  });
+
+  it('restores the CAN priority when the 29-bit header is rejected (obd-1)', async () => {
+    const { elm, transport } = await connected(
+      { '0100': ['18 DA F1 10 06 41 00 BE 3F A8 13'] },
+      { ATDPN: ['A7'], ATDP: ['AUTO, ISO 15765-4 (CAN 29/500)'], ATSHDA10F1: ['?'] },
+    );
+    const before = transport.commands.length;
+    expect((await errorOf(elm.raw('22', '4001', '1CDA10F1'))).code).toBe('UNSUPPORTED');
+    expect(transport.commands.slice(before)).toEqual(['ATCP1C', 'ATSHDA10F1', 'ATCP18']);
+    expect(elm.closed).toBe(false);
+  });
+
+  it('fails a DTC read when a control unit is busy instead of reporting no codes (obd-3)', async () => {
+    // 0101: the engine ECU has the MIL on and 3 confirmed codes.
+    const { elm } = await connected({ ...CAN_OBD, '03': ['7E8 03 7F 03 21'] });
+    const err = await errorOf(elm.readDtcs());
+    expect(err.code).toBe('NEGATIVE_RESPONSE');
+    expect(err.nrc).toBe(0x21);
+    expect(elm.closed).toBe(false);
+  });
+
+  it('fails a DTC read when a multi-frame answer lost a frame (obd-3)', async () => {
+    const { elm } = await connected({
+      ...CAN_OBD,
+      // The ECM's consecutive frame arrived garbled; the TCM's answer is fine.
+      '07': ['7E8 10 0A 47 04 01 43 01 96', '7E9 02 47 00', '7E8 2l 02 34 02 35 00 00 00'],
+    });
+    const err = await errorOf(elm.readDtcs());
+    expect(err.code).toBe('MALFORMED');
+    expect(err.message).toContain('Incomplete');
+  });
+
+  it('fails a DTC read when a unit counts codes in 0101 but sends no 03 answer (obd-3)', async () => {
+    const { elm } = await connected({ ...CAN_OBD, '03': ['7E9 02 43 00'] });
+    const err = await errorOf(elm.readDtcs());
+    expect(err.code).toBe('MALFORMED');
+    expect(err.message).toContain('7E8 counts 3 trouble code(s)');
+  });
+
+  it('accepts "response pending" followed by the answer, and permanent refusals (obd-3)', async () => {
+    const { elm } = await connected({
+      ...CAN_OBD,
+      '03': ['7E8 03 7F 03 78', ...(CAN_OBD['03'] ?? [])],
+      '07': ['7E8 02 47 00', '7E9 03 7F 07 11'],
+    });
+    expect(await elm.readDtcs()).toMatchObject({
+      stored: ['P0143', 'P0196', 'P0234', 'P0235', 'P0700'],
+      pending: [],
+    });
+  });
+
+  it('detects a stray late reply after a resync instead of returning it as data (obd-5)', async () => {
+    const { elm, transport } = await connected(CAN_OBD, {}, { timeoutMs: 300 });
+    const handler = transport.handler;
+    let first = true;
+    transport.handler = (command) => {
+      if (command === '0105') return null;
+      const text = handler(command);
+      if (command === '010D0C' && first && text !== null) {
+        first = false;
+        // The late answer to 0105 turns up only after the resynchronisation has ended and
+        // the next command was sent (e.g. a TCP retransmit), followed by that command's own.
+        setTimeout(() => transport.push(reply('7E8 03 41 05 7B')), 5);
+        setTimeout(() => transport.push(text), 30);
+        return null;
+      }
+      return text;
+    };
+    expect((await errorOf(elm.queryMode01([0x05]))).code).toBe('TIMEOUT');
+    const mismatch = await errorOf(elm.queryMode01([0x0d, 0x0c]));
+    expect(mismatch.code).toBe('MALFORMED');
+    expect(mismatch.message).toContain('Mismatched');
+    // Resynchronised: the next answers line up with their commands again.
+    expect((await elm.queryMode01([0x0d, 0x0c])).values).toEqual({ speed: 50, rpm: 1726 });
+    expect(await elm.readVoltage()).toBe(12.4);
+    expect(elm.closed).toBe(false);
+  });
+
+  it('resynchronises after STOPPED, so the late answer is not taken for the next command (obd-5)', async () => {
+    const { elm, transport } = await connected(
+      { ...CAN_OBD, '010D': ['7E8 03 41 0D 32'] },
+      {},
+      { timeoutMs: 400 },
+    );
+    const handler = transport.handler;
+    let first = true;
+    transport.handler = (command) => {
+      if (command === '010C') {
+        // The adapter was still busy: it stops that, then answers this request late.
+        setTimeout(() => transport.push(reply('7E8 04 41 0C 1A F8')), 30);
+        return reply('STOPPED');
+      }
+      const text = handler(command);
+      if (command === '010D' && first && text !== null) {
+        first = false;
+        setTimeout(() => transport.push(text), 100); // a busy adapter answers later
+        return null;
+      }
+      return text;
+    };
+    expect((await errorOf(elm.queryMode01([0x0c]))).code).toBe('STOPPED');
+    expect((await elm.queryMode01([0x0d])).values).toEqual({ speed: 50 });
+  });
+
+  it('notices a reset banner split across reads while idle (obd-6)', async () => {
+    const { elm, transport } = await connected();
+    transport.push('\r\rELM3');
+    transport.push('27 v1.5\r\r>');
+    expect(elm.closed).toBe(true);
+    expect((await errorOf(elm.queryMode01([0x0d]))).code).toBe('ADAPTER_RESET');
+  });
+
+  it('notices a reset banner answering an AT command (obd-6)', async () => {
+    const { elm, transport } = await connected();
+    const handler = transport.handler;
+    transport.handler = (command) =>
+      command === 'ATRV' ? reply('', 'ELM327 v1.5') : handler(command);
+    expect((await errorOf(elm.readVoltage())).code).toBe('ADAPTER_RESET');
+    expect(elm.closed).toBe(true);
+  });
+
+  it('notices a reset banner while resynchronising (obd-6)', async () => {
+    const { elm, transport } = await connected();
+    transport.handler = () => null;
+    expect((await errorOf(elm.queryMode01([0x0d]))).code).toBe('TIMEOUT');
+    transport.push('\r\rELM327 v1.5\r\r>'); // during the resync grace period
+    expect(elm.closed).toBe(true);
+    expect((await errorOf(elm.queryMode01([0x0d]))).code).toBe('ADAPTER_RESET');
+  });
+
+  it('does not wait for ever on a resync probe whose write never completes (obd-7)', async () => {
+    const { elm, transport } = await connected();
+    transport.handler = () => null;
+    const write = transport.write.bind(transport);
+    transport.write = (data) => {
+      void write(data);
+      return new Promise<void>(() => {}); // e.g. an rfcomm link that stopped granting credits
+    };
+    expect((await errorOf(elm.queryMode01([0x0d]))).code).toBe('TIMEOUT');
+    expect((await errorOf(elm.queryMode01([0x0d]))).code).toBe('DESYNC');
+    expect(elm.closed).toBe(true);
+  });
+
+  it('assumes CAN, not a legacy bus, for a headerless clone that hides its protocol (obd-10)', async () => {
+    const { elm } = await connected(
+      {
+        '0100': ['41 00 BE 3F A8 13'],
+        '0101': ['41 01 82 07 65 04'],
+        '03': ['43 02 01 43 01 96'],
+      },
+      { ATDPN: ['?'], ATDP: ['AUTO'] },
+    );
+    expect(elm.info).toMatchObject({ family: 'can11', headers: false, maxPidsPerRequest: 6 });
+    expect((await elm.readDtcs()).stored).toEqual(['P0143', 'P0196']);
+  });
+
+  it('takes the framing from the AT DP description when AT DPN is not understood (obd-10)', async () => {
+    const { elm } = await connected(
+      { '0100': ['41 00 BE 3F A8 13'] },
+      { ATDPN: ['?'], ATDP: ['AUTO, ISO 15765-4 (CAN 29/500)'] },
+    );
+    expect(elm.info).toMatchObject({ family: 'can29', maxPidsPerRequest: 6 });
+  });
+
+  it('accepts the protocol forms the config allows (obd-12)', async () => {
+    const transport = cloneAdapter(CAN_OBD);
+    await new Elm327(transport, FAST).initialize({ protocol: '6A' });
+    expect(transport.commands).toContain('ATSPA6');
   });
 });

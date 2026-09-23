@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  LINK_LOSS_GRACE_MS,
+  DATA_GAP_GRACE_MS,
   STATIONARY_HYSTERESIS_KPH,
   createContextState,
   updateContext,
@@ -136,13 +136,54 @@ describe('updateContext', () => {
       ]);
     });
 
-    it('parks immediately on engine off with unknown speed', () => {
+    it('parks on engine off with unknown speed once the ECU has been silent for the grace', () => {
+      // stoppedState's last speed reading is at 1000 ms; the link stays up at ignition off.
+      const states = run(stoppedState(0), [
+        { at: 3000, speedKph: null, engineRunning: false },
+        { at: 1000 + DATA_GAP_GRACE_MS - 1, speedKph: null, engineRunning: false },
+        { at: 1000 + DATA_GAP_GRACE_MS, speedKph: null, engineRunning: false },
+      ]);
+      expect(contexts(states)).toEqual(['stopped', 'stopped', 'parked']);
+    });
+
+    it('parks immediately on unknown speed when the link is down', () => {
       const s = updateContext(
         stoppedState(0),
-        input({ at: 2000, speedKph: null, engineRunning: false }),
+        input({ at: 2000, speedKph: null, engineRunning: false, linkUp: false }),
         CONFIG,
       );
       expect(s.context).toBe('parked');
+    });
+
+    it('rides out a short OBD data gap at a red light (regression: core-11)', () => {
+      // Stopped with the engine running; 2.5 s without samples (ELM327 timeouts) makes speed
+      // and rpm stale while the link stays up. Data then resumes: still at the light.
+      const states = run(stoppedState(0), [
+        { at: 2000, speedKph: 0 },
+        { at: 4500, speedKph: null, engineRunning: false },
+        { at: 5000, speedKph: 0 },
+        { at: 25_000, speedKph: 0 },
+      ]);
+      expect(contexts(states)).toEqual(['stopped', 'stopped', 'stopped', 'stopped']);
+    });
+
+    it('never parks a hybrid creeping in a jam with the engine off (regression: core-2)', () => {
+      // Stop for 3 s with the engine off, then creep continuously at 1–3 km/h on electric power
+      // for well over engineOffParkedAfterMs: it is still driving.
+      const samples: Sample[] = [{ at: 1000, speedKph: 0, engineRunning: false }];
+      for (let t = 4000; t <= 4000 + 3 * CONFIG.engineOffParkedAfterMs; t += 500) {
+        samples.push({ at: t, speedKph: 1 + (Math.floor(t / 500) % 3), engineRunning: false });
+      }
+      const states = run(cityState(0), samples);
+      expect(new Set(contexts(states))).toEqual(new Set(['stopped']));
+      // A complete standstill restarts the engine-off timer from scratch.
+      const stopAt = 4000 + 3 * CONFIG.engineOffParkedAfterMs + 500;
+      const stopped = run(last(states), [
+        { at: stopAt, speedKph: 0, engineRunning: false },
+        { at: stopAt + CONFIG.engineOffParkedAfterMs - 1, speedKph: 0, engineRunning: false },
+        { at: stopAt + CONFIG.engineOffParkedAfterMs, speedKph: 0, engineRunning: false },
+      ]);
+      expect(contexts(stopped)).toEqual(['stopped', 'stopped', 'parked']);
     });
 
     it('never parks a vehicle that is moving with the engine off (hybrid EV mode)', () => {
@@ -203,28 +244,29 @@ describe('updateContext', () => {
       expect(fresh.context).toBe('parked');
     });
 
-    it('holds a moving context through a short link loss, then parks', () => {
+    it('never leaves a moving context on missing data alone (regression: core-4)', () => {
+      // A Bluetooth adapter dies at speed and stays dead: no evidence the car ever stopped.
       const city = cityState(0);
       const states = run(city, [
-        { at: 5000, linkUp: false },
-        { at: LINK_LOSS_GRACE_MS - 1, linkUp: false },
-        { at: LINK_LOSS_GRACE_MS, linkUp: false },
+        { at: 5000, linkUp: false, engineRunning: false },
+        { at: 60_000, linkUp: false, engineRunning: false },
+        { at: 3_600_000, linkUp: false, engineRunning: false },
+        { at: 3_700_000, linkUp: true, engineRunning: false },
       ]);
-      expect(contexts(states)).toEqual(['city', 'city', 'parked']);
-
-      const recovered = run(city, [
-        { at: 5000, linkUp: false },
-        { at: 8000, speedKph: 45 },
-        { at: 8000 + LINK_LOSS_GRACE_MS - 1, linkUp: false },
+      expect(contexts(states)).toEqual(['city', 'city', 'city', 'city']);
+      // Once the adapter is back, a speed reading ends it as usual.
+      const back = run(last(states), [
+        { at: 3_800_000, speedKph: 0, engineRunning: false },
+        { at: 3_800_000 + CONFIG.engineOffParkedAfterMs, speedKph: 0, engineRunning: false },
       ]);
-      expect(contexts(recovered)).toEqual(['city', 'city', 'city']);
+      expect(contexts(back)).toEqual(['stopped', 'parked']);
     });
 
-    it('also applies the grace period on the highway', () => {
+    it('also holds the highway context', () => {
       const hw = highwayState(0);
       expect(hw.context).toBe('highway');
-      const s = updateContext(hw, input({ at: 12_000, linkUp: false }), CONFIG);
-      expect(s.context).toBe('highway');
+      const s = updateContext(hw, input({ at: 600_000, linkUp: false }), CONFIG);
+      expect(s).toBe(hw);
     });
   });
 

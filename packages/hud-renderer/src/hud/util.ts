@@ -59,6 +59,9 @@ export function economyUnitLabel(unit: FuelEconomyUnit): string {
       return 'mpg';
     case 'mpg-uk':
       return 'mpg';
+    default:
+      // A unit from a newer server: show it as sent rather than nothing.
+      return String(unit);
   }
 }
 
@@ -78,6 +81,9 @@ export function gaugeTone(status: GaugeStatus): Tone {
     case 'crit':
       return 'critical';
     case 'unknown':
+      return 'unknown';
+    default:
+      // A status from a newer server: no claim either way.
       return 'unknown';
   }
 }

@@ -4,6 +4,7 @@
  * native build failed) still runs; the sensor sources then log once and stay idle.
  */
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
+import { monotonicView } from '../clock.ts';
 import { errorMessage } from './util.ts';
 
 /** The bus operations the sensor drivers need (a small subset of `i2c-bus`'s PromisifiedBus). */
@@ -166,7 +167,8 @@ export class I2cDeviceRunner {
   private failing = false;
 
   constructor(options: I2cDeviceRunnerOptions) {
-    this.options = options;
+    // Drivers time their measurements with it: a wall-clock step back must not stall them.
+    this.options = { ...options, now: monotonicView(options.now) };
   }
 
   start(): void {

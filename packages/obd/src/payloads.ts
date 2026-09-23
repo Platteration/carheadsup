@@ -9,6 +9,7 @@ import {
   parseDtcPayload,
   type SignalId,
 } from '@carheadsup/core';
+import { ElmError } from './errors.ts';
 import type { EcuMessage } from './frames.ts';
 
 /**
@@ -144,6 +145,58 @@ export function positiveResponses(messages: readonly EcuMessage[], service: numb
 }
 
 /**
+ * Whether every message answers `service`: a positive response (echoing one of `pids`, when
+ * given) or a negative response to that service. Anything else is the answer to a different
+ * request, i.e. the adapter's replies are out of step with the commands.
+ */
+export function answersRequest(
+  messages: readonly EcuMessage[],
+  service: number,
+  pids?: readonly number[],
+): boolean {
+  return messages.every((m) => {
+    if (m.data[0] === 0x7f) return m.data[1] === service;
+    if (m.data[0] !== service + 0x40) return false;
+    const pid = m.data[1];
+    return pids === undefined || (pid !== undefined && pids.includes(pid));
+  });
+}
+
+/**
+ * Negative response codes after which asking again may well succeed: the control unit has an
+ * answer but could not give it now. Other refusals (service not supported, request out of
+ * range …) are permanent, so retrying would fail forever; they mean that unit reports nothing.
+ */
+const TRANSIENT_NRCS: ReadonlySet<number> = new Set([
+  0x10, // general reject
+  0x21, // busy, repeat request
+  0x22, // conditions not correct
+  0x78, // response pending — and the answer never came
+]);
+
+/**
+ * The control unit whose answer to `service` is missing although it responded: it refused
+ * with a transient negative response (busy, conditions not correct, "response pending" not
+ * followed by the answer …) and sent no positive response. Null when every responder answered.
+ */
+export function transientRefusal(
+  messages: readonly EcuMessage[],
+  service: number,
+): { ecu: string | null; nrc: number } | null {
+  const answered = new Set(positiveResponses(messages, service).map((m) => m.ecu));
+  for (const m of messages) {
+    if (m.data[0] !== 0x7f || m.data[1] !== service) continue;
+    const nrc = m.data[2] ?? 0;
+    if (!TRANSIENT_NRCS.has(nrc)) continue;
+    // "Response pending" followed by the answer. Without headers the answer cannot be tied to
+    // the unit that asked for patience, so any answer is taken to be it.
+    if (nrc === 0x78 && answered.has(m.ecu)) continue;
+    return { ecu: m.ecu, nrc };
+  }
+  return null;
+}
+
+/**
  * The first negative response code for `service`, ignoring "response pending" (0x78), which
  * an ECU sends before its real answer.
  */
@@ -181,12 +234,20 @@ export function collectDtcs(
   return codes;
 }
 
+/** A complete VIN: 17 characters, letters I, O and Q excluded (ISO 3779). */
+const VIN_RE = /^[A-HJ-NPR-Z0-9]{17}$/;
+
 /**
  * Decode the VIN from a service 09 PID 02 response. CAN answers carry a "number of data
  * items" byte before the 17 ASCII characters; legacy answers are padded with leading zero
- * bytes. Anything that is not a VIN character is discarded and the last 17 kept.
+ * bytes. Anything that is not a VIN character is discarded and the last 17 kept. Returns null
+ * when no control unit reports a VIN (e.g. an unprogrammed one answering with zero bytes).
+ *
+ * @throws ElmError MALFORMED when the only VIN answers are incomplete or invalid (e.g. a lost
+ * line of a multi-line legacy answer), so the caller can retry instead of keeping it.
  */
 export function decodeVin(messages: readonly EcuMessage[]): string | null {
+  let partial: string | null = null;
   for (const message of positiveResponses(messages, 0x09)) {
     if (message.data[1] !== 0x02) continue;
     let text = '';
@@ -194,7 +255,13 @@ export function decodeVin(messages: readonly EcuMessage[]): string | null {
       const ch = String.fromCharCode(byte).toUpperCase();
       if (/[A-Z0-9]/.test(ch)) text += ch;
     }
-    if (text.length > 0) return text.length > 17 ? text.slice(-17) : text;
+    if (text.length === 0) continue;
+    const vin = text.length > 17 ? text.slice(-17) : text;
+    if (VIN_RE.test(vin)) return vin;
+    partial ??= vin;
+  }
+  if (partial !== null) {
+    throw new ElmError('MALFORMED', `Incomplete or invalid VIN "${partial}"`, { command: '0902' });
   }
   return null;
 }

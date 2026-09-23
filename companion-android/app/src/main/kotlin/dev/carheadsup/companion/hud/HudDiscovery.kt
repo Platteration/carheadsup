@@ -20,6 +20,8 @@ import java.util.concurrent.Executors
  *
  * Resolution uses `registerServiceInfoCallback` on Android 14+ and `resolveService` before
  * (which allows only one resolution at a time, so services are resolved one after another).
+ * NSD does not retry failed discoveries or resolutions itself; [HudLink] calls [restart] when
+ * nothing has been found for a while.
  */
 class HudDiscovery(context: Context) {
     private val nsd = context.getSystemService(NsdManager::class.java)
@@ -73,6 +75,13 @@ class HudDiscovery(context: Context) {
             Log.w(TAG, "Discovery could not start", e)
             discoveryListener = null
         }
+    }
+
+    /** Stops and starts discovery again, e.g. after a start or resolution failure. */
+    @Synchronized
+    fun restart() {
+        stop()
+        start()
     }
 
     @Synchronized
@@ -135,7 +144,9 @@ class HudDiscovery(context: Context) {
         val callback =
             object : NsdManager.ServiceInfoCallback {
                 override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                    // Nothing to unregister; HudLink restarts discovery when nothing is found.
                     Log.w(TAG, "Service info callback failed: $errorCode")
+                    synchronized(this@HudDiscovery) { if (infoCallback === this) infoCallback = null }
                 }
 
                 override fun onServiceUpdated(serviceInfo: NsdServiceInfo) {

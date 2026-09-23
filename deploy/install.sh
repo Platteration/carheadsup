@@ -220,8 +220,52 @@ install_code() {
   rm -rf -- "$old"
 }
 
-# server.port from the config file, or 8080.
-config_port() {
+# The port the server will listen on, resolved the way the server does it: `--port` on the
+# unit's ExecStart (a drop-in may add it), else CARHEADSUP_PORT from the environment file, else
+# server.port in the config file the unit passes with `--config` (the read-only-root recipe
+# moves it), else 8080. Used for the static Avahi advertisement and the summary.
+#
+#   effective_port <unit files, concatenated> <environment file> <default config file>
+effective_port() {
+  local unit_text=$1 env_file=$2 config=$3
+  local exec_line="" flag_port="" env_port="" line
+
+  # A drop-in resets ExecStart with an empty assignment and then sets it again: the last
+  # non-empty one wins. Join continuation lines first.
+  unit_text=${unit_text//$'\\\n'/ }
+  while IFS= read -r line; do
+    if [[ $line =~ ^[[:space:]]*ExecStart=(.+)$ ]]; then
+      exec_line=${BASH_REMATCH[1]}
+    fi
+  done <<<"$unit_text"
+  local -a words=()
+  read -r -a words <<<"$exec_line"
+  local i
+  for ((i = 0; i < ${#words[@]}; i++)); do
+    case ${words[i]} in
+      --port) flag_port=${words[i + 1]:-} ;;
+      --port=*) flag_port=${words[i]#*=} ;;
+      --config) config=${words[i + 1]:-$config} ;;
+      --config=*) config=${words[i]#*=} ;;
+    esac
+  done
+
+  if [[ -r $env_file ]]; then
+    while IFS= read -r line; do
+      if [[ $line =~ ^[[:space:]]*CARHEADSUP_PORT=[\"\']?([0-9]+)[\"\']?[[:space:]]*$ ]]; then
+        env_port=${BASH_REMATCH[1]}
+      fi
+    done <"$env_file"
+  fi
+
+  local candidate
+  for candidate in "$flag_port" "$env_port"; do
+    # 0 means "any free port", which cannot be advertised statically.
+    if [[ $candidate =~ ^[0-9]{1,5}$ ]] && ((10#$candidate >= 1 && 10#$candidate <= 65535)); then
+      printf '%d' "$((10#$candidate))"
+      return
+    fi
+  done
   "$NODE_BIN" -e '
     let port = 8080;
     try {
@@ -230,7 +274,14 @@ config_port() {
       if (Number.isInteger(value) && value > 0 && value < 65536) port = value;
     } catch {}
     process.stdout.write(String(port));
-  ' "$CONFIG_FILE"
+  ' "$config"
+}
+
+# effective_port for the installed unit, its drop-ins and /etc/default/carheadsup.
+config_port() {
+  local unit_text
+  unit_text=$(cat -- "${UNIT_DIR}/carheadsup.service" "${UNIT_DIR}/carheadsup.service.d/"*.conf 2>/dev/null || true)
+  effective_port "$unit_text" "$ENV_FILE" "$CONFIG_FILE"
 }
 
 install_system_files() {
@@ -293,7 +344,7 @@ enable_services() {
       log "default boot target set to graphical.target (starts the kiosk)"
     fi
     if systemctl is-enabled display-manager.service >/dev/null 2>&1; then
-      warn "a desktop display manager is enabled and will compete with the kiosk; use Raspberry Pi OS Lite or disable it (sudo systemctl disable display-manager.service)"
+      warn "a desktop display manager (display-manager.service, e.g. lightdm) is enabled: graphical.target starts it next to the kiosk and it takes the screen. Disable it (sudo systemctl disable display-manager.service) or use Raspberry Pi OS Lite"
     fi
   fi
   if [[ -n $opt_obd_mac ]]; then
@@ -369,4 +420,7 @@ main() {
   summary
 }
 
-main "$@"
+# Run only when executed, so the tests can source the functions.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

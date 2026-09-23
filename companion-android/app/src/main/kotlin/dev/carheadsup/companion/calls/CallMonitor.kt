@@ -25,6 +25,7 @@ import dev.carheadsup.protocol.CallAction
 import dev.carheadsup.protocol.HudCallAction
 import dev.carheadsup.protocol.PhoneCall
 import dev.carheadsup.protocol.phone.CallStateTracker
+import dev.carheadsup.protocol.phone.CallerHint
 import dev.carheadsup.protocol.phone.TelephonyState
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -36,8 +37,8 @@ enum class CallActionFailure { NO_PERMISSION, UNSUPPORTED, NOT_APPLICABLE, REFUS
  * Phone calls ⇄ HUD:
  * - call state from `TelephonyCallback` (Android 12+) or `PhoneStateListener`, plus the
  *   `PHONE_STATE` broadcast which carries the caller's number (needs READ_CALL_LOG);
- * - the number is resolved to a contact name (READ_CONTACTS); a dialer's CallStyle notification
- *   can supply the name too ([onCallerHint]);
+ * - the number is resolved to a contact name (READ_CONTACTS); a call notification can supply the
+ *   name too ([onCallerHint]) when it describes the tracked call;
  * - `call-action` from the HUD: accept → `TelecomManager.acceptRingingCall()`, decline →
  *   `TelecomManager.endCall()` (ANSWER_PHONE_CALLS; ending calls needs Android 9+).
  *
@@ -109,9 +110,9 @@ class CallMonitor(context: Context, private val publish: (PhoneCall) -> Unit) {
         }
     }
 
-    /** A caller name from the dialer's notification. */
-    fun onCallerHint(name: String) {
-        executor.execute { tracker.onCallerIdentified(name)?.let(publish) }
+    /** A caller name from a call notification (the tracker decides whether it names our call). */
+    fun onCallerHint(hint: CallerHint) {
+        executor.execute { tracker.onCallerHint(hint)?.let(publish) }
     }
 
     /**
@@ -123,24 +124,28 @@ class CallMonitor(context: Context, private val publish: (PhoneCall) -> Unit) {
         if (!tracker.accepts(action.callId, action.action)) return CallActionFailure.NOT_APPLICABLE
         val manager = telecom ?: return CallActionFailure.UNSUPPORTED
         if (!granted(Manifest.permission.ANSWER_PHONE_CALLS)) return CallActionFailure.NO_PERMISSION
-        return try {
-            when (action.action) {
-                CallAction.ACCEPT -> {
-                    manager.acceptRingingCall()
-                    null
-                }
-
-                CallAction.DECLINE ->
-                    when {
-                        Build.VERSION.SDK_INT < Build.VERSION_CODES.P -> CallActionFailure.UNSUPPORTED
-                        manager.endCall() -> null
-                        else -> CallActionFailure.REFUSED
-                    }
-            }
-        } catch (e: SecurityException) {
-            Log.w(TAG, "Call action refused", e)
-            CallActionFailure.NO_PERMISSION
+        if (action.action == CallAction.DECLINE && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return CallActionFailure.UNSUPPORTED
         }
+        // Noted before Telecom acts: the resulting state change tells an answered waiting call
+        // from a declined one only through this.
+        tracker.noteHudAction(action.callId, action.action)
+        val failure =
+            try {
+                when (action.action) {
+                    CallAction.ACCEPT -> {
+                        manager.acceptRingingCall()
+                        null
+                    }
+
+                    CallAction.DECLINE -> if (manager.endCall()) null else CallActionFailure.REFUSED
+                }
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Call action refused", e)
+                CallActionFailure.NO_PERMISSION
+            }
+        if (failure != null) tracker.noteHudAction(action.callId, null)
+        return failure
     }
 
     private fun onState(state: TelephonyState, number: String?) {

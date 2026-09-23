@@ -2,7 +2,12 @@ import { composeFrame } from '../../src/compose/compose.ts';
 import { DEFAULT_CONFIG, mergeConfig } from '../../src/config/config.ts';
 import { cloneJson } from '../../src/config/json.ts';
 import { deriveEffects } from '../../src/state/effects.ts';
-import { EMPTY_PERSISTED_STATE, createInitialState, reduce } from '../../src/state/reducer.ts';
+import {
+  EMPTY_PERSISTED_STATE,
+  createInitialState,
+  reduce,
+  type PersistedStateWithTrip,
+} from '../../src/state/reducer.ts';
 import type { DeepPartial, HudConfig } from '../../src/types/config.ts';
 import type { HudEffect } from '../../src/types/effects.ts';
 import type { HudEvent, InputAction } from '../../src/types/events.ts';
@@ -130,7 +135,7 @@ export class Harness {
 
   constructor(
     config: HudConfig = makeConfig(),
-    persistedState: PersistedState = persisted(),
+    persistedState: PersistedStateWithTrip = persisted(),
     now: number = T0,
     options?: { simulated?: boolean },
   ) {

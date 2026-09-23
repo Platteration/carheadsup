@@ -21,6 +21,7 @@ describe('parseCli', () => {
       host: undefined,
       rendererDir: undefined,
       backlight: null,
+      allowedHosts: [],
       logLevel: 'info',
     });
   });
@@ -39,6 +40,8 @@ describe('parseCli', () => {
         './dist',
         '--backlight',
         '/sys/class/backlight/rpi_backlight',
+        '--allowed-hosts',
+        'hud.fritz.box, car.lan',
         '--log-level',
         'DEBUG',
       ]),
@@ -50,6 +53,7 @@ describe('parseCli', () => {
       host: '127.0.0.1',
       rendererDir: './dist',
       backlight: '/sys/class/backlight/rpi_backlight',
+      allowedHosts: ['hud.fritz.box', 'car.lan'],
       logLevel: 'debug',
     });
   });
@@ -75,6 +79,7 @@ describe('parseCli', () => {
       CARHEADSUP_HOST: '0.0.0.0',
       CARHEADSUP_RENDERER_DIR: '/env/dist',
       CARHEADSUP_BACKLIGHT: 'off',
+      CARHEADSUP_ALLOWED_HOSTS: 'pi.home',
       CARHEADSUP_LOG_LEVEL: 'warn',
     };
     expect(run([], env)).toEqual({
@@ -85,6 +90,7 @@ describe('parseCli', () => {
       host: '0.0.0.0',
       rendererDir: '/env/dist',
       backlight: false,
+      allowedHosts: ['pi.home'],
       logLevel: 'warn',
     });
     expect(run(['--port', '1', '--data-dir', '/flag', '--log-level', 'error'], env)).toMatchObject({
@@ -94,6 +100,13 @@ describe('parseCli', () => {
     });
     expect(run([], { CARHEADSUP_SIM: '0' }).sim).toBe(false);
     expect(run([], { CARHEADSUP_PORT: '' }).port).toBeUndefined();
+  });
+
+  it('rejects host lists with things that are not host names', () => {
+    expect(parseCli(['--allowed-hosts', 'http://x/'], {}, HOME)).toEqual({
+      kind: 'error',
+      message: '--allowed-hosts: "http://x/" is not a host name',
+    });
   });
 
   it('maps backlight words', () => {

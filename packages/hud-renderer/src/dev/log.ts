@@ -11,7 +11,7 @@ export type LogKind =
 export type LogTone = 'info' | 'caution' | 'warning' | 'critical' | 'ok' | 'muted';
 
 export interface LogEntry {
-  /** Epoch ms (the frame's `at`, or the wall clock for feed changes). */
+  /** Epoch ms on the HUD's clock (the frame's `at`; see `useFrameLog` for feed changes). */
   at: number;
   kind: LogKind;
   tone: LogTone;
@@ -38,8 +38,8 @@ function alertTone(a: AlertFrame): LogTone {
 
 /**
  * Entries describing the change from `prev` to `next`. `now` stamps feed transitions (a null
- * frame means "no live feed"). The first frame after no feed logs the feed coming up and its
- * initial alerts, not every widget.
+ * frame means "no live feed") and must be on the HUD's clock like the frames' `at`. The first
+ * frame after no feed logs the feed coming up and its initial alerts, not every widget.
  */
 export function deriveLogEntries(
   prev: HudFrame | null,

@@ -34,11 +34,20 @@ throughout: km/h, m, kPa, epoch milliseconds.
 4. From then on the phone sends state updates whenever something changes; the HUD sends call
    actions, finished trips and maintenance notices.
 
-There is **one active phone**: a newer session that completes its `hello` replaces the older
-one (closed with 4000). At most 8 connections may be waiting for their `hello` at once. The HUD
-sends WebSocket pings every 10 s and drops a peer that did not answer the previous one; the
-companion additionally sends `ping` messages every 5 s and reconnects when the HUD is silent for
-15 s.
+There is **one active phone**. A newer session from the *same* phone (same `hello.device` and
+`hello.app`) replaces the older one (closed with 4000) without a disconnect in between. Another
+phone is refused while one is connected (`hello` answered with close 1013 "another phone is
+connected"), so two paired phones in one car never take the HUD from each other in turns; the
+connected phone keeps the HUD until it goes away (a vanished phone is dropped by the heartbeat
+below). When a *different* phone does come up, the HUD first drops what the previous one
+provided (route, road, hazards, media, call).
+
+At most 8 connections may wait for their `hello` at once, and at most 2 from one address. A new
+connection is always accepted: beyond those limits the oldest waiting one is closed (1013), so
+idle connections cannot lock the paired phone out. The HUD sends WebSocket pings every 10 s and
+drops a peer that did not answer the previous one; the companion additionally sends `ping`
+messages every 5 s and reconnects when the HUD is silent for 15 s. A phone that stops reading
+(more than 1 MiB of unsent messages) is closed with 1008.
 
 The HUD stamps every message with its own clock on receipt. The phone's clock is used only for
 absolute times such as the ETA.
@@ -137,8 +146,10 @@ clear).
 
 Up to 50 items with unique `id`s (≤ 256 characters). Types: `speed-camera`, `red-light-camera`,
 `section-control`, `police`, `accident`, `road-works`, `traffic-jam`, `slowdown`,
-`object-on-road`, `weather`, `school-zone`, `railway-crossing`, `other` (whose `description`, ≤ 300
-characters, becomes the label). Distances are dead-reckoned like the nav distance; a hazard is
+`object-on-road`, `weather`, `school-zone`, `railway-crossing`, `other`. The HUD labels each type
+itself ("Speed camera" …); only for `other` does the `description` (≤ 300 characters) become the
+label, cut to 24 characters, and only while the car is stopped or parked — while it moves an
+`other` hazard is labelled "Hazard". Other types' descriptions are never shown. Distances are dead-reckoned like the nav distance; a hazard is
 dropped when it is 50 m behind the car or not refreshed for 2 minutes.
 
 **`media`** — now playing.
@@ -182,7 +193,8 @@ actions `primary`, `secondary`, `next-page`, `prev-page`, `toggle-blank`, `brigh
 
 **`trips-request`** — ask for trips that ended after an epoch-ms time:
 `{ "t": "trips-request", "since": 1790000000000 }`. Answered with `trips` (newest first, at most
-1,000; older ones through `GET /api/trips`).
+1,000; older ones through `GET /api/trips`). Up to 3 requests in a row are answered, then one per
+5 s; the excess ones get `error bad-message` ("Too many trip requests").
 
 **`ping`** — `{ "t": "ping", "id": 7 }` (the `id` is optional); answered with
 `{ "t": "pong", "id": 7 }`.
@@ -244,15 +256,16 @@ messages per second (bursts of up to 100); messages over the limit are dropped, 
 | `error.code` | Meaning |
 | --- | --- |
 | `bad-token` | Wrong pairing token (also sent when the token is changed while connected). |
-| `bad-message` | The message failed validation, was not `hello` when it had to be, or was rate limited. |
+| `bad-message` | The message failed validation, was not `hello` when it had to be, or was rate limited (messages, or `trips-request`). |
 | `unsupported-version` | `hello.v` is not the HUD's protocol version. |
 | `internal` | Reserved for server faults. |
 
 | Close code | Meaning |
 | --- | --- |
 | 1001 | The HUD is shutting down. |
-| 1013 | Too many connections waiting for their `hello`; retry later. |
-| 4000 | Replaced by a newer session from a phone. |
+| 1008 | The phone did not read what the HUD sent (more than 1 MiB unsent). |
+| 1013 | Try again later: another phone is connected, or this connection waited for its `hello` while too many others did (the oldest waiting one is closed). |
+| 4000 | Replaced by a newer session from the same phone. The companion waits its maximum back-off before reconnecting. |
 | 4001 | Wrong pairing token (or it changed). The companion waits its maximum back-off before retrying. |
 | 4002 | Unsupported protocol version. |
 | 4003 | No valid `hello` as the first message within 5 s. |
@@ -264,11 +277,16 @@ Used by the HUD page and the developer console.
 
 - **Access**: clients on the Pi itself are always allowed. When `server.apiToken` is set, other
   clients must pass it as `?token=<token>` or `Authorization: Bearer <token>`; otherwise the
-  upgrade is refused with HTTP 401. A browser upgrade from another site is refused with 403.
-  When the token changes, remote clients that no longer match are closed with code 4001.
+  upgrade is refused with HTTP 401. Browsers cannot set headers on a WebSocket, so the
+  developer console opened from another device sends the API token it has stored (entered when
+  it asks, or once as `/dev?token=<token>`) as `?token=`. A browser upgrade from another site,
+  or to a host name that is not the HUD's (see [REST conventions](#rest-api)), is refused with
+  403. When the token changes, remote clients that no longer match are closed with code 4001.
 - **On connect** the server sends a `display` message and the latest frame; afterwards every
   frame (at `server.frameRate`), and a new `display` message whenever the projection settings
-  change. A client that cannot keep up (more than 1 MiB unsent) skips frames.
+  or `hardwareBrightness` change. A client that cannot keep up (more than 1 MiB unsent) skips
+  frames. Clients on other devices are limited to 4 per address and 16 in total (the upgrade is
+  refused with 503 beyond that); the Pi's own display is never limited.
 - **From the client**: only `input`, e.g. `{ "t": "input", "action": "next-page" }`, at most 20
   per second (bursts of 40), frames ≤ 1024 characters. Anything else is ignored.
 
@@ -280,9 +298,18 @@ Used by the HUD page and the developer console.
     "corners": { "tl": [0, 0], "tr": [1, 0], "br": [1, 1], "bl": [0, 1] },
     "showGrid": false
   },
-  "simulated": false
+  "simulated": false,
+  "hardwareBrightness": true
 }
 ```
+
+`hardwareBrightness` is true while the server drives the display's Linux backlight from the
+frames' `theme.brightness`; the HUD page then draws at full brightness instead of dimming the
+content with a CSS filter as well (which would give about b × b^2.2 instead of b). It changes —
+and a new `display` message is sent — when the backlight device appears after start-up (the
+server looks for it again every 10 s) or stops working. Pages that are not lit by that
+backlight, such as the developer console's preview or `?preview=1`, keep dimming. A server that
+does not send the field is treated as `false`.
 
 A frame (`HudFrame` in [`types/frame.ts`](../packages/core/src/types/frame.ts)) says exactly
 what to draw, already in the driver's units; abridged:
@@ -314,7 +341,27 @@ what to draw, already in the driver's units; abridged:
 }
 ```
 
-The page shows nothing but a small "no signal" dot when no frame has arrived for 1 s.
+The page shows nothing but a small "no signal" dot when the frame time has not advanced for 1 s
+(two frame intervals at a `server.frameRate` below 2, at most 2.5 s). The first frame after
+connecting is shown only once a newer one follows, so a server's cached last frame is never
+taken for live.
+
+Points a renderer of its own must know (the full contract is `types/frame.ts`):
+
+- `widgets` holds only what is to be drawn now, most important first within a zone; a widget
+  whose data is stale or irrelevant is simply absent.
+- The nav widget's `iconPng` is non-null only when `maneuver.type` is `unknown`: draw the phone's
+  icon then, and the HUD's own arrow for every known maneuver. `maneuver.instruction` is null
+  while the car moves.
+- `diagnostics` is non-null only in the `parked` context and replaces the widget grid with the
+  full-screen dashboard (`DiagnosticsFrame`): `page` (`overview`, then `engine`, `fuel`,
+  `electrical` — each only while it has live data — then `trouble-codes`, `trip`,
+  `maintenance`), `pageIndex` / `pageCount` and `title`; `gauges` (signal, label, value in
+  display units or null, unit, decimals, min, max, `status` `ok` / `warn` / `crit` /
+  `unknown`); `dtcs` with `milOn`; `trip` (`DiagnosticsTrip`: the trip in progress, or the last
+  completed one with `completed: true`; distance, duration, moving time, economy, fuel, cost);
+  `maintenance` (`DiagnosticsMaintenanceItem`: status, remaining distance and days, due date —
+  on the overview only the items due soon or overdue); and `vehicle` (VIN, adapter, protocol).
 
 ## ADAS UDP feed
 
@@ -339,6 +386,23 @@ on all interfaces; `null` disables it).
 - Each line ≤ 1024 characters; up to 8 lines per datagram; datagrams over 4 KiB and more than
   50 datagrams per second are dropped. Invalid lines are skipped and logged (at most every 10 s).
 
+**Trust**: the feed has no authentication and no sender check. Any device that can reach the
+port — a passenger's phone on the HUD's Wi-Fi, for instance — can show blind-spot markers or a
+critical "BRAKE!" that cannot be dismissed, and a flood beyond the datagram limit above (one
+budget shared by all senders) makes the HUD drop the real module's messages. Keep the port off
+unless you use a module, and restrict it to the module with a firewall rule — e.g. with nftables
+(`sudo apt install nftables`), where 10.42.0.50 is the module's address (fix it on the module, or
+match its MAC address with `ether saddr` instead):
+
+```sh
+sudo nft add table inet carheadsup
+sudo nft add chain inet carheadsup input '{ type filter hook input priority 0; }'
+sudo nft add rule inet carheadsup input udp dport 5005 ip saddr != 10.42.0.50 drop
+```
+
+To keep the rule across reboots, put it in `/etc/nftables.conf` and `sudo systemctl enable
+nftables`.
+
 Examples: [hardware.md](hardware.md#optional-adas-module).
 
 ## REST API
@@ -355,6 +419,11 @@ exactly these endpoints.
 - **Cross-site protection**: `POST`, `PUT`, `PATCH` and `DELETE` from a browser page of another
   origin (`Origin` or `Sec-Fetch-Site: cross-site`) get `403`. Clients that are not browsers are
   unaffected.
+- **Host names**: every request (pages included) and WebSocket upgrade must name the HUD in its
+  `Host` header — an IP address, `localhost`, the machine's host name, `<hostname>.local`, or a
+  name allowed with `--allowed-hosts` — or it gets `403`. This stops DNS rebinding, where a web
+  page makes its own name resolve to the HUD and would otherwise count as same-origin. A request
+  without a `Host` header (not a browser) is allowed.
 - **Bodies**: `Content-Type: application/json`, at most 256 KiB (`413` above, `415` for another
   content type, `400` for malformed JSON).
 - **Errors**: `{ "error": "<message>" }` with the status code. `404` for an unknown endpoint,
@@ -423,7 +492,14 @@ curl -X PATCH http://hud.local:8080/api/config \
 
 Status 422 means that at least one field was rejected — **the valid fields were still applied**;
 `config` is what is now in effect. `500` means the file could not be written (nothing changed);
-`503` means the HUD is still starting.
+`503` means the HUD is still starting, or that `config.json` could not be loaded at start-up
+(unreadable, or not valid JSON): saving is refused until it is fixed and the HUD restarted, so
+the file is never replaced by the defaults (nothing changed).
+
+`server.apiToken` must be printable ASCII (letters, digits, symbols and spaces, not only
+spaces): it travels in `Authorization` headers and `?token=` addresses, which carry nothing else,
+so any other token would lock every other device out. The pairing token travels inside the
+`hello` message and may be any text.
 
 ### Diagnostics
 
@@ -457,8 +533,10 @@ See [obd.md](obd.md#clearing-trouble-codes) before using it.
 
 ### Trips
 
-- `GET /api/trips?limit=50&before=<epoch ms>` — completed trips, newest first. `limit` 1–500
-  (default 50); `before` pages backwards by `endedAt`.
+- `GET /api/trips?limit=50&before=<epoch ms>` — completed trips, newest first (by `startedAt`).
+  `limit` 1–500 (default 50); `before` returns only trips that *started* before that time: to
+  page backwards, pass the `startedAt` of the oldest trip you have (its `endedAt` would return
+  that trip again).
 - `GET /api/trips.csv` — every trip as CSV (`Content-Disposition: attachment;
   filename="carheadsup-trips.csv"`), columns `id, started_at, ended_at, distance_km, duration_s,
   moving_s, idle_s, fuel_used_l, avg_l_per_100km, max_speed_kph, avg_moving_speed_kph, cost,
@@ -494,8 +572,22 @@ curl -X POST http://localhost:8080/api/sim -H 'Content-Type: application/json' \
 ```
 
 ```json
-{ "mode": "manual", "throttle": 0.4, "brake": 0, "engineRunning": true, "gear": null, "speedKph": 0, "rpm": 880, "dtcs": ["P0420"], "lux": 20000, "ambientTempC": 18, "scenarioStep": null }
+{
+  "mode": "manual", "throttle": 0.4, "brake": 0, "engineRunning": true, "gear": null,
+  "speedKph": 0, "rpm": 880, "dtcs": ["P0420"], "lux": 20000, "ambientTempC": 18,
+  "scenarioStep": null,
+  "coolantOverrideC": null, "voltageOverrideV": null, "fuelLevelOverridePct": null,
+  "tirePressuresKpa": { "fl": 235, "fr": 235, "rl": 230, "rr": 230 },
+  "adas": { "blindSpotLeft": false, "blindSpotRight": false, "collision": "none" },
+  "phone": { "connected": true, "steppedAside": false }
+}
 ```
+
+The status reports everything the controls below set — the overrides, the tyre pressures as set
+(cold; the reported ones rise as the tyres warm up), the ADAS warnings and the simulated phone's
+link — so a developer console shows the simulator's state after a reload, or after another
+console changed it. `phone.steppedAside` is true while a real phone is connected to `/ws/phone`:
+the simulated phone is then silent (no messages, no link changes) until the real one goes.
 
 | Field | Values |
 | --- | --- |
@@ -503,7 +595,7 @@ curl -X POST http://localhost:8080/api/sim -H 'Content-Type: application/json' \
 | `throttle`, `brake` | 0–1 (manual mode) |
 | `engineRunning` | boolean |
 | `gear` | 0–10 to hold a gear (0 = neutral), `null` for automatic shifting |
-| `dtcs` | up to 32 codes such as `"P0420"`; replaces the injected codes |
+| `dtcs` | up to 32 codes such as `"P0420"`; replaces the injected codes, and the HUD reads the codes again at once (instead of at the next `obd.dtcIntervalMs`), so the change shows within a moment |
 | `coolantOverrideC`, `voltageOverrideV`, `fuelLevelOverridePct` | force a value; `null` releases it |
 | `lux`, `ambientTempC` | simulated light level (0–200000) and outside temperature (−60–70) |
 | `phone.kind` | `nav-start`, `nav-stop`, `incoming-call` (optional `name`), `end-call`, `next-track`, `message` (optional `sender`), `speed-camera`, `disconnect`, `connect` |

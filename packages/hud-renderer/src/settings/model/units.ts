@@ -122,9 +122,17 @@ export type ParsedNumber = { ok: true; value: number | null } | { ok: false; err
 const UNICODE_MINUS = /[−‒–]/g;
 
 /**
+ * Digits grouped in thousands with commas ("48,210", "1,234,567", "12,345.6"). A single comma
+ * followed by exactly three digits could be either a decimal comma or a thousands separator —
+ * guessing wrong turns 48 210 km into 48.21 km — so such input is refused, not guessed.
+ */
+const THOUSANDS_GROUPED = /^[+-]?[1-9]\d{0,2}(?:,\d{3})+(?:\.\d*)?$/;
+
+/**
  * Parse what a person typed into a number field. Accepts surrounding spaces, a leading "+",
  * typographic minus signs, and a single decimal comma ("12,5" — phone keyboards in many locales
- * offer only a comma). Empty input is null when `allowEmpty`, else an error.
+ * offer only a comma). Thousands separators are refused (see {@link THOUSANDS_GROUPED}). Empty
+ * input is null when `allowEmpty`, else an error.
  */
 export function parseNumberText(
   text: string,
@@ -133,6 +141,9 @@ export function parseNumberText(
   const trimmed = text.trim().replace(UNICODE_MINUS, '-');
   if (trimmed === '') {
     return options.allowEmpty ? { ok: true, value: null } : { ok: false, error: 'Required' };
+  }
+  if (THOUSANDS_GROUPED.test(trimmed)) {
+    return { ok: false, error: 'Leave out the thousands separator (decimals: 1.5 or 1,5)' };
   }
   const commas = (trimmed.match(/,/g) ?? []).length;
   const normalized = commas === 1 && !trimmed.includes('.') ? trimmed.replace(',', '.') : trimmed;

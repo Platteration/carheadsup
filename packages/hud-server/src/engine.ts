@@ -15,16 +15,21 @@ import type {
   HudToPhone,
   MaintenanceItemStatus,
   PersistedState,
+  PersistedStateWithTrip,
   TripRecord,
 } from '@carheadsup/core';
 import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
+import { HudTime } from './clock.ts';
 
 /** Clock tick period (drives toast fades, staleness, trip end, brightness smoothing). */
 export const TICK_INTERVAL_MS = 100;
 /** A requested persist is written this long after the first request (coalescing bursts). */
 export const PERSIST_DELAY_MS = 2000;
-/** While the odometer keeps changing, it is written at most this often (besides whole-km steps). */
+/**
+ * While the odometer or the trip in progress keeps changing, they are written at most this
+ * often (besides whole-km steps and trip ends).
+ */
 export const ODOMETER_PERSIST_INTERVAL_MS = 60_000;
 /** Repeated identical errors (e.g. a failing composer) are logged at most this often. */
 const ERROR_LOG_INTERVAL_MS = 10_000;
@@ -35,14 +40,15 @@ export interface EngineOutputs {
   sendToPhone(message: HudToPhone): void;
   /** Persist a completed trip. */
   saveTrip(trip: TripRecord): Promise<void>;
-  /** Write the persisted state (odometer, learned ratios, service records). */
+  /** Write the persisted state (odometer, learned ratios, service records, trip in progress). */
   savePersisted(state: PersistedState): Promise<void>;
 }
 
 export interface HudEngineOptions {
   /** The effective (runtime) config. */
   config: HudConfig;
-  persisted: PersistedState;
+  /** What was saved last time, including the trip that was in progress then. */
+  persisted: PersistedStateWithTrip;
   simulated?: boolean;
   outputs: EngineOutputs;
   now?: Clock;
@@ -80,15 +86,20 @@ export function maintenanceDueMessage(
  * The HUD's heart: owns the config and the `HudState`, feeds every event through the pure
  * reducer and performs the effects the core derives from each transition.
  *
- *  - `dispatch(event)` re-stamps `event.at` with the engine clock, never earlier than the
- *    previous event (the clock may step backwards, e.g. NTP on a Pi without RTC). Events
- *    dispatched from inside an effect handler are queued and processed in order.
+ *  - `dispatch(event)` re-stamps `event.at` with the engine time ({@link HudTime}): the wall
+ *    clock, but never going backwards and never stalling when the clock steps back (e.g. NTP
+ *    on a Pi without RTC), so staleness and expiry keep working. Events dispatched from inside
+ *    an effect handler are queued and processed in order. (A `phone/link` from a different
+ *    phone clears the previous phone's route, road, call, media and hazards in the reducer.)
  *  - A tick event is dispatched every {@link TICK_INTERVAL_MS}; frames are composed on their
  *    own timer at `server.frameRate` (not per event) and published to frame listeners.
  *  - Effects: call actions and trip/maintenance notifications go to the phone; completed trips
  *    are saved; `persist` requests are coalesced into one write {@link PERSIST_DELAY_MS} later.
- *    The odometer is also written at most every {@link ODOMETER_PERSIST_INTERVAL_MS} while it
- *    changes, and once more on `stop()`.
+ *    The odometer and the trip in progress are also written at most every
+ *    {@link ODOMETER_PERSIST_INTERVAL_MS} while they change, promptly when the trip ends, and
+ *    once more on `stop()`; a trip that starts is written promptly too. The HUD is powered down
+ *    seconds after the ignition, long before a trip would end by itself; the trip saved then is
+ *    completed (or, after a short blip, continued) when the HUD starts again.
  */
 export class HudEngine {
   readonly simulated: boolean;
@@ -96,7 +107,6 @@ export class HudEngine {
   private current: HudState;
   private latestFrame: HudFrame | null = null;
   private readonly outputs: EngineOutputs;
-  private readonly now: Clock;
   private readonly timers: Timers;
   private readonly logger: Logger;
   private readonly tickIntervalMs: number;
@@ -106,7 +116,7 @@ export class HudEngine {
   private readonly frameListeners = new Set<FrameListener>();
   private readonly queue: HudEvent[] = [];
   private draining = false;
-  private lastAt: number;
+  private readonly time: HudTime;
 
   private running = false;
   private stopped = false;
@@ -118,12 +128,13 @@ export class HudEngine {
   private lastPersistAt: number;
   private lastSavedJson: string;
   private lastSavedOdometerKm: number | null;
+  /** `state.trip.active` when the state was last written. */
+  private lastSavedTrip: HudState['trip']['active'];
   private readonly pending = new Set<Promise<void>>();
   private readonly lastErrorLog = new Map<string, number>();
 
   constructor(options: HudEngineOptions) {
     this.outputs = options.outputs;
-    this.now = options.now ?? SYSTEM_CLOCK;
     this.timers = options.timers ?? SYSTEM_TIMERS;
     this.logger = options.logger ?? SILENT_LOGGER;
     this.tickIntervalMs = Math.max(1, options.tickIntervalMs ?? TICK_INTERVAL_MS);
@@ -135,14 +146,13 @@ export class HudEngine {
     this.simulated = options.simulated ?? false;
     this.cfg = options.config;
 
-    const start = this.now();
-    this.lastAt = Number.isFinite(start) ? start : 0;
+    this.time = new HudTime(options.now ?? SYSTEM_CLOCK);
     this.current = createInitialState(this.cfg, options.persisted, this.lastAt, {
       simulated: this.simulated,
     });
-    const persisted = extractPersisted(this.current);
-    this.lastSavedJson = JSON.stringify(persisted);
+    this.lastSavedJson = JSON.stringify(this.snapshot());
     this.lastSavedOdometerKm = this.current.odometer.km;
+    this.lastSavedTrip = this.current.trip.active;
     this.lastPersistAt = this.lastAt;
   }
 
@@ -241,11 +251,14 @@ export class HudEngine {
 
   // -------------------------------------------------------------------------------------------
 
-  /** Engine time for the next event: the clock, but never earlier than the previous event. */
+  /** Engine time of the latest event. */
+  private get lastAt(): number {
+    return this.time.current;
+  }
+
+  /** Engine time for the next event (see {@link HudTime}). */
   private stamp(): number {
-    const t = this.now();
-    if (Number.isFinite(t) && t > this.lastAt) this.lastAt = t;
-    return this.lastAt;
+    return this.time.read();
   }
 
   private process(event: HudEvent): void {
@@ -268,7 +281,7 @@ export class HudEngine {
       this.logThrottled('effects', `Engine: deriving effects failed: ${describe(err)}`);
     }
     for (const effect of effects) this.perform(effect);
-    this.checkOdometer();
+    this.checkPeriodicPersist();
   }
 
   private perform(effect: HudEffect): void {
@@ -309,19 +322,36 @@ export class HudEngine {
     }
   }
 
-  /** Persist sub-kilometre odometer progress at most every `odometerPersistIntervalMs`. */
-  private checkOdometer(): void {
+  /**
+   * Persist sub-kilometre odometer progress and the trip in progress at most every
+   * `odometerPersistIntervalMs`, and the start and end of a trip promptly (a trip is then on
+   * disk from its first seconds, and a finished one is not restored again).
+   */
+  private checkPeriodicPersist(): void {
+    if (this.persistTimer !== null) return;
     const km = this.current.odometer.km;
-    if (km === null || km === this.lastSavedOdometerKm || this.persistTimer !== null) return;
-    if (this.lastAt - this.lastPersistAt >= this.odometerPersistIntervalMs) this.requestPersist();
+    const trip = this.current.trip.active;
+    const odometerMoved = km !== null && km !== this.lastSavedOdometerKm;
+    const tripChanged = trip !== this.lastSavedTrip;
+    if (!odometerMoved && !tripChanged) return;
+    const tripStartedOrEnded = (trip === null) !== (this.lastSavedTrip === null);
+    if (tripStartedOrEnded || this.lastAt - this.lastPersistAt >= this.odometerPersistIntervalMs) {
+      this.requestPersist();
+    }
+  }
+
+  /** What is written to disk: the persisted state, including the trip in progress. */
+  private snapshot(): PersistedState {
+    return extractPersisted(this.current);
   }
 
   /** Write the persisted state unless it equals what was last written successfully. */
   private writePersisted(): Promise<void> {
-    const snapshot = extractPersisted(this.current);
+    const snapshot = this.snapshot();
     const json = JSON.stringify(snapshot);
     this.lastPersistAt = this.lastAt;
     this.lastSavedOdometerKm = this.current.odometer.km;
+    this.lastSavedTrip = this.current.trip.active;
     if (json === this.lastSavedJson) return Promise.resolve();
     let write: Promise<void>;
     try {

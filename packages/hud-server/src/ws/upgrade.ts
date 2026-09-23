@@ -4,7 +4,7 @@ import { PROTOCOL_LIMITS } from '@carheadsup/core';
 import type { Logger, Timers } from '@carheadsup/obd';
 import { WebSocketServer } from 'ws';
 import { bearerToken, isAuthorized, isCrossSiteRequest } from '../http/auth.ts';
-import { parseRequestUrl } from '../http/server.ts';
+import { UNKNOWN_HOST_MESSAGE, parseRequestUrl } from '../http/server.ts';
 import type { PhoneChannel } from './phone-channel.ts';
 import type { RendererChannel } from './renderer-channel.ts';
 import { Heartbeat } from './sockets.ts';
@@ -26,6 +26,8 @@ export interface WebSocketRouterOptions {
   phone: PhoneChannel;
   /** Current `server.apiToken`. */
   apiToken: () => string;
+  /** Whether a `Host` header names this HUD (DNS-rebinding protection). */
+  allowedHost: (host: string | undefined) => boolean;
   timers: Timers;
   logger: Logger;
   heartbeatIntervalMs?: number;
@@ -57,8 +59,9 @@ function reject(socket: Duplex, status: number, message: string): void {
 /**
  * Routes HTTP upgrade requests to the two WebSocket endpoints (`ws` in noServer mode):
  * `/ws/hud` (same access rule as the REST API; remote clients pass the token as `?token=` or a
- * Bearer header) and `/ws/phone` (authenticated by its `hello`). Unknown paths and cross-site
- * browser upgrades are refused. Keeps every socket alive with pings every 10 s.
+ * Bearer header) and `/ws/phone` (authenticated by its `hello`). Unknown paths, upgrades
+ * addressed to a host name that is not the HUD's (DNS rebinding) and cross-site browser upgrades
+ * are refused. Keeps every socket alive with pings every 10 s.
  */
 export class WebSocketRouter {
   private readonly options: WebSocketRouterOptions;
@@ -94,6 +97,10 @@ export class WebSocketRouter {
       reject(socket, 503, 'The HUD is shutting down');
       return;
     }
+    if (!this.options.allowedHost(req.headers.host)) {
+      reject(socket, 403, UNKNOWN_HOST_MESSAGE);
+      return;
+    }
     const url = parseRequestUrl(req.url);
     if (url === null) {
       reject(socket, 400, 'Malformed request target');
@@ -119,6 +126,10 @@ export class WebSocketRouter {
       });
       if (!authorized) {
         reject(socket, 401, 'Missing or invalid API token');
+        return;
+      }
+      if (!this.options.renderer.canAccept(remoteAddress)) {
+        reject(socket, 503, 'Too many display connections from other devices');
         return;
       }
       this.rendererServer.handleUpgrade(req, socket, head, (ws) => {

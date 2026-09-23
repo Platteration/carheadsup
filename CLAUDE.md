@@ -14,7 +14,8 @@ context-aware overlay.
 | `packages/hud-server` | On-car service: wires OBD, phone link, sensors → reducer → frames; REST + WebSocket; persistence | node |
 | `packages/hud-renderer` | Preact UI: projected HUD (`/`), settings app (`/settings`), dev console (`/dev`) | browser |
 | `companion-android` | Kotlin companion app; `:protocol` is pure-JVM and testable without the Android SDK | android |
-| `docs`, `deploy` | Architecture, hardware, install guides; systemd/kiosk scripts | — |
+| `e2e` | Playwright browser tests of the three pages against the real server in simulator mode | node + Chromium |
+| `docs`, `deploy` | Architecture, hardware, install guides; systemd/kiosk scripts (`deploy/check.sh` lints and tests them) | — |
 
 Data flow: inputs (OBD samples, phone messages, sensors, buttons, clock ticks) → `HudEvent` →
 `reduce(state, event, config)` → `composeFrame(state, config)` → `HudFrame` → renderer. The reducer and
@@ -22,8 +23,12 @@ composer are pure, so whole drives can be replayed in tests.
 
 ## Commands
 
-- Typecheck one package: `npx tsc -p packages/<pkg>/tsconfig.json` (all: `npm run typecheck`)
+- Typecheck one package: `npx tsc -p packages/<pkg>/tsconfig.json` (all, including `e2e/`:
+  `npm run typecheck`)
 - Test one package: `npx vitest run packages/<pkg>` (all: `npm test`)
+- Browser end-to-end tests: `npm run test:e2e` (Playwright; needs a Chromium: `$PW_CHROMIUM`,
+  `/opt/pw-browsers/chromium` or Playwright's own; skipped without one)
+- Deployment kit (shell scripts, units): `deploy/check.sh`
 - Run the HUD against the simulator: `npm run sim` then open `http://localhost:8080/dev`
 - Renderer dev server with HMR: `npm run dev` (proxies `/api` and `/ws` to the server on :8080)
 - Android protocol module: `cd companion-android && ./gradlew :protocol:test`

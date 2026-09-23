@@ -98,6 +98,43 @@ describe('createSimulation', () => {
     await stopAll();
   });
 
+  it('reports the peripheral state the dev console controls, so a reload shows it', async () => {
+    const { sim, startAll, stopAll } = setup();
+    await startAll();
+    expect(sim.status()).toMatchObject({
+      coolantOverrideC: null,
+      voltageOverrideV: null,
+      fuelLevelOverridePct: null,
+      adas: { blindSpotLeft: false, blindSpotRight: false, collision: 'none' },
+      phone: { connected: true, steppedAside: false },
+    });
+    sim.control({
+      coolantOverrideC: 118,
+      voltageOverrideV: 11.6,
+      fuelLevelOverridePct: 8,
+      tirePressuresKpa: { fl: 230, fr: 230, rl: 165, rr: 230 },
+      adas: { blindSpotRight: true, collision: 'caution' },
+      phone: { kind: 'disconnect' },
+      lux: 40,
+    });
+    // A second console (or the same one after a reload) reads it all back.
+    expect(sim.status()).toMatchObject({
+      coolantOverrideC: 118,
+      voltageOverrideV: 11.6,
+      fuelLevelOverridePct: 8,
+      tirePressuresKpa: { fl: 230, fr: 230, rl: 165, rr: 230 },
+      adas: { blindSpotLeft: false, blindSpotRight: true, collision: 'caution' },
+      phone: { connected: false, steppedAside: false },
+      lux: 40,
+    });
+    sim.control({ phone: { kind: 'connect' } });
+    sim.setRealPhoneConnected(true);
+    expect(sim.status().phone).toEqual({ connected: true, steppedAside: true });
+    sim.setRealPhoneConnected(false);
+    expect(sim.status().phone).toEqual({ connected: true, steppedAside: false });
+    await stopAll();
+  });
+
   it('reports simulated light immediately on change and periodically', async () => {
     const { clock, sim, ofType, startAll, stopAll } = setup();
     await startAll();

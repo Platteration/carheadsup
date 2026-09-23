@@ -103,7 +103,7 @@
     <string name="setting_osm">Speed limits from OpenStreetMap</string>
     <string name="setting_osm_description">Looks up map data around you (uses mobile data)</string>
     <string name="setting_cameras">Speed camera warnings</string>
-    <string name="setting_cameras_description">Mapped cameras ahead. Check local law: such warnings are illegal while driving in some countries (e.g. Germany, Switzerland).</string>
+    <string name="setting_cameras_description">Mapped cameras ahead. Off by default: such warnings are illegal while driving in some countries (e.g. Germany, Switzerland). Check local law before turning them on.</string>
     <string name="hud_settings_description">Layouts, units, alerts and projection are configured on the HUD itself.</string>
     <string name="hud_address_unknown">The HUD\'s address is not known yet: connect first or enter it above.</string>
     <string name="about_version">carheadsup companion %1$s</string>

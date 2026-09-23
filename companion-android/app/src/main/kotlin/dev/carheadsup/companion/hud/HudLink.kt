@@ -17,9 +17,11 @@ import dev.carheadsup.protocol.PhoneWire
 import dev.carheadsup.protocol.link.Heartbeat
 import dev.carheadsup.protocol.link.HudEndpoint
 import dev.carheadsup.protocol.link.MessageRateLimiter
+import dev.carheadsup.protocol.link.PhoneCloseCode
 import dev.carheadsup.protocol.link.ReconnectBackoff
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
@@ -33,6 +35,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -79,7 +83,9 @@ sealed interface LinkStatus {
  *   forwards everything published there, rate-limited per message type (nav ≤ 4 Hz, location 1 Hz);
  * - pings every 5 s and tears the socket down when the HUD stays silent for 15 s (a vanished
  *   Wi-Fi never delivers a TCP close);
- * - reconnects with exponential backoff; a refused pairing waits the maximum delay;
+ * - reconnects with exponential backoff; a refused pairing, or a session a newer one of a phone
+ *   with the same name replaced (close 4000), waits the maximum delay; while another phone holds
+ *   the HUD it is refused with close 1013 ("another phone is connected") and backs off as usual;
  * - hands every other HUD message to [onMessage].
  *
  * Changing the address or pairing token restarts the connection. All work runs in [scope].
@@ -131,7 +137,7 @@ class HudLink(
         state.value = LinkStatus.Stopped
     }
 
-    /** Skip the remaining backoff delay and try again now. */
+    /** Skip the remaining backoff delay (or restart a discovery that finds nothing) and try again now. */
     fun reconnectNow() {
         wakeUp.trySend(Unit)
     }
@@ -153,7 +159,7 @@ class HudLink(
             val delayMs =
                 when (outcome) {
                     is SessionOutcome.Refused -> backoff.refusedDelayMs()
-                    is SessionOutcome.Closed -> backoff.nextDelayMs()
+                    is SessionOutcome.Closed -> backoff.delayAfterClose(outcome.code)
                 }
             val retryAt = SystemClock.elapsedRealtime() + delayMs
             state.value =
@@ -178,13 +184,27 @@ class HudLink(
             return settings.map { it.manualEndpoint }.filterNotNull().first()
         }
         discovery.start()
-        discovery.endpoint.value?.let { return it }
-        state.value = LinkStatus.Searching
-        return discovery.endpoint.filterNotNull().first()
+        while (true) {
+            discovery.endpoint.value?.let { return it }
+            state.value = LinkStatus.Searching
+            // Drain a stale wake-up, then wait for the HUD, a "reconnect now" or the timeout.
+            wakeUp.tryReceive()
+            val found =
+                withTimeoutOrNull(DISCOVERY_RESTART_MS) {
+                    merge(discovery.endpoint.filterNotNull(), wakeUp.receiveAsFlow().map { null }).first()
+                }
+            if (found != null) return found
+            // NSD does not retry by itself: a discovery that failed to start (Wi-Fi not up yet,
+            // FAILURE_INTERNAL_ERROR / MAX_LIMIT) or a failed resolution would leave us here
+            // for good, since a service that is still present is not reported again.
+            Log.i(TAG, "HUD not found yet; restarting discovery")
+            discovery.restart()
+        }
     }
 
     private sealed interface SessionOutcome {
-        data class Closed(val reason: String) : SessionOutcome
+        /** The session ended; [code] is the WebSocket close code when the HUD closed it. */
+        data class Closed(val reason: String, val code: Int? = null) : SessionOutcome
 
         data class Refused(val code: HudErrorCode, val message: String) : SessionOutcome
     }
@@ -194,7 +214,7 @@ class HudLink(
 
         data class Frame(val text: String) : LoopEvent
 
-        data class Closed(val reason: String) : LoopEvent
+        data class Closed(val reason: String, val code: Int? = null) : LoopEvent
 
         data class Outgoing(val message: PhoneToHud) : LoopEvent
 
@@ -245,12 +265,15 @@ class HudLink(
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             webSocket.close(NORMAL_CLOSURE, null)
-            events.trySend(LoopEvent.Closed(reason.ifBlank { "closed by the HUD ($code)" }))
+            events.trySend(LoopEvent.Closed(closeReason(code, reason, "closed by the HUD ($code)"), code))
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            events.trySend(LoopEvent.Closed(reason.ifBlank { "closed ($code)" }))
+            events.trySend(LoopEvent.Closed(closeReason(code, reason, "closed ($code)"), code))
         }
+
+        private fun closeReason(code: Int, reason: String, fallback: String): String =
+            if (code == PhoneCloseCode.REPLACED) "a newer connection took over the HUD" else reason.ifBlank { fallback }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             events.trySend(LoopEvent.Closed(t.message ?: t.javaClass.simpleName))
@@ -282,7 +305,7 @@ class HudLink(
 
             LoopEvent.Tick -> onTick(now)
 
-            is LoopEvent.Closed -> SessionOutcome.Closed(event.reason)
+            is LoopEvent.Closed -> SessionOutcome.Closed(event.reason, event.code)
         }
 
         fun close() {
@@ -329,9 +352,16 @@ class HudLink(
             backoff.reset()
             limiter.reset()
             heartbeat.start(now)
+            // Subscribe before anything can be published for this session — the replay, the
+            // trips-request from onConnected, messages MessageRelay sends once the status says
+            // Connected. PhoneHub drops what nobody collects, and a plain launch would only
+            // subscribe once dispatched; UNDISPATCHED runs the collector up to its first
+            // suspension, after the subscription is in place.
+            forwarder =
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    hub.outgoing.collect { events.send(LoopEvent.Outgoing(it)) }
+                }
             state.value = LinkStatus.Connected(endpoint, message.hudName, message.hudVersion, message.readMessagesAloud)
-            // Subscribe first, then replay: nothing published in between is lost.
-            forwarder = scope.launch { hub.outgoing.collect { events.send(LoopEvent.Outgoing(it)) } }
             hub.replay().forEach(::sendNow)
             onConnected(message)
         }
@@ -387,5 +417,8 @@ class HudLink(
         const val PING_INTERVAL_MS = 5_000L
         const val SILENCE_TIMEOUT_MS = 15_000L
         const val WELCOME_TIMEOUT_MS = 15_000L
+
+        /** How long to wait for mDNS before restarting discovery. */
+        const val DISCOVERY_RESTART_MS = 30_000L
     }
 }

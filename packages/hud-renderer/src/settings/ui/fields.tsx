@@ -135,12 +135,15 @@ export function NumberField<T, K extends KeysOfType<T, number | null>>(
   textRef.current = text;
 
   // Follow outside changes (unit switch, server rebase) unless the text already says the same.
+  // Keyed on the value as displayed, so a unit switch re-syncs even when the label stays the
+  // same (or is hidden, like the gear-ratio fields').
+  const formatted = formatForInput(value, unit);
   useEffect(() => {
     if (!textMatchesValue(textRef.current, value, unit, integer)) {
-      setText(formatForInput(value, unit));
+      setText(formatted);
       setLocalError(null);
     }
-  }, [value, unit.label]);
+  }, [formatted]);
 
   // Discard / reload: always re-sync, even when the value itself did not change.
   const firstRevision = useRef(form.revision);
@@ -460,7 +463,9 @@ export interface TextFieldProps<T, K extends KeysOfType<T, string | null>> exten
   actions?: ComponentChildren;
   /**
    * Extra client-side check beyond the schema (e.g. compiling a PID formula). A message blocks
-   * saving like an unparseable number does.
+   * saving like an unparseable number does. It judges only a value being edited: a stored value
+   * the HUD accepted (say, a token set before the check existed) never blocks saving other
+   * changes.
    */
   validate?: (value: string) => string | null;
   /** Shown under the field when the value is valid (overrides `hint`). */
@@ -474,7 +479,7 @@ export function TextField<T, K extends KeysOfType<T, string | null>>(props: Text
   const key = scope.keyOf(k);
   const form = useForm();
   const id = useId();
-  const localError = validate ? validate(value) : null;
+  const localError = validate && scope.dirty(k) ? validate(value) : null;
   useEffect(() => {
     form.setLocalError(key, localError);
   }, [key, localError]);

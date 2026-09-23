@@ -6,7 +6,9 @@
  * learner keeps a histogram of ln(ratio) built only from samples taken while the ratio is stable
  * (clutch engaged, not shifting), finds its peaks and turns well-separated peaks into gear ratios.
  * Drivers leave 1st gear quickly, so the ratio seen right after pulling away from a standstill
- * is tracked separately and anchors gear numbering until 1st gear's own cluster has formed.
+ * is tracked separately and anchors gear numbering until 1st gear's own cluster has formed. A
+ * torque converter slips when pulling away, so on automatics the ratio after the first upshift
+ * (2nd gear) is tracked instead.
  *
  * Everything here is pure and deterministic, uses bounded memory, and keeps its state as plain
  * JSON-serialisable data (arrays and objects only) because it lives inside `HudState`.
@@ -87,6 +89,32 @@ const LAUNCH_STABLE_MS = 1000;
 const MAX_LAUNCHES = 7;
 /** Observations needed before the hint is used. */
 const MIN_LAUNCHES = 1;
+/** Road speed of a typical launch observation (for matching the hint against learned ratios). */
+export const LAUNCH_HINT_KPH = 12;
+
+/**
+ * Automatics: after pulling away from a standstill (in 1st), the first upshift lands in 2nd. It
+ * shows as engine speed dropping by at least `UPSHIFT_RPM_DROP` within `UPSHIFT_WINDOW_MS` at a
+ * steady or rising road speed between `UPSHIFT_MIN_KPH` and `UPSHIFT_MAX_KPH` (braking or
+ * coasting would lower the road speed too).
+ */
+const UPSHIFT_MIN_KPH = 10;
+const UPSHIFT_MAX_KPH = 50;
+const UPSHIFT_RPM_DROP = 0.2;
+const UPSHIFT_WINDOW_MS = 800;
+const UPSHIFT_SPEED_SLACK_KPH = 1;
+/**
+ * The ratio after it must hold for `LAUNCH_STABLE_MS` with the throttle open, and lie at least a
+ * gear step (≈ 1.3×) below the ratio before it: easing off the throttle in 1st changes the
+ * converter slip, but rarely by that much.
+ */
+const UPSHIFT_MIN_STEP = Math.log(1.3);
+/** Upshift observations kept; the median ratio after them is the 2nd-gear hint … */
+const MAX_UPSHIFTS = 7;
+/** … once there are at least this many (one odd observation cannot anchor the numbering). */
+export const MIN_UPSHIFTS = 2;
+/** Road speed of a typical upshift observation (for matching the hint against learned ratios). */
+export const UPSHIFT_HINT_KPH = 20;
 
 /**
  * Tracks the ratio right after pulling away from a standstill. On a manual or dual-clutch
@@ -109,6 +137,28 @@ export type LaunchTracker =
       maxRpm: number;
     };
 
+/**
+ * Tracks the first upshift after pulling away from a standstill (see `UPSHIFT_*`): 'armed'
+ * keeps the last `UPSHIFT_WINDOW_MS` of samples [at, km/h, rpm] to spot the rpm drop,
+ * 'settling' measures the ratio after it.
+ */
+export type UpshiftTracker =
+  | { phase: 'idle' }
+  | { phase: 'armed'; recent: Array<[at: number, speedKph: number, rpm: number]> }
+  | {
+      phase: 'settling';
+      /** Ratio (rpm per km/h) just before the upshift. */
+      before: number;
+      since: number;
+      lastAt: number;
+      lastRpm: number;
+      lo: number;
+      hi: number;
+      sum: number;
+      count: number;
+      minKph: number;
+    };
+
 export interface GearLearnerState {
   /**
    * Recent samples for the stability test, oldest first: [at, ln(rpm/kph), kph]. Holds the last
@@ -126,6 +176,9 @@ export interface GearLearnerState {
   launch: LaunchTracker;
   /** Recent launch ratios (rpm per km/h), oldest first. */
   launchRatios: number[];
+  upshift: UpshiftTracker;
+  /** Recent first upshifts after a launch: ratios before and after, oldest first. */
+  upshifts: Array<[before: number, after: number]>;
 }
 
 export interface LearnSample {
@@ -149,6 +202,7 @@ export interface GearCluster {
 
 const IDLE: LaunchTracker = { phase: 'idle' };
 const ARMED: LaunchTracker = { phase: 'armed' };
+const UPSHIFT_IDLE: UpshiftTracker = { phase: 'idle' };
 
 export function createGearLearner(): GearLearnerState {
   return {
@@ -159,6 +213,8 @@ export function createGearLearner(): GearLearnerState {
     sinceAnalysis: 0,
     launch: IDLE,
     launchRatios: [],
+    upshift: UPSHIFT_IDLE,
+    upshifts: [],
   };
 }
 
@@ -187,7 +243,8 @@ export function observeGearSample(
   sample: LearnSample,
   limits: LearnLimits,
 ): GearLearnerState {
-  return observeSteadyState(observeLaunch(state, sample), sample, limits);
+  const launched = observeUpshift(observeLaunch(state, sample), sample, limits);
+  return observeSteadyState(launched, sample, limits);
 }
 
 function startTracking(
@@ -270,6 +327,114 @@ function observeLaunch(state: GearLearnerState, sample: LearnSample): GearLearne
 export function firstGearHint(state: GearLearnerState): number | null {
   const ratios = state.launchRatios;
   return ratios.length >= MIN_LAUNCHES ? median(ratios) : null;
+}
+
+/**
+ * 2nd-gear ratio suggested by the first upshift after recent launches (median of the ratios
+ * after them), or null until `MIN_UPSHIFTS` were seen. Meant for automatics, which pull away in
+ * 1st and change up into 2nd; it includes some torque-converter slip, like learned ratios do.
+ */
+export function secondGearHint(state: GearLearnerState): number | null {
+  const after = state.upshifts.map(([, ratio]) => ratio);
+  return after.length >= MIN_UPSHIFTS ? median(after) : null;
+}
+
+const UPSHIFT_ARMED: UpshiftTracker = { phase: 'armed', recent: [] };
+
+function observeUpshift(
+  state: GearLearnerState,
+  sample: LearnSample,
+  limits: LearnLimits,
+): GearLearnerState {
+  const { at, speedKph, rpm } = sample;
+  if (speedKph === null || !Number.isFinite(speedKph) || !Number.isFinite(at)) return state;
+  const tracker = state.upshift;
+  if (speedKph < LAUNCH_ARM_BELOW_KPH) {
+    const armed = tracker.phase === 'armed' && tracker.recent.length === 0;
+    return armed ? state : { ...state, upshift: UPSHIFT_ARMED };
+  }
+  if (tracker.phase === 'idle') return state;
+  const giveUp = { ...state, upshift: UPSHIFT_IDLE };
+  if (rpm === null || !Number.isFinite(rpm) || rpm <= 0 || speedKph > UPSHIFT_MAX_KPH) {
+    return giveUp;
+  }
+
+  if (tracker.phase === 'armed') {
+    const newest = tracker.recent[tracker.recent.length - 1];
+    if (newest !== undefined && at <= newest[0]) return state;
+    const recent = tracker.recent.filter(([t]) => at - t <= UPSHIFT_WINDOW_MS);
+    let peak: [number, number, number] | undefined;
+    for (const entry of recent) if (peak === undefined || entry[2] > peak[2]) peak = entry;
+    const upshift =
+      peak !== undefined &&
+      speedKph >= UPSHIFT_MIN_KPH &&
+      peak[1] >= UPSHIFT_MIN_KPH &&
+      speedKph >= peak[1] - UPSHIFT_SPEED_SLACK_KPH &&
+      rpm <= (1 - UPSHIFT_RPM_DROP) * peak[2];
+    if (peak !== undefined && upshift) {
+      const lnRatio = Math.log(rpm / speedKph);
+      return {
+        ...state,
+        upshift: {
+          phase: 'settling',
+          before: peak[2] / peak[1],
+          since: at,
+          lastAt: at,
+          lastRpm: rpm,
+          lo: lnRatio,
+          hi: lnRatio,
+          sum: lnRatio,
+          count: 1,
+          minKph: speedKph,
+        },
+      };
+    }
+    const kept = [...recent, [at, speedKph, rpm] as [number, number, number]];
+    return { ...state, upshift: { phase: 'armed', recent: kept.slice(-MAX_WINDOW_SAMPLES) } };
+  }
+
+  // Settling in the new gear: the ratio must hold, on the throttle, for LAUNCH_STABLE_MS.
+  if (at <= tracker.lastAt) return state;
+  if (at - tracker.lastAt > MAX_WINDOW_GAP_MS || speedKph < UPSHIFT_MIN_KPH) return giveUp;
+  const onThrottle =
+    rpm >= limits.idleRpm + LEARN_MIN_RPM_ABOVE_IDLE &&
+    rpm <= limits.redlineRpm * REDLINE_MARGIN &&
+    (sample.throttlePct === null || !Number.isFinite(sample.throttlePct) || sample.throttlePct > 0);
+  if (!onThrottle) return giveUp;
+  const lnRatio = Math.log(rpm / speedKph);
+  const lo = Math.min(tracker.lo, lnRatio);
+  const hi = Math.max(tracker.hi, lnRatio);
+  const minKph = Math.min(tracker.minKph, speedKph);
+  if (hi - lo > STABLE_SPREAD + 1 / minKph) {
+    // Still completing the shift (rpm falling): measure again from here. Otherwise give up.
+    if (rpm >= tracker.lastRpm || at - tracker.since > UPSHIFT_WINDOW_MS) return giveUp;
+    return {
+      ...state,
+      upshift: {
+        ...tracker,
+        since: at,
+        lastAt: at,
+        lastRpm: rpm,
+        lo: lnRatio,
+        hi: lnRatio,
+        sum: lnRatio,
+        count: 1,
+        minKph: speedKph,
+      },
+    };
+  }
+  const sum = tracker.sum + lnRatio;
+  const count = tracker.count + 1;
+  if (at - tracker.since >= LAUNCH_STABLE_MS) {
+    const after = Math.exp(sum / count);
+    if (Math.log(tracker.before / after) < UPSHIFT_MIN_STEP) return giveUp;
+    const upshifts = [...state.upshifts, [tracker.before, after] as [number, number]];
+    return { ...state, upshift: UPSHIFT_IDLE, upshifts: upshifts.slice(-MAX_UPSHIFTS) };
+  }
+  return {
+    ...state,
+    upshift: { ...tracker, lastAt: at, lastRpm: rpm, lo, hi, sum, count, minKph },
+  };
 }
 
 function observeSteadyState(

@@ -261,7 +261,9 @@ describe('the simulated HUD through the demo drive', () => {
     // Engine off but not parked yet (start-stop grace): still refused.
     expect(context()).toBe('stopped');
     expect((await clear()).status).toBe(409);
-    await run(clock, 30);
+    // Parked once the car has stood still with the engine off long enough (the defaults'
+    // display.context.engineOffParkedAfterMs / parkedAfterMs).
+    for (let s = 0; s < 300 && context() !== 'parked'; s += 10) await run(clock, 10);
     expect(context()).toBe('parked');
     const cleared = await clear();
     expect(cleared.status).toBe(200);

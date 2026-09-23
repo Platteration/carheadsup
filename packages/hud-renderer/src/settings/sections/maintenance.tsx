@@ -9,6 +9,7 @@ import { roundTo } from '@carheadsup/core';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { describeError } from '../../common/api.ts';
 import type { HudApi } from '../../common/api.ts';
+import { formatNumber } from '../../common/format.ts';
 import { jsonEqual } from '../model/diff.ts';
 import type { Scope } from '../model/scope.ts';
 import {
@@ -246,9 +247,12 @@ function OdometerCard({
     if (input.km === null) return;
     setBusy(true);
     setResult(null);
+    const km = roundTo(input.km, 1);
     try {
-      await api.setOdometer(roundTo(input.km, 1));
-      setResult({ ok: true, message: `Odometer set to ${input.text.trim()} ${unit.label}.` });
+      await api.setOdometer(km);
+      // Echo what was stored, not what was typed, so a misread entry cannot hide.
+      const shown = formatNumber(unit.toDisplay(km), unit.decimals);
+      setResult({ ok: true, message: `Odometer set to ${shown} ${unit.label}.` });
       input.setText('');
       onSaved();
     } catch (err) {

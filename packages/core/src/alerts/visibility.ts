@@ -51,8 +51,9 @@ export function compareAlerts(a: Alert, b: Alert): number {
 
 /**
  * The alerts the driver sees, in display order: live, allowed in the current context, sorted by
- * {@link compareAlerts} and capped at `display.maxAlerts`. While the display is blanked only
- * critical alerts break through.
+ * {@link compareAlerts} and capped at `display.maxAlerts` — except that every critical alert is
+ * shown, however many there are (they cannot be dismissed either); less severe ones fill the
+ * room the critical ones leave. While the display is blanked only critical alerts break through.
  */
 export function selectDisplayedAlerts(
   alerts: readonly Alert[],
@@ -60,6 +61,8 @@ export function selectDisplayedAlerts(
   config: HudConfig,
 ): Alert[] {
   const { now, context, blanked } = options;
+  const limit = Math.max(0, config.display.maxAlerts);
+  // Sorted most severe first, so the critical alerts come before everything they displace.
   return alerts
     .filter(
       (a) =>
@@ -68,5 +71,5 @@ export function selectDisplayedAlerts(
         (!blanked || a.severity === 'critical'),
     )
     .sort(compareAlerts)
-    .slice(0, Math.max(0, config.display.maxAlerts));
+    .filter((a, index) => a.severity === 'critical' || index < limit);
 }

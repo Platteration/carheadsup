@@ -46,7 +46,12 @@ export function createSimulation(
     ...(options.timeScale !== undefined ? { timeScale: options.timeScale } : {}),
   });
 
-  const status = (): SimStatus => ({ ...vehicle.status(), lux: environment.lux });
+  const status = (): SimStatus => ({
+    ...vehicle.status(),
+    lux: environment.lux,
+    adas: adas.state,
+    phone: { connected: phone.isConnected, steppedAside: phone.isSteppedAside },
+  });
 
   return {
     vehicle,
@@ -63,6 +68,9 @@ export function createSimulation(
     status,
     deliverToPhone(message) {
       phone.deliver(message);
+    },
+    setRealPhoneConnected(connected) {
+      phone.setRealPhoneConnected(connected);
     },
     start() {
       clock.start();

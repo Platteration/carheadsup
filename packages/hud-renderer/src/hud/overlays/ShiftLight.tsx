@@ -1,4 +1,5 @@
 import type { ShiftLightFrame } from '@carheadsup/core';
+import { BLINK_FAST_PERIOD_MS, useBlinkPhase } from '../flash.ts';
 import { clamp01, cx } from '../util.ts';
 
 export const SHIFT_SEGMENTS = 12;
@@ -27,9 +28,11 @@ export function litSegments(level: number, count: number = SHIFT_SEGMENTS): numb
  */
 export function ShiftLight({ shift }: { shift: ShiftLightFrame }) {
   const lit = shift.flash ? SHIFT_SEGMENTS : litSegments(shift.level);
+  const phase = useBlinkPhase(BLINK_FAST_PERIOD_MS, shift.flash);
   return (
     <div
       class={cx('hud-shift', shift.flash && 'hud-shift--flash hud-flash-fast')}
+      style={phase}
       data-lit={lit}
       aria-hidden="true"
     >

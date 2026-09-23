@@ -8,7 +8,9 @@ import android.net.NetworkRequest
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import java.net.InetAddress
+import java.net.Socket
 import java.net.UnknownHostException
+import javax.net.SocketFactory
 
 /**
  * Tracks the Wi-Fi network the HUD is on.
@@ -68,8 +70,9 @@ class LocalNetwork(context: Context) {
 
     /**
      * Routes the whole process over the Wi-Fi network (for components that cannot be bound per
-     * socket, such as the settings WebView). Undo with [unbindProcess]; internet requests fail
-     * meanwhile when the Wi-Fi has no internet.
+     * socket, such as the settings WebView). Undo with [unbindProcess]. Unbound internet requests
+     * would fail meanwhile when the Wi-Fi has no internet; clients made with
+     * [bindToDefaultNetwork] are not affected.
      */
     fun bindProcess(): Boolean {
         val network = wifi ?: return false
@@ -88,6 +91,45 @@ class LocalNetwork(context: Context) {
             .socketFactory(network.socketFactory)
             .dns(NetworkDns(network))
             .build()
+    }
+
+    /**
+     * [client] with sockets and DNS on the system's default network, looked up at each connect,
+     * whatever the process is bound to: while the settings page binds the process to the HUD's
+     * Wi-Fi (usually without internet), Overpass downloads must not follow it — they would fail
+     * and push the Overpass backoff up to its maximum.
+     */
+    fun bindToDefaultNetwork(client: OkHttpClient): OkHttpClient =
+        client.newBuilder()
+            .socketFactory(DefaultNetworkSocketFactory())
+            .dns(DefaultNetworkDns())
+            .build()
+
+    private inner class DefaultNetworkSocketFactory : SocketFactory() {
+        private fun factory(): SocketFactory = connectivity.activeNetwork?.socketFactory ?: SocketFactory.getDefault()
+
+        override fun createSocket(): Socket = factory().createSocket()
+
+        override fun createSocket(host: String?, port: Int): Socket = factory().createSocket(host, port)
+
+        override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int): Socket =
+            factory().createSocket(host, port, localHost, localPort)
+
+        override fun createSocket(host: InetAddress?, port: Int): Socket = factory().createSocket(host, port)
+
+        override fun createSocket(
+            address: InetAddress?,
+            port: Int,
+            localAddress: InetAddress?,
+            localPort: Int,
+        ): Socket = factory().createSocket(address, port, localAddress, localPort)
+    }
+
+    private inner class DefaultNetworkDns : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            val network = connectivity.activeNetwork ?: return Dns.SYSTEM.lookup(hostname)
+            return network.getAllByName(hostname).toList()
+        }
     }
 
     private class NetworkDns(private val network: Network) : Dns {

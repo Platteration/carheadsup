@@ -16,6 +16,8 @@ export interface CliOptions {
   rendererDir: string | undefined;
   /** Backlight device directory; null = auto-detect; false = off. */
   backlight: string | null | false;
+  /** Extra host names the HUD may be reached by (DNS-rebinding protection). */
+  allowedHosts: string[];
   logLevel: LogLevel;
 }
 
@@ -43,13 +45,18 @@ Options:
   --renderer-dir <dir>   Built renderer to serve (default: packages/hud-renderer/dist)
   --backlight <dir|off>  Backlight device (e.g. /sys/class/backlight/rpi_backlight),
                          "auto" to detect it (default) or "off"
+  --allowed-hosts <names>
+                         Extra host names (comma-separated) browsers may use to reach the
+                         HUD; IP addresses, localhost, <hostname> and <hostname>.local always
+                         work, other names are refused (DNS-rebinding protection)
   --log-level <level>    ${LOG_LEVELS.join(' | ')} (default: info)
   -h, --help             Show this help
   -v, --version          Show the version
 
 Every option can also be set in the environment: CARHEADSUP_SIM=1, CARHEADSUP_CONFIG,
 CARHEADSUP_DATA_DIR, CARHEADSUP_PORT, CARHEADSUP_HOST, CARHEADSUP_RENDERER_DIR,
-CARHEADSUP_BACKLIGHT, CARHEADSUP_LOG_LEVEL. Command-line flags take precedence.
+CARHEADSUP_BACKLIGHT, CARHEADSUP_ALLOWED_HOSTS, CARHEADSUP_LOG_LEVEL. Command-line flags take
+precedence.
 `;
 
 const TRUE_WORDS = new Set(['1', 'true', 'yes', 'on']);
@@ -73,6 +80,16 @@ function parsePort(raw: string, source: string): number | string {
     return `${source}: expected a port number 0–65535, got "${raw}"`;
   }
   return Number(text);
+}
+
+/** A comma- or space-separated list of host names, or an error message. */
+function parseHostList(raw: string, source: string): string[] | string {
+  const names = raw
+    .split(/[\s,]+/)
+    .map((name) => name.trim())
+    .filter((name) => name !== '');
+  const bad = names.find((name) => !/^[A-Za-z0-9._-]+$/.test(name));
+  return bad === undefined ? names : `${source}: "${bad}" is not a host name`;
 }
 
 function parseBacklight(raw: string): string | null | false {
@@ -102,6 +119,7 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
         host: { type: 'string' },
         'renderer-dir': { type: 'string' },
         backlight: { type: 'string' },
+        'allowed-hosts': { type: 'string' },
         'log-level': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -154,6 +172,12 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
     nonEmpty(env['CARHEADSUP_DATA_DIR']) ??
     defaultDataDir(env, home, sim);
   const rawBacklight = values.backlight ?? env['CARHEADSUP_BACKLIGHT'];
+  const rawHosts = values['allowed-hosts'] ?? env['CARHEADSUP_ALLOWED_HOSTS'] ?? '';
+  const allowedHosts = parseHostList(
+    rawHosts,
+    values['allowed-hosts'] !== undefined ? '--allowed-hosts' : 'CARHEADSUP_ALLOWED_HOSTS',
+  );
+  if (typeof allowedHosts === 'string') return { kind: 'error', message: allowedHosts };
 
   return {
     kind: 'run',
@@ -165,6 +189,7 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
       host: host?.trim(),
       rendererDir: nonEmpty(values['renderer-dir']) ?? nonEmpty(env['CARHEADSUP_RENDERER_DIR']),
       backlight: rawBacklight === undefined ? null : parseBacklight(rawBacklight),
+      allowedHosts,
       logLevel: level,
     },
   };

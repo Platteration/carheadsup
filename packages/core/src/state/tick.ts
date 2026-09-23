@@ -7,6 +7,7 @@ import {
   advanceTrip,
   refreshMaintenance,
 } from './derived.ts';
+import { dropPhoneData } from './phone.ts';
 import {
   ENDED_CALL_SHOW_MS,
   HAZARD_PASSED_DROP_M,
@@ -14,6 +15,7 @@ import {
   MAINTENANCE_RECHECK_MS,
   MESSAGE_TTL_MS,
   PHONE_DATA_GRACE_MS,
+  ROAD_TTL_MS,
   freshSignal,
   hazardDistanceM,
 } from './selectors.ts';
@@ -47,30 +49,15 @@ function drivetrainStale(state: HudState): boolean {
 }
 
 /**
- * Drop messages older than a minute, an 'ended' call 2 s after it ended, hazards the phone has
- * not refreshed for 2 minutes or that are well behind the vehicle, and — 30 s after the phone
- * disconnected — everything else the phone provided (route, road, hazards, media, call).
+ * Drop messages older than a minute, an 'ended' call 2 s after it ended, a road (speed limit)
+ * the phone has not refreshed for 75 s, hazards it has not refreshed for 2 minutes or that are
+ * well behind the vehicle, and — 30 s after the phone disconnected — everything else the phone
+ * provided (route, road, hazards, media, call).
  */
 function expirePhoneData(state: HudState): HudState {
   const { now } = state;
   if (!state.phone.connected && now - state.phone.since >= PHONE_DATA_GRACE_MS) {
-    if (
-      state.nav === null &&
-      state.road === null &&
-      state.hazards.length === 0 &&
-      state.media === null &&
-      state.call === null
-    ) {
-      return expireMessages(state);
-    }
-    return expireMessages({
-      ...state,
-      nav: null,
-      road: null,
-      hazards: [],
-      media: null,
-      call: null,
-    });
+    return expireMessages(dropPhoneData(state));
   }
 
   let next = expireMessages(state);
@@ -78,6 +65,7 @@ function expirePhoneData(state: HudState): HudState {
   if (call !== null && call.state === 'ended' && now - call.updatedAt >= ENDED_CALL_SHOW_MS) {
     next = { ...next, call: null };
   }
+  if (next.road !== null && now - next.road.updatedAt > ROAD_TTL_MS) next = { ...next, road: null };
   const hazards = next.hazards.filter((tracked) => {
     if (now - tracked.hazard.updatedAt > HAZARD_TTL_MS) return false;
     const d = hazardDistanceM(next, tracked);

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>HUD layout harness</title>
+    <link rel="icon" href="data:," />
+    <!-- Test page for layout.browser.test.ts: renders any frame the test hands to window.renderHud. -->
+    <style>
+      html,
+      body,
+      #app {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./harness.tsx"></script>
+  </body>
+</html>

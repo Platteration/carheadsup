@@ -145,6 +145,29 @@ describe('decodeVin', () => {
     expect(decodeVin([msg('7E8', '7F 09 12')])).toBeNull();
     expect(decodeVin([msg('7E8', '49 02 01 00 00 00')])).toBeNull();
   });
+
+  it('rejects a truncated or invalid VIN so it is read again (obd-13)', () => {
+    const ascii = (text: string): string =>
+      bytesToHex(
+        [...text].map((c) => c.charCodeAt(0)),
+        ' ',
+      );
+    // An ISO 9141 answer whose last line was lost: 13 characters.
+    expect(() => decodeVin([msg('10', `49 02 00 00 00 ${ascii('1HGCM82633A00')}`)])).toThrow(
+      expect.objectContaining({ code: 'MALFORMED' }),
+    );
+    // I, O and Q never appear in a VIN.
+    expect(() => decodeVin([msg('7E8', `49 02 01 ${ascii('1HGCM8263OA004352')}`)])).toThrow(
+      expect.objectContaining({ code: 'MALFORMED' }),
+    );
+    // A complete VIN from another control unit wins over a partial one.
+    expect(
+      decodeVin([
+        msg('7E8', `49 02 01 ${ascii('1HGCM826')}`),
+        msg('7E9', `49 02 01 ${ascii('1HGCM82633A004352')}`),
+      ]),
+    ).toBe('1HGCM82633A004352');
+  });
 });
 
 describe('negativeResponseCode', () => {

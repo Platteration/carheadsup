@@ -13,7 +13,9 @@
  *  - legacy, headers off: data only.
  *
  * Spaces are optional everywhere (`AT S0`). Frames that do not fit their framing are dropped;
- * callers treat "lines but no messages" as a malformed response.
+ * callers treat "lines but no messages" as a malformed response, and {@link parseEcuResponse}
+ * counts what was dropped so that callers needing every ECU's complete answer (trouble codes)
+ * can tell a partial answer from a complete one.
  */
 import { concatBytes, hexToBytes } from './hex.ts';
 import type { ProtocolFamily } from './protocols.ts';
@@ -32,6 +34,16 @@ export interface FrameParseOptions {
   family: ProtocolFamily;
   /** Whether the adapter prints headers (`AT H1`). */
   headers: boolean;
+}
+
+export interface ParsedResponse {
+  messages: EcuMessage[];
+  /**
+   * Lines or messages that had to be discarded: unparseable lines, frames that do not fit the
+   * framing, and multi-frame messages with missing or garbled parts (flow-control frames do not
+   * count). Non-zero means some ECU's answer may be incomplete or missing.
+   */
+  dropped: number;
 }
 
 interface RawFrame {
@@ -59,13 +71,23 @@ export function parseEcuMessages(
   lines: readonly string[],
   options: FrameParseOptions,
 ): EcuMessage[] {
+  return parseEcuResponse(lines, options).messages;
+}
+
+/** {@link parseEcuMessages}, also reporting how much of the response had to be dropped. */
+export function parseEcuResponse(
+  lines: readonly string[],
+  options: FrameParseOptions,
+): ParsedResponse {
   const cleaned = lines.map(compact).filter((line) => line.length > 0);
   if (options.headers) {
-    const frames = splitHeaderFrames(cleaned, options.family);
-    const messages = assemble(frames, options.family);
+    const split = splitHeaderFrames(cleaned, options.family);
+    const assembled = assemble(split.frames, options.family);
     // A clone that ignored AT H1 prints headerless lines. On CAN those are recognisable (no
     // id, no PCI byte), so fall back to them; legacy lines look the same either way.
-    if (messages.length > 0 || options.family === 'legacy') return messages;
+    if (assembled.messages.length > 0 || options.family === 'legacy') {
+      return { messages: assembled.messages, dropped: split.dropped + assembled.dropped };
+    }
   }
   return parseHeaderless(cleaned, options.family);
 }
@@ -74,14 +96,22 @@ export function parseEcuMessages(
 // Headers on
 // ---------------------------------------------------------------------------------------------
 
-function splitHeaderFrames(lines: readonly string[], family: ProtocolFamily): RawFrame[] {
+function splitHeaderFrames(
+  lines: readonly string[],
+  family: ProtocolFamily,
+): { frames: RawFrame[]; dropped: number } {
   const frames: RawFrame[] = [];
+  let dropped = 0;
   for (const line of lines) {
-    if (!HEX_LINE_RE.test(line)) continue;
-    const frame = family === 'legacy' ? legacyHeaderFrame(line) : canHeaderFrame(line, family);
+    const frame = !HEX_LINE_RE.test(line)
+      ? null
+      : family === 'legacy'
+        ? legacyHeaderFrame(line)
+        : canHeaderFrame(line, family);
     if (frame) frames.push(frame);
+    else dropped += 1;
   }
-  return frames;
+  return { frames, dropped };
 }
 
 function canHeaderFrame(line: string, family: 'can11' | 'can29'): RawFrame | null {
@@ -131,7 +161,7 @@ function legacyHeaderFrame(line: string): RawFrame | null {
   return { ecu, bytes: bytes.slice(3, bytes.length - 1) };
 }
 
-function assemble(frames: readonly RawFrame[], family: ProtocolFamily): EcuMessage[] {
+function assemble(frames: readonly RawFrame[], family: ProtocolFamily): ParsedResponse {
   const byEcu = new Map<string | null, Uint8Array[]>();
   for (const frame of frames) {
     const list = byEcu.get(frame.ecu);
@@ -139,12 +169,14 @@ function assemble(frames: readonly RawFrame[], family: ProtocolFamily): EcuMessa
     else byEcu.set(frame.ecu, [frame.bytes]);
   }
   const messages: EcuMessage[] = [];
+  let dropped = 0;
   for (const ecu of sortEcus([...byEcu.keys()])) {
     const list = byEcu.get(ecu) ?? [];
-    const payloads = family === 'legacy' ? assembleLegacy(list) : assembleIsoTp(list);
-    for (const data of payloads) messages.push({ ecu, data });
+    const assembled = family === 'legacy' ? assembleLegacy(list) : assembleIsoTp(list);
+    for (const data of assembled.payloads) messages.push({ ecu, data });
+    dropped += assembled.dropped;
   }
-  return messages;
+  return { messages, dropped };
 }
 
 function sortEcus(ecus: Array<string | null>): Array<string | null> {
@@ -162,14 +194,21 @@ interface PendingIsoTp {
   consecutive: Array<{ seq: number; data: Uint8Array }>;
 }
 
+interface Assembled {
+  payloads: Uint8Array[];
+  dropped: number;
+}
+
 /** Reassemble ISO 15765-2 frames (PCI byte first) from one ECU into complete payloads. */
-function assembleIsoTp(frames: readonly Uint8Array[]): Uint8Array[] {
+function assembleIsoTp(frames: readonly Uint8Array[]): Assembled {
   const out: Uint8Array[] = [];
+  let dropped = 0;
   let pending: PendingIsoTp | null = null;
   const flush = (): void => {
     if (pending) {
       const payload = finishSegments(pending.total, pending.first, pending.consecutive);
       if (payload) out.push(payload);
+      else dropped += 1;
     }
     pending = null;
   };
@@ -184,24 +223,27 @@ function assembleIsoTp(frames: readonly Uint8Array[]): Uint8Array[] {
         const start = escaped ? 2 : 1;
         const data = frame.slice(start, start + length);
         if (length > 0 && data.length === length) out.push(data);
+        else dropped += 1;
         break;
       }
       case 1: {
         flush();
         const total = ((pci & 0x0f) << 8) | (frame[1] ?? 0);
         if (total > 0) pending = { total, first: frame.slice(2), consecutive: [] };
+        else dropped += 1;
         break;
       }
       case 2:
         // A consecutive frame without its first frame cannot be placed; drop it.
-        pending?.consecutive.push({ seq: pci & 0x0f, data: frame.slice(1) });
+        if (pending) pending.consecutive.push({ seq: pci & 0x0f, data: frame.slice(1) });
+        else dropped += 1;
         break;
       default:
         break; // flow control frames carry no data
     }
   }
   flush();
-  return out;
+  return { payloads: out, dropped };
 }
 
 /**
@@ -237,11 +279,15 @@ const LEGACY_DTC_SERVICES: ReadonlySet<number> = new Set([0x43, 0x47, 0x4a]);
  * sequence byte after the PID ("49 02 01 …", "49 02 02 …") and are ordered by it; anything
  * else is one message per frame.
  */
-function assembleLegacy(frames: readonly Uint8Array[]): Uint8Array[] {
+function assembleLegacy(frames: readonly Uint8Array[]): Assembled {
   const groups = new Map<number, Uint8Array[]>();
+  let dropped = 0;
   for (const frame of frames) {
     const sid = frame[0];
-    if (sid === undefined) continue;
+    if (sid === undefined) {
+      dropped += 1;
+      continue;
+    }
     const list = groups.get(sid);
     if (list) list.push(frame);
     else groups.set(sid, [frame]);
@@ -253,11 +299,12 @@ function assembleLegacy(frames: readonly Uint8Array[]): Uint8Array[] {
     } else if (sid === 0x49 && list.length > 1) {
       const merged = mergeLegacySequence(list);
       if (merged) out.push(merged);
+      else dropped += list.length;
     } else {
       out.push(...list);
     }
   }
-  return out;
+  return { payloads: out, dropped };
 }
 
 function mergeLegacySequence(frames: readonly Uint8Array[]): Uint8Array | null {
@@ -272,25 +319,32 @@ function mergeLegacySequence(frames: readonly Uint8Array[]): Uint8Array | null {
 // Headers off
 // ---------------------------------------------------------------------------------------------
 
-function parseHeaderless(lines: readonly string[], family: ProtocolFamily): EcuMessage[] {
+function parseHeaderless(lines: readonly string[], family: ProtocolFamily): ParsedResponse {
   if (family === 'legacy') {
     const frames: Uint8Array[] = [];
+    let dropped = 0;
     for (const line of lines) {
       const bytes = tryBytes(line);
       if (bytes) frames.push(bytes);
+      else dropped += 1;
     }
-    return assembleLegacy(frames).map((data) => ({ ecu: null, data }));
+    const assembled = assembleLegacy(frames);
+    return {
+      messages: assembled.payloads.map((data) => ({ ecu: null, data })),
+      dropped: dropped + assembled.dropped,
+    };
   }
 
   const messages: EcuMessage[] = [];
+  let dropped = 0;
   let pending: { total: number; segments: Array<{ seq: number; data: Uint8Array }> } | null = null;
   const flush = (): void => {
-    if (pending && pending.segments.length > 0) {
+    if (pending) {
       const [first, ...rest] = pending.segments;
-      if (first && first.seq === 0) {
-        const payload = finishSegments(pending.total, first.data, rest);
-        if (payload) messages.push({ ecu: null, data: payload });
-      }
+      const payload =
+        first && first.seq === 0 ? finishSegments(pending.total, first.data, rest) : null;
+      if (payload) messages.push({ ecu: null, data: payload });
+      else dropped += 1;
     }
     pending = null;
   };
@@ -307,14 +361,17 @@ function parseHeaderless(lines: readonly string[], family: ProtocolFamily): EcuM
       // Some clones omit the length line; the message then ends where the segments end.
       pending ??= { total: Number.POSITIVE_INFINITY, segments: [] };
       if (data) pending.segments.push({ seq: parseInt(segment[1] ?? '0', 16), data });
+      else dropped += 1;
       continue;
     }
     const bytes = tryBytes(line);
     if (bytes) {
       flush();
       messages.push({ ecu: null, data: bytes });
+    } else {
+      dropped += 1;
     }
   }
   flush();
-  return messages;
+  return { messages, dropped };
 }

@@ -23,10 +23,10 @@ export const DEMO_PARKED_DASHBOARD_S = 15;
 
 /**
  * The looping demo: start-up, a city stretch, a red light, an on-ramp, highway cruising,
- * the exit, arriving and parking with the engine off (~5.1 min per loop).
+ * the exit, arriving (~4.3 min of driving per loop) and parking with the engine off.
  *
- * The parked step outlasts the HUD's default `display.context.engineOffParkedAfterMs` (30 s,
- * which keeps start-stop from bringing up the dashboard at red lights) by
+ * The parked step outlasts the HUD's default `display.context.engineOffParkedAfterMs` (which
+ * keeps start-stop from bringing up the dashboard at red lights) by
  * {@link DEMO_PARKED_DASHBOARD_S}, so every loop ends on the parked diagnostics dashboard.
  */
 export const DEMO_SCENARIO: readonly ScenarioStep[] = Object.freeze([

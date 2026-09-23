@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { compileFormula } from '../obd/formula.ts';
 import { DRIVING_CONTEXTS } from '../types/config.ts';
 import type { HudConfig, WidgetId, Zone } from '../types/config.ts';
 import { SIGNAL_IDS } from '../types/signals.ts';
@@ -184,6 +185,17 @@ const HEX_HEADER = /^(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 /** ELM327 `AT SP`: protocol 0 (auto) … C, optionally with an "A" (auto-fallback) before or after. */
 const ELM_PROTOCOL = /^(?:[0-9A-Ca-c]|[Aa][0-9A-Ca-c]|[0-9A-Ca-c][Aa])$/;
 
+/** A custom-PID formula must compile, so a typo is rejected up front, not skipped at runtime. */
+const formulaSchema = text(1, 200).superRefine((formula, ctx) => {
+  if (formula === '') return; // already reported by the length check
+  try {
+    compileFormula(formula);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    ctx.addIssue({ code: 'custom', message: message.charAt(0).toLowerCase() + message.slice(1) });
+  }
+});
+
 const customPidSchema = z.object({
   signal: z.enum(SIGNAL_IDS),
   mode: z.string().regex(HEX_MODE, 'expected a 2-digit hex mode such as "22"'),
@@ -192,7 +204,7 @@ const customPidSchema = z.object({
     .string()
     .regex(HEX_HEADER, 'expected a 3-, 6- or 8-digit hex header such as "7E0"')
     .nullable(),
-  formula: text(1, 200),
+  formula: formulaSchema,
   intervalMs: int(100, 3_600_000),
 });
 
@@ -454,6 +466,16 @@ const tripSchema = z.object({
   minDistanceKm: num(0, 100),
 });
 
+/**
+ * `server.apiToken` travels in `Authorization` headers and `?token=` URLs, which carry only
+ * printable ASCII (a non-ASCII token cannot be sent by a browser's fetch or the companion's HTTP
+ * client, so saving one would lock every other device out). Spaces inside are fine; a token of
+ * spaces only is not a token.
+ */
+const apiTokenSchema = text(0, 256)
+  .regex(/^[\x20-\x7e]*$/, 'use letters, digits and symbols (printable ASCII) only')
+  .refine((token) => token === '' || token.trim() !== '', 'a token cannot be only spaces');
+
 const phoneSchema = z.object({
   pairingToken: text(0, 256),
   showMessageSender: bool,
@@ -485,7 +507,7 @@ const sensorsSchema = z.object({
 const serverSchema = z.object({
   port: int(1, 65_535),
   host: hostSchema,
-  apiToken: text(0, 256),
+  apiToken: apiTokenSchema,
   mdns: bool,
   frameRate: int(1, 60),
 });

@@ -94,7 +94,7 @@ export function coolantRule({ state, config, previous }: RuleContext): AlertSpec
 // ---------------------------------------------------------------------------------------------
 // Supply voltage
 
-type VoltageFault = 'charging' | 'battery-low' | 'overvoltage';
+export type VoltageFault = 'charging' | 'battery-low' | 'overvoltage';
 
 /**
  * Every voltage fault must persist before it is raised. Charging faults need a full minute
@@ -111,7 +111,8 @@ export const VOLTAGE_FAULTS: Readonly<
   overvoltage: { title: 'OVERVOLTAGE', severity: 'warning', sustainMs: 10_000 },
 };
 
-function voltageFaultOf(alert: Alert | undefined): VoltageFault | null {
+/** Which voltage fault an alert under the 'voltage' key reports (null for anything else). */
+export function voltageFaultOf(alert: Alert | undefined): VoltageFault | null {
   if (alert === undefined) return null;
   for (const [fault, def] of Object.entries(VOLTAGE_FAULTS) as [
     VoltageFault,
@@ -209,25 +210,35 @@ export function checkEngineRule({ state }: RuleContext): AlertSpec[] {
 
 /** A low-fuel alert clears only once the level is this many points above the threshold. */
 export const FUEL_LOW_HYSTERESIS_PCT = 2;
+/**
+ * The low-fuel caution escalates to a warning — re-raising it if the driver dismissed it — at
+ * half the threshold or once the range is down to this, and drops back only this far above.
+ */
+export const FUEL_VERY_LOW_RANGE_KM = 30;
+export const FUEL_VERY_LOW_RANGE_HYSTERESIS_KM = 5;
 
 export function fuelLowRule({ state, config, previous }: RuleContext): AlertSpec[] {
   if (freshSignal(state, 'fuelLevel') === null) return NONE;
   const { levelPct, rangeKm } = state.fuel.readings;
   if (levelPct === null) return NONE;
   const threshold = config.alerts.fuelLowPct;
-  const holding = previous('fuel-low') !== undefined;
-  if (!(levelPct <= threshold || (holding && levelPct <= threshold + FUEL_LOW_HYSTERESIS_PCT))) {
-    return NONE;
-  }
+  const prev = previous('fuel-low');
+  if (levelPct > threshold + (prev !== undefined ? FUEL_LOW_HYSTERESIS_PCT : 0)) return NONE;
+  const range = rangeKm !== null && Number.isFinite(rangeKm) ? rangeKm : null;
+  const wasVeryLow = prev?.severity === 'warning';
+  const veryLow =
+    levelPct <= threshold / 2 + (wasVeryLow ? FUEL_LOW_HYSTERESIS_PCT : 0) ||
+    (range !== null &&
+      range <= FUEL_VERY_LOW_RANGE_KM + (wasVeryLow ? FUEL_VERY_LOW_RANGE_HYSTERESIS_KM : 0));
   return [
     {
       key: 'fuel-low',
       kind: 'fuel-low',
-      severity: 'caution',
-      title: 'FUEL LOW',
+      severity: veryLow ? 'warning' : 'caution',
+      title: veryLow ? 'FUEL VERY LOW' : 'FUEL LOW',
       detail:
-        rangeKm !== null && Number.isFinite(rangeKm)
-          ? `Range ${formatLongDistance(rangeKm, config)}`
+        range !== null
+          ? `Range ${formatLongDistance(range, config)}`
           : `${Math.round(levelPct)} % left`,
       code: null,
     },
@@ -277,6 +288,11 @@ export function maintenanceRule({ state, config }: RuleContext): AlertSpec[] {
 
 /** A tyre stays "low" for the alert until it is this much above the threshold (kPa). */
 export const TPMS_HYSTERESIS_KPA = 7;
+/**
+ * A tyre below this fraction of `tpmsLowKpa` is badly deflated (a puncture): the warning turns
+ * critical, which also brings back a warning the driver dismissed while it was only a bit low.
+ */
+export const TPMS_CRITICAL_FRACTION = 0.75;
 
 export const TYRES: ReadonlyArray<{ signal: SignalId; name: string }> = [
   { signal: 'tirePressureFL', name: 'Front left' },
@@ -285,10 +301,18 @@ export const TYRES: ReadonlyArray<{ signal: SignalId; name: string }> = [
   { signal: 'tirePressureRR', name: 'Rear right' },
 ];
 
+/** Pressure below which a tyre counts as low: the threshold, plus hysteresis while alerting. */
+export function tpmsLowLimitKpa(config: HudConfig, alerting: boolean): number {
+  return config.alerts.tpmsLowKpa + (alerting ? TPMS_HYSTERESIS_KPA : 0);
+}
+
 export function tpmsRule({ state, config, previous }: RuleContext): AlertSpec[] {
   if (!config.vehicle.hasTpms) return NONE;
-  const limit =
-    config.alerts.tpmsLowKpa + (previous('tpms') !== undefined ? TPMS_HYSTERESIS_KPA : 0);
+  const prev = previous('tpms');
+  const limit = tpmsLowLimitKpa(config, prev !== undefined);
+  const criticalLimit =
+    config.alerts.tpmsLowKpa * TPMS_CRITICAL_FRACTION +
+    (prev?.severity === 'critical' ? TPMS_HYSTERESIS_KPA : 0);
   let lowest: { name: string; kpa: number } | null = null;
   let lowCount = 0;
   for (const tyre of TYRES) {
@@ -299,12 +323,13 @@ export function tpmsRule({ state, config, previous }: RuleContext): AlertSpec[] 
   }
   if (lowest === null) return NONE;
   const more = lowCount > 1 ? ` +${lowCount - 1}` : '';
+  const critical = lowest.kpa < criticalLimit;
   return [
     {
       key: 'tpms',
       kind: 'tpms',
-      severity: 'warning',
-      title: 'TYRE PRESSURE LOW',
+      severity: critical ? 'critical' : 'warning',
+      title: critical ? 'TYRE PRESSURE CRITICAL' : 'TYRE PRESSURE LOW',
       detail: `${lowest.name} ${formatPressure(lowest.kpa, config)}${more}`,
       code: null,
     },

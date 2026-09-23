@@ -84,6 +84,10 @@ export interface ConfigEditor {
   setLocalError(key: string, message: string | null): void;
   save(): Promise<void>;
   discard(): void;
+  /**
+   * Fetch the config again. The first load (or a retry after it failed) replaces the draft;
+   * once loaded, unsaved edits are kept and rebased onto what the HUD now has.
+   */
   reload(): Promise<void>;
   retryLive(): void;
 }
@@ -177,20 +181,34 @@ export function useConfigEditor(api: HudApi, options: ConfigEditorOptions = {}):
     update((s) => ({ ...s, status: s.base === null ? 'loading' : s.status, loadError: null }));
     try {
       const config = await api.getConfig();
-      liveSent.current.clear();
-      update((s) => ({
-        ...s,
-        status: 'ready',
-        loadError: null,
-        base: config,
-        draft: config,
-        serverIssues: new Map(),
-        generalErrors: [],
-        localErrors: new Map(),
-        saveError: null,
-        liveError: null,
-        revision: s.revision + 1,
-      }));
+      if (stateRef.current.draft === null) liveSent.current.clear();
+      update((s) => {
+        if (s.base !== null && s.draft !== null) {
+          // Already editing (e.g. a new access token after a refused save): keep every edit.
+          return {
+            ...s,
+            status: 'ready',
+            loadError: null,
+            base: config,
+            draft: rebaseDraft(s.base, config, s.draft),
+            saveError: null,
+            liveError: null,
+          };
+        }
+        return {
+          ...s,
+          status: 'ready',
+          loadError: null,
+          base: config,
+          draft: config,
+          serverIssues: new Map(),
+          generalErrors: [],
+          localErrors: new Map(),
+          saveError: null,
+          liveError: null,
+          revision: s.revision + 1,
+        };
+      });
     } catch (error) {
       if (isAbortError(error)) return;
       update((s) => ({ ...s, status: s.base === null ? 'error' : s.status, loadError: error }));
@@ -201,9 +219,17 @@ export function useConfigEditor(api: HudApi, options: ConfigEditorOptions = {}):
     void reload();
   }, [reload]);
 
-  /** Apply a PATCH response: new base, rebased draft, server issues under `scope` replaced. */
+  /**
+   * Apply the response to PATCH `sent`: new base, rebased draft (edits made since sending kept),
+   * server issues under `scope` replaced.
+   */
   const applyResult = useCallback(
-    (config: HudConfig, errors: readonly string[], scopePaths: readonly string[]) => {
+    (
+      config: HudConfig,
+      errors: readonly string[],
+      scopePaths: readonly string[],
+      sent: DeepPartial<HudConfig>,
+    ) => {
       const parsed = parseServerErrors(errors);
       update((s) => {
         if (s.base === null || s.draft === null) return s;
@@ -214,7 +240,7 @@ export function useConfigEditor(api: HudApi, options: ConfigEditorOptions = {}):
         return {
           ...s,
           base: config,
-          draft: rebaseDraft(s.base, config, s.draft),
+          draft: rebaseDraft(s.base, config, s.draft, sent),
           serverIssues,
           generalErrors: parsed.general,
         };
@@ -285,7 +311,7 @@ export function useConfigEditor(api: HudApi, options: ConfigEditorOptions = {}):
     update((x) => ({ ...x, saving: true, saveError: null }));
     try {
       const result = await enqueue(() => api.patchConfig(patch));
-      const parsed = applyResult(result.config, result.errors, sentPaths);
+      const parsed = applyResult(result.config, result.errors, sentPaths, patch);
       // A new API token takes effect for the very next request: keep using it from here.
       const sentToken = patch.server?.apiToken;
       if (sentToken !== undefined && result.config.server.apiToken === sentToken) {
@@ -341,7 +367,7 @@ export function useConfigEditor(api: HudApi, options: ConfigEditorOptions = {}):
           if (patch === null) return;
           liveSent.current.set(change.key, getAt(s.draft, change.path));
           const result = await api.patchConfig(patch);
-          applyResult(result.config, result.errors, [change.key]);
+          applyResult(result.config, result.errors, [change.key], patch);
           update((x) => ({ ...x, liveError: null }));
         })
           .catch((error: unknown) => {

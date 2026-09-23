@@ -10,7 +10,7 @@
  * (with a thermostat), oil, intake air, catalyst and tyres.
  */
 import { isValidDtc, normalizeDtc } from '@carheadsup/core';
-import type { SimControl, SimDriveMode, SimStatus } from '@carheadsup/core';
+import type { SimControl, SimDriveMode, SimVehicleStatus } from '@carheadsup/core';
 import {
   GEAR_COUNT,
   GRAVITY_MPS2,
@@ -148,6 +148,8 @@ export class VehicleSimulator {
   private userThrottle = 0;
   private userBrake = 0;
   private userEngineRunning: boolean;
+  /** The engine switch was set while the script drove (it applies once back in 'manual'). */
+  private engineSwitchSetWhileScripted = false;
   private heldGear: number | null = null;
   private coolantOverride: number | null = null;
   private voltageOverride: number | null = null;
@@ -236,13 +238,28 @@ export class VehicleSimulator {
    * drives throttle, brake and the engine; the values set here apply once back in 'manual'.
    */
   setControls(control: SimControl): void {
+    // The mode first, so that a control switching to 'manual' and setting the engine or pedals
+    // at once gets exactly those values.
+    if (control.mode !== undefined && control.mode !== this.mode) {
+      this.mode = control.mode;
+      if (control.mode === 'scenario') {
+        this.restartScenario();
+      } else if (!this.engineSwitchSetWhileScripted) {
+        // Nobody touched the switch while scripted: carry on as the script left the engine.
+        this.userEngineRunning = this.engineRunning;
+      }
+      this.engineSwitchSetWhileScripted = false;
+    }
     if (control.throttle !== undefined && Number.isFinite(control.throttle)) {
       this.userThrottle = clamp(control.throttle, 0, 1);
     }
     if (control.brake !== undefined && Number.isFinite(control.brake)) {
       this.userBrake = clamp(control.brake, 0, 1);
     }
-    if (control.engineRunning !== undefined) this.userEngineRunning = control.engineRunning;
+    if (control.engineRunning !== undefined) {
+      this.userEngineRunning = control.engineRunning;
+      if (this.mode === 'scenario') this.engineSwitchSetWhileScripted = true;
+    }
     if (control.gear !== undefined) {
       this.heldGear =
         control.gear === null || !Number.isFinite(control.gear)
@@ -268,11 +285,6 @@ export class VehicleSimulator {
     if (control.tirePressuresKpa !== undefined) {
       const tyres = control.tirePressuresKpa;
       this.tyreRef = tyres ? { pressures: { ...tyres }, tempC: this.tyreTempC } : null;
-    }
-    if (control.mode !== undefined && control.mode !== this.mode) {
-      this.mode = control.mode;
-      if (control.mode === 'scenario') this.restartScenario();
-      else this.userEngineRunning = this.engineRunning;
     }
   }
 
@@ -320,9 +332,9 @@ export class VehicleSimulator {
   /**
    * Status for the dev console. In manual mode the pedals and engine switch are the commanded
    * values (so a POST of controls reads back immediately); in scenario mode they are the
-   * script's current inputs.
+   * script's current inputs. The overrides and tyre pressures are reported as set.
    */
-  status(): SimStatus {
+  status(): SimVehicleStatus {
     const manual = this.mode === 'manual';
     return {
       mode: this.mode,
@@ -336,6 +348,10 @@ export class VehicleSimulator {
       lux: this.lux,
       ambientTempC: this.ambientC,
       scenarioStep: this.mode === 'scenario' ? (this.currentStep()?.name ?? null) : null,
+      coolantOverrideC: this.coolantOverride,
+      voltageOverrideV: this.voltageOverride,
+      fuelLevelOverridePct: this.fuelOverride,
+      tirePressuresKpa: this.tyreRef === null ? null : { ...this.tyreRef.pressures },
     };
   }
 

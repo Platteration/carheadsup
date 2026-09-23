@@ -48,7 +48,23 @@ function CarOutline({ low }: { low: Record<Corner, boolean> }) {
   );
 }
 
-function Reading({ corner, reading }: { corner: Corner; reading: TireReading }) {
+/**
+ * Decimals worth showing per pressure unit: a tenth of a bar (10 kPa) tells a healthy 2.4 from a
+ * low 1.6, while whole psi (≈ 7 kPa) and kPa are already fine-grained enough.
+ */
+export function tpmsDecimals(unit: TpmsWidget['unit']): number {
+  return unit === 'bar' ? 1 : 0;
+}
+
+function Reading({
+  corner,
+  reading,
+  decimals,
+}: {
+  corner: Corner;
+  reading: TireReading;
+  decimals: number;
+}) {
   return (
     <Num
       class={cx(
@@ -57,7 +73,7 @@ function Reading({ corner, reading }: { corner: Corner; reading: TireReading }) 
         reading.low && 'hud-tpms__value--low',
       )}
     >
-      {formatNumber(reading.value, 0)}
+      {formatNumber(reading.value, decimals)}
     </Num>
   );
 }
@@ -65,15 +81,16 @@ function Reading({ corner, reading }: { corner: Corner; reading: TireReading }) 
 /** Tyre pressures at the four corners of a car outline; low ones in amber. */
 export function Tpms({ w }: { w: TpmsWidget }) {
   const low = { fl: w.fl.low, fr: w.fr.low, rl: w.rl.low, rr: w.rr.low };
+  const decimals = tpmsDecimals(w.unit);
   return (
     <WidgetRoot id="tpms" class={cx(w.anyLow && 'hud-tpms--low')}>
       <div class="hud-tpms">
         <div class="hud-tpms__grid">
-          <Reading corner="fl" reading={w.fl} />
+          <Reading corner="fl" reading={w.fl} decimals={decimals} />
           <CarOutline low={low} />
-          <Reading corner="fr" reading={w.fr} />
-          <Reading corner="rl" reading={w.rl} />
-          <Reading corner="rr" reading={w.rr} />
+          <Reading corner="fr" reading={w.fr} decimals={decimals} />
+          <Reading corner="rl" reading={w.rl} decimals={decimals} />
+          <Reading corner="rr" reading={w.rr} decimals={decimals} />
         </div>
         <span class="hud-unit hud-tpms__unit">{w.unit}</span>
       </div>

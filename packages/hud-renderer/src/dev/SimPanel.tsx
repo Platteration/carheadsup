@@ -1,7 +1,7 @@
 import type { SimControl, SimDriveMode, SimStatus } from '@carheadsup/core';
 import type { ComponentChildren } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
-import { describeError } from '../common/api.ts';
+import { useRef, useState } from 'preact/hooks';
+import { describeError, isHudApiError } from '../common/api.ts';
 import { cx } from '../hud/util.ts';
 import { useDtcLookup } from './dtc-lookup.ts';
 import {
@@ -20,6 +20,7 @@ import type { SimHandle } from './useSim.ts';
 import { useThrottled } from './useSim.ts';
 
 type CollisionChoice = NonNullable<NonNullable<SimControl['adas']>['collision']>;
+type Tyres = { fl: number; fr: number; rl: number; rr: number };
 
 /** Slider changes are sent at most this often. */
 export const SLIDER_SEND_MS = 120;
@@ -46,7 +47,11 @@ function Group({
   );
 }
 
-/** A value from the simulator, overridden by the user's own recent input. */
+/**
+ * A value from the simulator, overridden by the user's own recent input. Every control shows
+ * what the HUD reports (`SimStatus`), so a reloaded console — or a second one — shows the
+ * server's state rather than toggles remembered locally.
+ */
 function useHeld<T>(remote: T | undefined, fallback: T): [T, (v: T) => void] {
   const [local, setLocal] = useState<{ value: T; at: number } | null>(null);
   const held = local !== null && Date.now() - local.at < USER_HOLD_MS;
@@ -54,8 +59,64 @@ function useHeld<T>(remote: T | undefined, fallback: T): [T, (v: T) => void] {
   return [value, (v: T) => setLocal({ value: v, at: Date.now() })];
 }
 
-export function SimPanel({ sim }: { sim: SimHandle }) {
+/**
+ * A reported value that may be switched off (null), such as a sensor override: on/off comes from
+ * the HUD, and the slider keeps the last value it had while off, ready for switching it on.
+ */
+function useSwitchable<T>(
+  remote: T | null | undefined,
+  initial: T,
+): [{ on: boolean; value: T }, (on: boolean, value: T) => void] {
+  const last = useRef(initial);
+  if (remote !== null && remote !== undefined) last.current = remote;
+  const [value, setValue] = useHeld<T | null>(remote, null);
+  if (value !== null) last.current = value;
+  return [
+    { on: value !== null, value: value ?? last.current },
+    (on, next) => {
+      last.current = next;
+      setValue(on ? next : null);
+    },
+  ];
+}
+
+/** Enter the HUD's API token when it refuses this device (`server.apiToken` is set). */
+function TokenEntry({ onToken }: { onToken: (token: string) => void }) {
+  const [text, setText] = useState('');
+  return (
+    <form
+      class="sim-row"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (text.trim() !== '') onToken(text.trim());
+      }}
+    >
+      <input
+        class="dinput dinput--mono"
+        type="password"
+        aria-label="Access token"
+        placeholder="Access token (Server → API token in the settings)"
+        autoComplete="off"
+        value={text}
+        onInput={(e) => setText(e.currentTarget.value)}
+      />
+      <button type="submit" class="dbtn" disabled={text.trim() === ''}>
+        Use
+      </button>
+    </form>
+  );
+}
+
+export function SimPanel({
+  sim,
+  onToken,
+}: {
+  sim: SimHandle;
+  /** Store a token entered here; without it no token field is offered. */
+  onToken?: (token: string) => void;
+}) {
   const { availability, status, error } = sim;
+  const locked = isHudApiError(error) && error.kind === 'unauthorized';
   if (availability === 'real-vehicle') {
     return (
       <div class="sim-notice" role="status">
@@ -70,7 +131,17 @@ export function SimPanel({ sim }: { sim: SimHandle }) {
   const offline = availability !== 'available';
   return (
     <div class={cx('sim', offline && 'sim--offline')}>
-      {availability === 'unreachable' && (
+      {availability === 'unreachable' && locked && (
+        <div class="sim-notice sim-notice--error" role="alert">
+          <p class="sim-notice__title">This HUD asks for an access token</p>
+          <p>
+            Devices other than the HUD itself need the token set under Server → API token in the
+            settings. It is stored on this device only.
+          </p>
+          {onToken && <TokenEntry onToken={onToken} />}
+        </div>
+      )}
+      {availability === 'unreachable' && !locked && (
         <div class="sim-notice sim-notice--error" role="alert">
           <p class="sim-notice__title">HUD server not reachable</p>
           <p>{describeError(error)} Controls unlock when it answers.</p>
@@ -85,9 +156,9 @@ export function SimPanel({ sim }: { sim: SimHandle }) {
         <DriveControls sim={sim} status={status} />
         <FaultControls sim={sim} status={status} />
         <EnvironmentControls sim={sim} status={status} />
-        <PhoneControls sim={sim} />
-        <AdasControls sim={sim} />
-        <TyreControls sim={sim} />
+        <PhoneControls sim={sim} status={status} />
+        <AdasControls sim={sim} status={status} />
+        <TyreControls sim={sim} status={status} />
       </fieldset>
       {availability === 'available' && error !== null && (
         <p class="sim-error">Last command failed: {describeError(error)}</p>
@@ -118,6 +189,7 @@ function StatusReadout({ status }: { status: SimStatus | null }) {
     ['Light', status ? describeLux(status.lux) : '–'],
     ['Outside', status ? `${Math.round(status.ambientTempC)} °C` : '–'],
     ['Codes', status ? (status.dtcs.length === 0 ? 'None' : status.dtcs.join(', ')) : '–'],
+    ['Phone', status?.phone ? describePhone(status.phone) : '–'],
   ];
   return (
     <div class="sim-status" aria-label="Simulator status">
@@ -136,6 +208,11 @@ function StatusReadout({ status }: { status: SimStatus | null }) {
       </dl>
     </div>
   );
+}
+
+function describePhone(phone: SimStatus['phone']): string {
+  if (phone.steppedAside) return 'Real phone connected';
+  return phone.connected ? 'Simulated, connected' : 'Simulated, disconnected';
 }
 
 function Toggle({
@@ -299,9 +376,12 @@ function FaultControls({ sim, status }: { sim: SimHandle; status: SimStatus | nu
   const lookup = useDtcLookup();
   const [entry, setEntry] = useState('');
   const check = checkDtcEntry(entry, lookup);
-  const [coolant, setCoolant] = useState<Override>({ on: false, value: 118 });
-  const [voltage, setVoltage] = useState<Override>({ on: false, value: 11.6 });
-  const [fuel, setFuel] = useState<Override>({ on: false, value: 8 });
+  const [coolant, setCoolantOverride] = useSwitchable(status?.coolantOverrideC, 118);
+  const [voltage, setVoltageOverride] = useSwitchable(status?.voltageOverrideV, 11.6);
+  const [fuel, setFuelOverride] = useSwitchable(status?.fuelLevelOverridePct, 8);
+  const setCoolant = (o: Override) => setCoolantOverride(o.on, o.value);
+  const setVoltage = (o: Override) => setVoltageOverride(o.on, o.value);
+  const setFuel = (o: Override) => setFuelOverride(o.on, o.value);
   const sendCoolant = useThrottled(
     (v: number | null) => void sim.send({ coolantOverrideC: v }),
     SLIDER_SEND_MS,
@@ -486,9 +566,14 @@ function EnvironmentControls({ sim, status }: { sim: SimHandle; status: SimStatu
   );
 }
 
-function PhoneControls({ sim }: { sim: SimHandle }) {
+function PhoneControls({ sim, status }: { sim: SimHandle; status: SimStatus | null }) {
   return (
     <Group title="Phone">
+      {status?.phone?.steppedAside && (
+        <p class="sim-hint">
+          A real phone is connected: the simulated phone stays silent until it goes.
+        </p>
+      )}
       <div class="button-grid">
         {PHONE_ACTIONS.map((a) => (
           <button
@@ -505,10 +590,10 @@ function PhoneControls({ sim }: { sim: SimHandle }) {
   );
 }
 
-function AdasControls({ sim }: { sim: SimHandle }) {
-  const [left, setLeft] = useState(false);
-  const [right, setRight] = useState(false);
-  const [collision, setCollision] = useState<CollisionChoice>('none');
+function AdasControls({ sim, status }: { sim: SimHandle; status: SimStatus | null }) {
+  const [left, setLeft] = useHeld(status?.adas?.blindSpotLeft, false);
+  const [right, setRight] = useHeld(status?.adas?.blindSpotRight, false);
+  const [collision, setCollision] = useHeld<CollisionChoice>(status?.adas?.collision, 'none');
   const send = (adas: NonNullable<SimControl['adas']>) => void sim.send({ adas });
   return (
     <Group title="Driver assist">
@@ -550,23 +635,22 @@ function AdasControls({ sim }: { sim: SimHandle }) {
   );
 }
 
-type Tyres = { fl: number; fr: number; rl: number; rr: number };
-
-function TyreControls({ sim }: { sim: SimHandle }) {
-  const [on, setOn] = useState(false);
-  const [tyres, setTyres] = useState<Tyres>({ ...DEFAULT_TYRES_KPA });
+function TyreControls({ sim, status }: { sim: SimHandle; status: SimStatus | null }) {
+  const [reported, setReported] = useSwitchable<Tyres>(
+    status === null ? undefined : status.tirePressuresKpa,
+    { ...DEFAULT_TYRES_KPA },
+  );
+  const { on, value: tyres } = reported;
   const sendTyres = useThrottled(
     (t: Tyres | null) => void sim.send({ tirePressuresKpa: t }),
     SLIDER_SEND_MS,
   );
-  const first = useRef(true);
-  useEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
-    sendTyres(on ? tyres : null);
-  }, [on, tyres]);
+  const update = (report: boolean, next: Tyres) => {
+    setReported(report, next);
+    sendTyres(report ? next : null);
+  };
+  const setTyres = (next: Tyres) => update(true, next);
+  const setOn = (report: boolean) => update(report, tyres);
   const field = (key: keyof Tyres, label: string) => (
     <label class="tyre">
       <span>{label}</span>

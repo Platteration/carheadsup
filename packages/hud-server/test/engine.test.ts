@@ -93,9 +93,39 @@ describe('HudEngine time', () => {
     });
     expect(engine.state.now).toBe(T0 + 10_000);
     expect(engine.state.vehicle.signals.rpm?.at).toBe(T0 + 10_000);
-    vi.setSystemTime(T0 + 12_000);
+    // Time keeps counting from there (at 99 % while it is ahead of the wall clock) rather than
+    // freezing until the wall clock is back at T0 + 10 s.
+    vi.setSystemTime(T0 + 3_000);
     engine.dispatch({ type: 'tick', at: 0 });
-    expect(engine.state.now).toBe(T0 + 12_000);
+    expect(engine.state.now).toBe(T0 + 10_990);
+  });
+
+  it('lets stale data expire when the wall clock steps back', () => {
+    const { engine } = makeEngine();
+    engine.start();
+    engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    engine.dispatch({ type: 'adas/link', connected: true, at: 0 });
+    engine.dispatch({ type: 'adas/collision', level: 'warning', ttcSeconds: 1.2, at: 0 });
+    engine.dispatch({ type: 'obd/samples', samples: [{ signal: 'speed', value: 88 }], at: 0 });
+    vi.advanceTimersByTime(200);
+    expect(engine.frame.alerts.map((a) => a.title)).toContain('BRAKE!');
+    expect(engine.state.vehicle.signals.speed?.value).toBe(88);
+    const speedAt = engine.state.vehicle.signals.speed?.at ?? 0;
+
+    // NTP steps the clock back a minute; then both sources go silent.
+    vi.setSystemTime(Date.now() - 60_000);
+    vi.advanceTimersByTime(3000);
+    expect(engine.state.now - speedAt).toBeGreaterThan(2900);
+    expect(engine.frame.alerts.map((a) => a.title)).not.toContain('BRAKE!');
+    expect(engine.frame.collision).toBe('none');
+    expect(JSON.stringify(engine.frame.widgets)).not.toContain('88');
+  });
+
+  it('follows a forward step of the wall clock at once', () => {
+    const { engine } = makeEngine();
+    vi.setSystemTime(T0 + 3_600_000);
+    engine.dispatch({ type: 'tick', at: 0 });
+    expect(engine.state.now).toBe(T0 + 3_600_000);
   });
 
   it('ignores a non-finite clock reading', () => {
@@ -175,6 +205,7 @@ describe('HudEngine frames', () => {
 describe('HudEngine effects', () => {
   it('sends call actions to the phone when the driver answers a ringing call', () => {
     const { engine, outputs } = makeEngine();
+    engine.dispatch({ type: 'phone/link', connected: true, deviceName: 'Pixel', at: 0 });
     engine.dispatch({
       type: 'call/update',
       call: {
@@ -271,6 +302,7 @@ describe('HudEngine effects', () => {
 
   it('queues events dispatched from inside an effect handler', () => {
     const { engine, outputs } = makeEngine();
+    engine.dispatch({ type: 'phone/link', connected: true, deviceName: 'Pixel', at: 0 });
     const seen: string[] = [];
     outputs.onPhone = (message) => {
       seen.push(`phone:${message.t}`);
@@ -298,6 +330,7 @@ describe('HudEngine effects', () => {
 
   it('logs a failing phone link instead of throwing', () => {
     const { engine, outputs, logger } = makeEngine();
+    engine.dispatch({ type: 'phone/link', connected: true, deviceName: 'Pixel', at: 0 });
     outputs.onPhone = () => {
       throw new Error('socket gone');
     };
@@ -360,9 +393,9 @@ describe('HudEngine persistence', () => {
       });
       await vi.advanceTimersByTimeAsync(1000);
     }
-    // Became known at 0 s → written 2 s later; then the 60 s rule twice (each write 2 s after
-    // its request, capturing the latest reading).
-    expect(outputs.saved.map((s) => s.odometerKm)).toEqual([5000.001, 5000.062, 5000.123]);
+    // Became known at 1 s (the second reading confirms the first) → written 2 s later; then the
+    // 60 s rule twice (each write 2 s after its request, capturing the latest reading).
+    expect(outputs.saved.map((s) => s.odometerKm)).toEqual([5000.002, 5000.063, 5000.124]);
   });
 
   it('writes promptly when the odometer passes a whole kilometre', async () => {
@@ -407,6 +440,118 @@ describe('HudEngine persistence', () => {
     outputs.failSaves = false;
     await engine.flushPersistence();
     expect(outputs.saved.map((s) => s.odometerKm)).toEqual([10]);
+  });
+});
+
+describe('HudEngine trip in progress', () => {
+  /** Ten minutes at 50 km/h (≈ 8.3 km), then the engine is switched off. */
+  function drive(engine: HudEngine): void {
+    engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    for (let i = 0; i < 3000; i += 1) {
+      vi.advanceTimersByTime(200);
+      engine.dispatch({
+        type: 'obd/samples',
+        samples: [
+          { signal: 'speed', value: 50 },
+          { signal: 'rpm', value: 1800 },
+        ],
+        at: 0,
+      });
+    }
+    vi.advanceTimersByTime(200);
+    engine.dispatch({
+      type: 'obd/samples',
+      samples: [
+        { signal: 'speed', value: 0 },
+        { signal: 'rpm', value: 0 },
+      ],
+      at: 0,
+    });
+  }
+
+  it('survives the power-down at ignition off and is completed on the next start', async () => {
+    const first = makeEngine();
+    first.engine.start();
+    drive(first.engine);
+    // The ignition controller shuts the HUD down 10 s after the engine stopped.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await first.engine.stop();
+    expect(first.outputs.trips).toHaveLength(0);
+    const saved = first.outputs.saved.at(-1);
+    expect(saved).toBeDefined();
+
+    // Next drive, an hour later.
+    vi.setSystemTime(Date.now() + 3_600_000);
+    const second = makeEngine({ persisted: saved });
+    second.engine.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(second.outputs.trips).toHaveLength(1);
+    const trip = second.outputs.trips[0]!;
+    expect(trip.distanceKm).toBeGreaterThan(8.2);
+    expect(trip.distanceKm).toBeLessThan(8.5);
+    expect(trip.startedAt).toBe(T0 + 200);
+    expect(trip.endedAt).toBeLessThan(T0 + 700_000);
+    // The finished trip is no longer part of the saved state.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(JSON.stringify(second.outputs.saved.at(-1))).not.toContain('"startedAt"');
+    await second.engine.stop();
+  });
+
+  it('carries on with the trip after a short power blip', async () => {
+    const first = makeEngine();
+    first.engine.start();
+    drive(first.engine);
+    await first.engine.stop();
+    vi.setSystemTime(Date.now() + 20_000);
+    const second = makeEngine({ persisted: first.outputs.saved.at(-1) });
+    second.engine.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(second.outputs.trips).toHaveLength(0);
+    expect(second.engine.state.trip.current?.distanceKm).toBeGreaterThan(8.2);
+    await second.engine.stop();
+  });
+
+  it('writes a new trip within seconds of its start, not only after a minute', async () => {
+    const { engine, outputs } = makeEngine();
+    engine.start();
+    engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    for (let i = 0; i < 25; i += 1) {
+      await vi.advanceTimersByTimeAsync(200);
+      engine.dispatch({
+        type: 'obd/samples',
+        samples: [
+          { signal: 'speed', value: 20 },
+          { signal: 'rpm', value: 1400 },
+        ],
+        at: 0,
+      });
+    }
+    // 5 s in: a power cut now would not lose the trip.
+    const withTrip = outputs.saved.filter((s) => s.activeTrip != null);
+    expect(withTrip).toHaveLength(1);
+    expect(withTrip[0]!.activeTrip?.startedAt).toBe(T0 + 200);
+    await engine.stop();
+  });
+
+  it('writes the trip in progress at least once a minute while driving', async () => {
+    const { engine, outputs } = makeEngine();
+    engine.start();
+    engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    for (let i = 0; i < 700; i += 1) {
+      await vi.advanceTimersByTimeAsync(200);
+      engine.dispatch({
+        type: 'obd/samples',
+        samples: [
+          { signal: 'speed', value: 30 },
+          { signal: 'rpm', value: 1500 },
+        ],
+        at: 0,
+      });
+    }
+    // 140 s of driving without an odometer PID: the trip alone is written periodically.
+    const withTrip = outputs.saved.filter((s) => JSON.stringify(s).includes('"startedAt"'));
+    expect(withTrip.length).toBeGreaterThanOrEqual(2);
+    await engine.stop();
   });
 });
 

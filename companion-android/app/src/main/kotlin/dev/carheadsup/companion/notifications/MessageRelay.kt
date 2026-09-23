@@ -28,7 +28,9 @@ class MessageRelay(
         val connected = linkStatus.value as? LinkStatus.Connected ?: return
         if (!recent.firstSeen(message.id, clock())) return
         val text = message.spokenText?.takeIf { connected.readMessagesAloud && settings.value.readMessagesAloud }
-        hub.publish(message.toPhoneMessage(readingAloud = text != null))
-        if (text != null) reader().speak(message.id, message.sender, text)
+        // "Reading aloud" only when the reader took it (it drops messages it cannot read, e.g.
+        // without a speech engine); during a call it is read once the call is over.
+        val reading = text != null && reader().speak(message.id, message.sender, text)
+        hub.publish(message.toPhoneMessage(readingAloud = reading))
     }
 }

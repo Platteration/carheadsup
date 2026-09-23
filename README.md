@@ -13,6 +13,14 @@ black, because black pixels are invisible on the glass.
 
 ## Screenshots
 
+The real system running the simulator's demo drive (`npm run sim`), captured unmirrored at
+1280×480:
+
+| | |
+| --- | --- |
+| ![City driving, live](docs/screenshots/live-city-nav-1280x480.png) City: guidance with lane arrows, gear, economy, speed limit, now playing | ![Highway, live](docs/screenshots/live-highway-camera-1280x480.png) Highway: only speed, limit and the speed camera ahead |
+| ![Incoming call, live](docs/screenshots/live-incoming-call-1280x480.png) Incoming call with accept / decline | ![Parked, live](docs/screenshots/live-parked-diagnostics-1280x480.png) Parked: the diagnostics dashboard with decoded trouble codes |
+
 The HUD view rendered from the sample frames in
 [`packages/hud-renderer/src/hud/fixtures.ts`](packages/hud-renderer/src/hud/fixtures.ts), shown
 unmirrored. In the car the image is mirrored so that it reads correctly in the reflection.
@@ -28,11 +36,13 @@ unmirrored. In the car the image is mirrored so that it reads correctly in the r
 | ![Maintenance](docs/screenshots/parked-maintenance-800x480.png) Parked: service reminders | ![Incoming call, wide](docs/screenshots/incoming-call-1280x480.png) Call card on a bar display | ![Highway exit, wide](docs/screenshots/highway-exit-lanes-1280x480.png) Lane guidance on a bar display |
 
 <p>
-<img src="docs/screenshots/settings-phone.png" alt="Settings app on a phone" height="420">
-<img src="docs/screenshots/dev-console.png" alt="Developer console" height="420">
+<img src="docs/screenshots/live-settings-390x844.png" alt="Settings app on a phone" height="420">
+<img src="docs/screenshots/live-dev-console-1440x900.png" alt="Developer console, live" height="420">
 </p>
 
-The settings app (on the phone) and the developer console with its gallery of sample frames.
+The settings app on a phone and the developer console with the live HUD and the simulator
+controls; the console also has a gallery of the sample frames
+([screenshot](docs/screenshots/dev-console.png)).
 
 ## Features
 
@@ -113,6 +123,10 @@ notification and sends it to the HUD.
 - Speed limits and cameras are only as good as OpenStreetMap where you drive, and need the phone.
 - The API is plain HTTP on the car's network; protect it with WPA2 on the Wi-Fi and the API and
   pairing tokens (see [docs/architecture.md](docs/architecture.md#security-model)).
+- The companion app does not yet verify that the HUD it finds is yours: with automatic discovery
+  it connects to whatever advertises a HUD on its current Wi-Fi, and hands it its tokens,
+  position and call data. Use the car's own Wi-Fi, or a manual address on shared networks
+  ([details](companion-android/README.md#privacy)).
 - A flat reflection puts the image about a metre ahead of your eyes, not several metres down the
   road like a factory HUD with focusing optics.
 - The Pi has no battery-backed clock (except a Pi 5 with its battery fitted): set one up or give it
@@ -131,7 +145,11 @@ npm run sim
 
 `npm run sim` builds the web pages on first use and starts the server with a simulated car
 (an emulated ELM327 adapter running a scripted drive), a simulated phone (navigation, a call,
-music, a message, speed limits and a camera) and simulated sensors. Then open:
+music, a message, speed limits and a camera) and simulated sensors. The demo drive loops about
+every 7½ minutes: warm-up at a standstill, city driving with guidance, a red light with an
+incoming call, an on-ramp, highway with a speed camera, the exit, arriving (a message comes in),
+and finally standing with the engine off — after 3 minutes (so that start-stop at a red light
+never opens it) the parked diagnostics dashboard shows for 15 s, then it starts over. Then open:
 
 - <http://localhost:8080/> — the HUD itself. It is **mirrored** for the windshield; add
   [`?preview=1`](http://localhost:8080/?preview=1) to see it the right way round.
@@ -140,8 +158,9 @@ music, a message, speed limits and a camera) and simulated sensors. Then open:
   sample frames.
 - <http://localhost:8080/settings> — the settings app, as the phone shows it.
 
-Simulated drives use their own data directory (`~/.local/share/carheadsup/sim`), so they never
-mix with real trips.
+Simulated drives use their own data directory (`$XDG_DATA_HOME/carheadsup/sim`, by default
+`~/.local/share/carheadsup/sim`), so they never mix with real trips. In the developer console
+you can take over from the script (*manual* mode) or trigger phone and ADAS events at any time.
 
 ## Architecture
 
@@ -188,7 +207,7 @@ core has no I/O and no clock of its own, whole drives can be replayed in tests. 
 | [`packages/hud-renderer`](packages/hud-renderer) | Preact pages: projected HUD (`/`), settings app (`/settings`), developer console (`/dev`) | browser |
 | [`companion-android`](companion-android) | Kotlin companion app; its `:protocol` module is plain JVM and testable without the Android SDK | Android |
 | [`e2e`](e2e) | Browser end-to-end tests (Playwright) of the HUD page, settings app and developer console against the simulator | Node.js + Chromium |
-| [`deploy`](deploy) | Raspberry Pi installer and uninstaller, systemd units, kiosk launcher, hotspot helper, Avahi/PAM/udev files, `check.sh` lint | Raspberry Pi OS |
+| [`deploy`](deploy) | Raspberry Pi installer and uninstaller, systemd units, kiosk launcher, hotspot helper, Avahi/PAM/udev files, `check.sh` lint and tests | Raspberry Pi OS |
 | [`docs`](docs) | The documentation below and the screenshots | — |
 
 ## Documentation

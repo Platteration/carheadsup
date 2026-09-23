@@ -2,13 +2,15 @@ import { describe, expect, it } from 'vitest';
 import type { VehicleConfig } from '../../src/types/config.ts';
 import {
   createGearState,
+  gaplessPrefix,
+  learnedNumbering,
   matchGearRatio,
   updateGear,
   type GearEstimate,
   type GearInput,
   type GearState,
 } from '../../src/vehicle/gear.ts';
-import { LEARN_BIN_COUNT } from '../../src/vehicle/gear-learner.ts';
+import { LEARN_BIN_COUNT, createGearLearner } from '../../src/vehicle/gear-learner.ts';
 import { Drive, SIX_SPEED, cityDrive, highwayDrive, type DriveSample } from './drive-sim.ts';
 import { testVehicle } from './fixtures.ts';
 
@@ -517,5 +519,171 @@ describe('gear learning', () => {
     expect(state.recent.length).toBeLessThanOrEqual(32);
     expect(state.learner.launchRatios.length).toBeLessThanOrEqual(7);
     expectRatiosNear(state.learnedRatios, SIX_SPEED);
+  });
+});
+
+describe('gear numbering of learned ratios (regression: core-3)', () => {
+  const AUTO_LEARNING = testVehicle({ transmission: 'automatic', gearRatiosRpmPerKph: null });
+  const slip = (kph: number): number => (kph >= 60 ? 0 : 0.02 + 0.1 * (1 - kph / 60));
+
+  /** Automatic city laps: pull away in 1st (converter slipping), change up through the box. */
+  function autoCityDrive(drive: Drive, laps: number): Drive {
+    for (let i = 0; i < laps; i++) {
+      drive
+        .autoLaunch(17 + (i % 3))
+        .inGear(2, 32, 5)
+        .inGear(3, 48, 3)
+        .cruise(3, 10);
+      if (i % 2 === 0) drive.inGear(4, 60, 2).cruise(4, 10).inGear(3, 45, -3);
+      drive.stop(3);
+    }
+    return drive;
+  }
+
+  function autoHighwayDrive(drive: Drive): Drive {
+    return drive
+      .autoLaunch(18)
+      .inGear(2, 35, 5)
+      .inGear(3, 55, 4)
+      .inGear(4, 75, 3)
+      .inGear(5, 95, 2)
+      .cruise(5, 15)
+      .inGear(6, 118, 1.5)
+      .cruise(6, 60)
+      .inGear(5, 80, -3)
+      .cruise(5, 10)
+      .inGear(4, 60, -3)
+      .inGear(3, 40, -3)
+      .stop(3);
+  }
+
+  /** Numeric gears shown once a state has lasted 800 ms: right, wrong, and hidden counts. */
+  function score(drive: Drive, estimates: readonly GearEstimate[]) {
+    const tally = { right: 0, wrong: [] as string[], hidden: 0 };
+    let since = 0;
+    drive.samples.forEach((x, i) => {
+      if (i === 0 || x.truth !== drive.samples[i - 1]?.truth) since = x.at;
+      if (typeof x.truth !== 'number' || x.at - since < 800) return;
+      const shown = estimates[i]?.gear;
+      if (shown === null || shown === undefined) tally.hidden++;
+      else if (shown === x.truth) tally.right++;
+      else tally.wrong.push(`${x.truth} shown as ${shown} at ${x.speedKph} km/h`);
+    });
+    return tally;
+  }
+
+  it('numbers an automatic from 2nd when 1st never forms a cluster', () => {
+    const drive = autoHighwayDrive(
+      autoCityDrive(new Drive({ ratios: SIX_SPEED, seed: 5, converterSlip: slip }), 6),
+    );
+    const { state, estimates } = runDrive(drive, AUTO_LEARNING);
+    // The converter keeps 1st out of the histogram: the highest learned ratio is 2nd gear.
+    expectRatiosNear(state.learnedRatios, SIX_SPEED.slice(1), 0.07);
+    const { right, wrong, hidden } = score(drive, estimates);
+    expect(wrong).toEqual([]);
+    expect(right).toBeGreaterThan(2 * hidden);
+  });
+
+  it('shows nothing on an automatic until an upshift has anchored the numbering', () => {
+    // Persisted from an earlier drive: 2nd…6th. Nothing this session proves which is which.
+    const state = createGearState([72, 48, 35.5, 28, 23]);
+    const { estimates } = run(steady(T0, 20, 100, 50, 35.5), AUTO_LEARNING, state);
+    expect(new Set(gears(estimates))).toEqual(new Set([null]));
+  });
+
+  it('never numbers learned gears above a gap', () => {
+    // An automatic's first publication with 3rd missing: 2nd, 4th, 5th, 6th.
+    const upshifts: Array<[number, number]> = [
+      [128, 72.6],
+      [128, 72.9],
+    ];
+    const learner = { ...createGearLearner(), upshifts };
+    const state: GearState = { ...createGearState([72.3, 35.4, 28, 23]), learner };
+    expect(gears(run(steady(T0, 10, 100, 30, 72.3), AUTO_LEARNING, state).estimates)).toContain(2);
+    const inFourth = gears(run(steady(T0, 20, 100, 50, 35.4), AUTO_LEARNING, state).estimates);
+    expect(new Set(inFourth)).toEqual(new Set([null]));
+  });
+
+  it('never shows a skipped gear’s neighbours with shifted numbers (manual 1 → 2 → 4)', () => {
+    const drive = new Drive({ ratios: SIX_SPEED, seed: 11 });
+    for (let i = 0; i < 4; i++) {
+      drive.launch(24).shift(2).inGear(2, 45, 5).shift(4).inGear(4, 70, 2).cruise(4, 30);
+      drive.shift(5).inGear(5, 90, 2).cruise(5, 20).shift(6).inGear(6, 110, 1.5).cruise(6, 30);
+      drive.shift(4).inGear(4, 50, -3).stop(4);
+    }
+    const { state, estimates } = runDrive(drive, LEARNING);
+    expectRatiosNear(state.learnedRatios, [118, 68, 35, 28, 23]);
+    const { right, wrong } = score(drive, estimates);
+    expect(wrong).toEqual([]);
+    expect(right).toBeGreaterThan(0); // 1st and 2nd are still shown
+  });
+
+  it('never shows an inferred N on an automatic', () => {
+    const auto = testVehicle({ transmission: 'automatic', gearRatiosRpmPerKph: [...SIX_SPEED] });
+    // Between 1st and 2nd: converter slip or a shift in progress, never neutral in D.
+    const between = steady(T0, 10, 100, 30, 92);
+    expect(new Set(gears(run(between, auto).estimates))).toEqual(new Set([null]));
+    expect(run(between, MANUAL).state.estimate.gear).toBe('N');
+  });
+
+  describe('gaplessPrefix', () => {
+    const GEARBOXES: Record<string, number[]> = {
+      'ZF 8HP': [4.714, 3.143, 2.106, 1.667, 1.285, 1.0, 0.839, 0.667],
+      'Ford 10R80': [4.696, 2.985, 2.146, 1.769, 1.52, 1.275, 1.0, 0.854, 0.689, 0.636],
+      'GM 4L60E': [3.059, 1.625, 1.0, 0.696],
+      'Toyota R150': [3.83, 2.06, 1.39, 1.0, 0.85],
+      'Mazda MX-5 ND': [5.087, 2.991, 2.035, 1.594, 1.286, 1.0],
+      'test six-speed': [...SIX_SPEED],
+    };
+
+    it.each(Object.entries(GEARBOXES))('accepts a complete %s', (_, ratios) => {
+      expect(gaplessPrefix(ratios)).toBe(ratios.length);
+    });
+
+    it('stops before a missing low gear, with or without 1st', () => {
+      const withoutThird = SIX_SPEED.filter((r) => r !== 46);
+      expect(gaplessPrefix(withoutThird)).toBe(2);
+      expect(gaplessPrefix(withoutThird.slice(1))).toBe(1);
+      expect(gaplessPrefix([72.3, 35.4, 28, 23])).toBe(1);
+      const eightSpeed = GEARBOXES['ZF 8HP'] ?? [];
+      expect(gaplessPrefix(eightSpeed.filter((_, i) => i !== 2).slice(1))).toBe(1);
+    });
+  });
+
+  describe('learnedNumbering', () => {
+    const ladder = [118, 68, 46, 35, 28, 23];
+    const withUpshifts = (after: number) => ({
+      ...createGearLearner(),
+      upshifts: [
+        [128, after],
+        [128, after],
+      ] as Array<[number, number]>,
+    });
+
+    it('anchors an automatic by the ratio after the first upshift (2nd gear)', () => {
+      expect(learnedNumbering(ladder, 'automatic', withUpshifts(70))).toEqual({
+        firstGear: 1,
+        proven: 6,
+      });
+      expect(learnedNumbering(ladder.slice(1), 'automatic', withUpshifts(70))).toEqual({
+        firstGear: 2,
+        proven: 5,
+      });
+      // No upshift seen, or one that matches neither of the two highest ratios: unproven.
+      expect(learnedNumbering(ladder, 'automatic', createGearLearner()).proven).toBe(0);
+      expect(learnedNumbering(ladder.slice(2), 'automatic', withUpshifts(70)).proven).toBe(0);
+      expect(learnedNumbering(ladder, 'automatic', withUpshifts(47)).proven).toBe(0);
+    });
+
+    it('anchors a manual by its launch ratio (1st gear), trusting the ladder until then', () => {
+      const launched = { ...createGearLearner(), launchRatios: [117] };
+      expect(learnedNumbering(ladder, 'manual', launched)).toEqual({ firstGear: 1, proven: 6 });
+      expect(learnedNumbering(ladder, 'manual', createGearLearner())).toEqual({
+        firstGear: 1,
+        proven: 6,
+      });
+      // A ratio above the launch ratio (e.g. learned as an automatic) makes it unproven.
+      expect(learnedNumbering([150, ...ladder], 'dct', launched).proven).toBe(0);
+    });
   });
 });

@@ -121,6 +121,32 @@ export function useArmed(timeoutMs = 4000): [boolean, () => void, () => void] {
   return [armed, () => setArmed(true), () => setArmed(false)];
 }
 
+export interface RowKeys {
+  /** One stable key per row, in row order. */
+  keys: readonly number[];
+  /** Call just before removing row `index`, so the rows after it keep their keys. */
+  remove: (index: number) => void;
+}
+
+/**
+ * Stable keys for the rows of an editable list that has no ids of its own. Keyed by index, a
+ * removed row's component (and state such as an armed "Remove") would be handed to the row
+ * that moves up into its place. Rows added or dropped from outside (a rebase, Discard) are
+ * matched at the end of the list.
+ */
+export function useRowKeys(length: number): RowKeys {
+  const next = useRef(0);
+  const keys = useRef<number[]>([]);
+  while (keys.current.length < length) keys.current.push(next.current++);
+  if (keys.current.length > length) keys.current = keys.current.slice(0, length);
+  return {
+    keys: keys.current,
+    remove: (index) => {
+      keys.current = keys.current.filter((_, i) => i !== index);
+    },
+  };
+}
+
 /** Copy text; falls back to a hidden textarea for WebViews without the async clipboard API. */
 export async function copyText(text: string): Promise<boolean> {
   try {

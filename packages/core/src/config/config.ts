@@ -201,7 +201,9 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
       highwayDwellMs: 10_000,
       stationaryKph: 2,
       parkedAfterMs: 120_000,
-      engineOffParkedAfterMs: 30_000,
+      // Automatic start-stop keeps the engine off for a whole red light (often 45–120 s, up to
+      // about 3 min); switching the ignition off is caught sooner, by the ECU falling silent.
+      engineOffParkedAfterMs: 180_000,
     },
     speedLimitSign: 'vienna',
     mediaToastMs: 5000,

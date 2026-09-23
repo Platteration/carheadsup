@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# carheadsup: lint the deployment kit. Runs anywhere (no root, changes nothing):
+# carheadsup: lint and test the deployment kit. Runs anywhere (no root, changes nothing):
 #
 #   deploy/check.sh
 #
-# - bash -n on every script, and shellcheck when it is installed;
+# - bash -n on every script (and on the tests in test/), and shellcheck when it is installed;
+# - the behaviour tests in test/ (stub commands in a temporary directory, about 15 s);
 # - systemd-analyze verify on the units when available (complaints about binaries or units that
 #   only exist on the Pi, such as cage, rfcomm or bluetooth.service, are expected and filtered);
 # - xmllint on the Avahi service file when available.
@@ -24,15 +25,15 @@ skip() { printf 'skip  %s\n' "$*"; }
 
 check_scripts() {
   local script
-  for script in "${DEPLOY_DIR}"/*.sh; do
+  for script in "${DEPLOY_DIR}"/*.sh "${DEPLOY_DIR}"/test/*.sh; do
     if bash -n "$script"; then
-      pass "bash -n $(basename -- "$script")"
+      pass "bash -n ${script#"${DEPLOY_DIR}"/}"
     else
-      fail "bash -n $(basename -- "$script")"
+      fail "bash -n ${script#"${DEPLOY_DIR}"/}"
     fi
   done
   if command -v shellcheck >/dev/null 2>&1; then
-    if shellcheck "${DEPLOY_DIR}"/*.sh; then
+    if shellcheck "${DEPLOY_DIR}"/*.sh "${DEPLOY_DIR}"/test/*.sh; then
       pass "shellcheck"
     else
       fail "shellcheck"
@@ -40,6 +41,17 @@ check_scripts() {
   else
     skip "shellcheck (not installed)"
   fi
+}
+
+check_tests() {
+  local test
+  for test in "${DEPLOY_DIR}"/test/*-test.sh; do
+    if bash "$test"; then
+      pass "$(basename -- "$test")"
+    else
+      fail "$(basename -- "$test")"
+    fi
+  done
 }
 
 check_units() {
@@ -74,6 +86,7 @@ check_avahi() {
 
 main() {
   check_scripts
+  check_tests
   check_units
   check_avahi
   if ((failures > 0)); then

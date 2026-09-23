@@ -2,6 +2,8 @@ import { PROTOCOL_VERSION } from '@carheadsup/core';
 import type { TripRecord } from '@carheadsup/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { HUD_VERSION } from '../../src/meta.ts';
+import { createSimulation } from '../../src/sim/index.ts';
+import { SIM_PHONE_DEVICE } from '../../src/sim/phone.ts';
 import { PHONE_CLOSE } from '../../src/ws/phone-channel.ts';
 import { FakeSimulation, TestSocket, startTestServer, waitFor } from '../helpers.ts';
 import type { TestServer, TestServerOptions } from '../helpers.ts';
@@ -141,13 +143,14 @@ describe('/ws/phone handshake', () => {
 
   it('replaces the active phone with a newer session without flapping the link', async () => {
     const t = await start();
-    const first = await connected(t, { device: 'Old phone' });
+    const first = await connected(t, { device: 'Pixel 9', appVersion: '1.2.3' });
     const links: boolean[] = [];
     const unsubscribe = t.server.engine.onFrame((frame) => links.push(frame.status.phone));
-    const second = await connected(t, { device: 'New phone' });
+    // The same phone reconnects (e.g. after roaming) while its old socket is still open.
+    const second = await connected(t, { device: 'Pixel 9', appVersion: '1.2.4' });
     expect(await first.closed).toBe(PHONE_CLOSE.replaced);
     expect(first.closeReason).toBe('replaced');
-    expect(t.server.engine.state.phone).toMatchObject({ connected: true, deviceName: 'New phone' });
+    expect(t.server.engine.state.phone).toMatchObject({ connected: true, appVersion: '1.2.4' });
     // Frames composed across the switch-over never showed the phone as disconnected.
     await waitFor(() => links.length >= 3, 2000, 'frames');
     unsubscribe();
@@ -155,6 +158,64 @@ describe('/ws/phone handshake', () => {
     // Messages from the new session are processed.
     second.send({ t: 'road', speedLimitKph: 50, source: 'osm' });
     await waitFor(() => t.server.engine.state.road?.speedLimitKph === 50, 1000, 'road update');
+  });
+
+  it('refuses another phone while one is connected', async () => {
+    const t = await start();
+    const driver = await connected(t, { device: 'Driver Pixel' });
+    const passenger = phone(t);
+    await passenger.opened;
+    passenger.send(hello({ device: 'Passenger iPhone' }));
+    expect(await passenger.closed).toBe(PHONE_CLOSE.busy);
+    expect(passenger.closeReason).toBe('another phone is connected');
+    expect(driver.ws.readyState).toBe(driver.ws.OPEN);
+    expect(t.server.engine.state.phone).toMatchObject({
+      connected: true,
+      deviceName: 'Driver Pixel',
+    });
+  });
+
+  it('clears what the previous phone showed when a different phone connects', async () => {
+    const t = await start();
+    const driver = await connected(t, { device: 'Driver Pixel' });
+    driver.send({
+      t: 'nav',
+      active: true,
+      source: 'maps',
+      maneuver: { type: 'right' },
+      distanceM: 800,
+      street: 'Exit 12',
+    });
+    driver.send({ t: 'call', id: 'c1', state: 'active', callerName: 'Boss', number: null });
+    driver.send({ t: 'media', playing: true, title: 'Song', artist: 'Band' });
+    driver.send({ t: 'hazards', items: [{ id: 'h1', type: 'police', distanceM: 900 }] });
+    await waitFor(() => t.server.engine.state.hazards.length === 1, 1000, 'driver data');
+    driver.close();
+    await waitFor(() => !t.server.engine.state.phone.connected, 2000, 'driver gone');
+    // Within the 30 s grace the driver's route would still be shown…
+    expect(t.server.engine.state.nav).not.toBeNull();
+    // …but not once another phone has taken over.
+    const passenger = await connected(t, { device: 'Passenger iPhone' });
+    passenger.send({ t: 'media', playing: true, title: 'Other', artist: 'Artist' });
+    await waitFor(() => t.server.engine.state.media?.info.title === 'Other', 1000, 'media');
+    const state = t.server.engine.state;
+    expect(state.phone).toMatchObject({ connected: true, deviceName: 'Passenger iPhone' });
+    expect(state.nav).toBeNull();
+    expect(state.call).toBeNull();
+    expect(state.hazards).toEqual([]);
+    expect(t.server.engine.frame.call).toBeNull();
+  });
+
+  it('keeps the data of a phone that reconnects', async () => {
+    const t = await start();
+    const first = await connected(t, { device: 'Pixel 9' });
+    first.send({ t: 'nav', active: true, source: 'maps', street: 'Elm St', distanceM: 300 });
+    await waitFor(() => t.server.engine.state.nav !== null, 1000, 'nav');
+    first.close();
+    await waitFor(() => !t.server.engine.state.phone.connected, 2000, 'disconnected');
+    await connected(t, { device: 'Pixel 9' });
+    await waitFor(() => t.server.engine.state.phone.connected, 1000, 'reconnected');
+    expect(t.server.engine.state.nav?.info.street).toBe('Elm St');
   });
 
   it('reports the phone disconnected when its socket closes', async () => {
@@ -333,6 +394,55 @@ describe('/ws/phone messages', () => {
       action: 'accept',
     });
     expect(sim.delivered).toContainEqual({ t: 'call-action', callId: 'c2', action: 'accept' });
+  });
+
+  it('tells the simulation when a real phone comes and goes', async () => {
+    const sim = new FakeSimulation();
+    const t = await start({ sim: true, simulation: sim });
+    const first = await connected(t, { device: 'Pixel' });
+    await connected(t, { device: 'Pixel' }); // same phone again: no change
+    expect(await first.closed).toBe(PHONE_CLOSE.replaced);
+    expect(sim.realPhone).toEqual([true]);
+    for (const socket of sockets) socket.close();
+    await waitFor(() => sim.realPhone.length === 2, 2000, 'phone gone');
+    expect(sim.realPhone).toEqual([true, false]);
+  });
+
+  it('with the real simulator, lets a real phone take over the phone state and hand it back', async () => {
+    const t = await start({
+      sim: true,
+      createSimulation: (config, deps) => createSimulation(config, deps),
+    });
+    await waitFor(() => t.server.engine.state.phone.connected, 2000, 'simulated phone');
+    const simNav = await fetch(`${t.base}/api/sim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: { kind: 'nav-start' } }),
+    });
+    expect(simNav.status).toBe(200);
+    await waitFor(() => t.server.engine.state.nav !== null, 2000, 'simulated guidance');
+    const simulatedStreet = t.server.engine.state.nav?.info.street;
+
+    const real = await connected(t, { device: 'Pixel' });
+    real.send({ t: 'nav', active: true, source: 'maps', street: 'Real Street', distanceM: 400 });
+    await waitFor(() => t.server.engine.state.nav?.info.street === 'Real Street', 1000, 'real');
+    // The simulated phone updates its guidance every second; it must not take it back.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(t.server.engine.state.nav?.info.street).toBe('Real Street');
+    expect(t.server.engine.state.phone).toMatchObject({ connected: true, deviceName: 'Pixel' });
+
+    real.close();
+    await waitFor(
+      () => t.server.engine.state.phone.deviceName === SIM_PHONE_DEVICE,
+      2000,
+      'simulated phone back',
+    );
+    expect(t.server.engine.state.phone.connected).toBe(true);
+    await waitFor(
+      () => t.server.engine.state.nav?.info.street === simulatedStreet,
+      2000,
+      'simulated guidance back',
+    );
   });
 
   it('closes the phone with 1001 on shutdown', async () => {

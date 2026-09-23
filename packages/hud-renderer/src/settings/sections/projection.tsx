@@ -48,7 +48,7 @@ export function ProjectionSection({ root, live, onRetry }: ProjectionSectionProp
           scope={projection}
           k="showGrid"
           label="Show calibration grid on the HUD"
-          hint="Draws a grid instead of the HUD so you can line up the corners on the glass."
+          hint="Draws a grid instead of the HUD so you can line up the corners on the glass. Shown only while the car is stopped or parked; warnings still appear on top."
         />
       </Card>
       <Card>

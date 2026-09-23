@@ -1,5 +1,8 @@
 package dev.carheadsup.protocol.api
 
+import dev.carheadsup.protocol.HudMaintenanceDue
+import dev.carheadsup.protocol.MaintenanceDueItem
+import dev.carheadsup.protocol.MaintenanceDueStatus
 import dev.carheadsup.protocol.MaintenanceStatusKind
 import dev.carheadsup.protocol.ProtocolJson
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -27,6 +30,27 @@ class ApiTest {
         maxSpeedKph = 95.0, avgMovingSpeedKph = 36.0, cost = cost, currency = currency,
         startOdometerKm = null, endOdometerKm = null,
     )
+
+    @Nested
+    inner class MaintenanceAlerts {
+        private val oil = MaintenanceDueItem("oil", "Oil change", MaintenanceDueStatus.DUE_SOON, remainingKm = 400.0)
+
+        @Test
+        fun `a reminder alerts once, not again on every reconnect (android-19)`() {
+            val gate = MaintenanceAlertGate(quietMs = 20 * 3_600_000L)
+            assertEquals(listOf(oil), gate.toAlert(HudMaintenanceDue(listOf(oil)), 0))
+            // The HUD pushes the same list after each welcome.
+            assertEquals(emptyList<MaintenanceDueItem>(), gate.toAlert(HudMaintenanceDue(listOf(oil)), 60_000))
+            assertEquals(
+                emptyList<MaintenanceDueItem>(),
+                gate.toAlert(HudMaintenanceDue(listOf(oil.copy(remainingKm = 350.0))), 3_600_000),
+            )
+            // Overdue is news; so is a new day.
+            val overdue = oil.copy(status = MaintenanceDueStatus.OVERDUE)
+            assertEquals(listOf(overdue), gate.toAlert(HudMaintenanceDue(listOf(overdue)), 7_200_000))
+            assertEquals(listOf(oil), gate.toAlert(HudMaintenanceDue(listOf(oil)), 21 * 3_600_000L))
+        }
+    }
 
     @Nested
     inner class Models {

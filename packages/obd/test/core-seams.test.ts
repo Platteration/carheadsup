@@ -25,6 +25,7 @@ import { Elm327 } from '../src/elm327.ts';
 import { ObdPoller } from '../src/poller.ts';
 import { Elm327Emulator, SIM_TPMS_PIDS } from '../src/sim/elm327-emulator.ts';
 import { GEAR_COUNT, rpmPerKph } from '../src/sim/model.ts';
+import { DEMO_SCENARIO } from '../src/sim/scenario.ts';
 import { VehicleSimulator } from '../src/sim/vehicle-sim.ts';
 
 const DRIVER = { timeoutMs: 80, settleMs: 5, resetTimeoutMs: 300, searchTimeoutMs: 500 } as const;
@@ -156,6 +157,12 @@ describe('ObdPoller events → reducer → composer', () => {
 // ---------------------------------------------------------------------------------------------
 
 const MODEL_RATIOS = Array.from({ length: GEAR_COUNT }, (_, i) => rpmPerKph(i + 1));
+/**
+ * One loop of the demo drive. Its parked step follows the HUD's engine-off parking delay, so
+ * the loop length depends on the core config; scoring over whole loops keeps the amount of
+ * driving scored independent of it.
+ */
+const DEMO_LOOP_S = DEMO_SCENARIO.reduce((sum, step) => sum + step.durationS, 0);
 
 interface Agreement {
   /** Samples scored: engine running, ≥ 20 km/h, and ≥ 2 s since the simulator last shifted. */
@@ -253,7 +260,11 @@ describe('simulator drivetrain → gear estimator', () => {
   });
 
   it('learns the simulated ratios and then tracks the gear with them', () => {
-    const { gear, agreement } = driveScenario(vehicleWith('automatic', null), 900, 600);
+    const { gear, agreement } = driveScenario(
+      vehicleWith('automatic', null),
+      600 + DEMO_LOOP_S,
+      600,
+    );
     const learned = gear.learnedRatios;
     expect(learned).toHaveLength(GEAR_COUNT);
     learned?.forEach((ratio, i) => {

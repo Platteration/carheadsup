@@ -446,6 +446,23 @@ describe('LightSensorSource', () => {
     expect(clock.pendingTimers).toBe(0);
   });
 
+  it('keeps reporting when the wall clock steps back during a measurement', async () => {
+    const clock = new FakeClock();
+    const bus = new FakeI2cBus();
+    fakeBh1750(bus, 0x23, () => 500);
+    const src = source('bh1750', async () => bus);
+    const recording = recordingContext(clock);
+    // Timers run on a monotonic base; only the wall clock (`now`) steps.
+    let offset = 0;
+    const ctx = { ...recording.ctx, now: () => clock.now() + offset };
+    await src.start(ctx);
+    await clock.advance(0); // initialised: the first measurement completes 190 ms from now
+    offset = -60_000;
+    await clock.advance(1000);
+    expect(recording.ofType('sensor/light').length).toBeGreaterThanOrEqual(3);
+    await src.stop();
+  });
+
   it('applies a new gain without re-initialising the chip, and restarts on a new chip or bus', async () => {
     const clock = new FakeClock();
     const buses: FakeI2cBus[] = [];

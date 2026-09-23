@@ -69,7 +69,13 @@
   gap: calc(var(--u) * 2);
 }
 
+/* On the dashboard the cue and banners sit side by side rather than stacked. */
+.hud-diag__top > .hud-lead {
+  display: contents;
+}
+
 .hud-diag__top > *,
+.hud-diag__top > .hud-lead > *,
 .hud-diag__bottom > * {
   flex: 0 1 calc(var(--u) * 90);
   min-width: 0;

@@ -8,6 +8,7 @@ import { accessSync, constants as fsConstants } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import type { Readable } from 'node:stream';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
+import { monotonicView } from '../clock.ts';
 import { Backoff, errorCode, errorMessage } from './util.ts';
 
 /** The part of `ChildProcess` the HUD uses; tests substitute an EventEmitter-based fake. */
@@ -196,7 +197,8 @@ export class ProcessSupervisor {
   private failures = 0;
 
   constructor(options: SupervisorOptions) {
-    this.options = options;
+    // Run times decide the restart back-off: a wall-clock step back must not shorten them.
+    this.options = { ...options, now: monotonicView(options.now) };
     this.backoff = new Backoff(options.initialBackoffMs ?? 1000, options.maxBackoffMs ?? 60_000);
   }
 

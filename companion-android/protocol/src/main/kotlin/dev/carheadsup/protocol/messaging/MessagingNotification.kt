@@ -1,8 +1,10 @@
 package dev.carheadsup.protocol.messaging
 
 import dev.carheadsup.protocol.PhoneMessage
-import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.Locale
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /** One entry of a `MessagingStyle` notification. */
 public data class StyleMessage(
@@ -34,6 +36,8 @@ public data class MessagingNotificationContent(
     val messages: List<StyleMessage> = emptyList(),
     /** The user's own display name in the conversation (MessagingStyle user). */
     val selfName: String? = null,
+    /** The notification offers an inline reply (an action with a RemoteInput). */
+    val hasReplyAction: Boolean = false,
 )
 
 /**
@@ -41,7 +45,10 @@ public data class MessagingNotificationContent(
  * reaches the HUD, via [toPhoneMessage].
  */
 public class IncomingMessage(
-    /** Stable per message: re-posts of the same notification state get the same id. */
+    /**
+     * Stable per message: re-posts of the same notification state get the same id. Keyed with a
+     * secret that never leaves the phone, so it reveals nothing about the message.
+     */
     public val id: String,
     public val sender: String,
     public val app: String?,
@@ -68,24 +75,29 @@ public class IncomingMessage(
  * - Group summaries ("5 messages from 3 chats"), ongoing notifications ("Checking for new
  *   messages…", active calls), calls and navigation are ignored.
  * - A notification counts as a message when it uses `MessagingStyle`, has category `msg`, or
- *   comes from a known messaging app.
+ *   comes from a known messaging app and offers an inline reply. Missed calls, reminders,
+ *   events, status and promotional notifications are not messages, whoever posts them.
  * - The sender is the author of the latest MessagingStyle message ("Alice @ Family" in group
  *   chats), else the title with counters like " (2 messages)" removed. A latest message written
  *   by the user (a reply shown in the notification) yields nothing.
  * - Notifications whose latest message is older than [maxAgeMs] are ignored, so reconnecting the
  *   listener does not replay old messages.
+ * - Ids are an HMAC keyed with [idKey] (random per process by default): an unkeyed hash of app,
+ *   chat, time, sender and text could be reversed for short texts by whoever sees the id.
  */
 public class MessagingNotificationExtractor(
     private val ignoredPackages: Set<String> = emptySet(),
     private val maxAgeMs: Long = 2 * 60_000L,
     private val messagingPackages: Set<String> = KNOWN_MESSAGING_APPS,
+    private val idKey: ByteArray = PROCESS_ID_KEY,
 ) {
     public fun extract(content: MessagingNotificationContent, nowMs: Long): IncomingMessage? {
         if (content.packageName in ignoredPackages) return null
         if (content.isGroupSummary || content.isOngoing) return null
         if (content.category in NON_MESSAGE_CATEGORIES) return null
         val hasStyle = content.messages.isNotEmpty()
-        if (!hasStyle && content.category != CATEGORY_MESSAGE && content.packageName !in messagingPackages) return null
+        val knownAppMessage = content.packageName in messagingPackages && content.hasReplyAction
+        if (!hasStyle && content.category != CATEGORY_MESSAGE && !knownAppMessage) return null
 
         val latest = content.messages.maxByOrNull { it.timestampMs }
         val receivedAt = latest?.timestampMs?.takeIf { it > 0 } ?: content.postTimeMs
@@ -115,7 +127,7 @@ public class MessagingNotificationExtractor(
 
         val id =
             "msg-" +
-                digest(
+                keyedDigest(
                     content.packageName,
                     content.key,
                     (latest?.timestampMs ?: 0L).toString(),
@@ -131,15 +143,30 @@ public class MessagingNotificationExtractor(
         )
     }
 
+    /** First 80 bits of HMAC-SHA256([idKey], parts), as hex. */
+    private fun keyedDigest(vararg parts: String): String {
+        val mac = Mac.getInstance(ID_MAC)
+        mac.init(SecretKeySpec(idKey, ID_MAC))
+        for (part in parts) {
+            mac.update(part.toByteArray(Charsets.UTF_8))
+            mac.update(0)
+        }
+        return mac.doFinal().take(10).joinToString("") { String.format(Locale.ROOT, "%02x", it) }
+    }
+
     public companion object {
         public const val CATEGORY_MESSAGE: String = "msg"
+        private const val ID_MAC = "HmacSHA256"
         private const val MAX_SPOKEN_CHARS = 500
 
         private val NON_MESSAGE_CATEGORIES =
             setOf(
-                "call", "navigation", "transport", "service", "progress", "sys", "alarm", "email", "stopwatch",
-                "location_sharing",
+                "call", "missed_call", "navigation", "transport", "service", "progress", "sys", "alarm", "email",
+                "stopwatch", "location_sharing", "reminder", "event", "recommendation", "status", "promo", "err",
             )
+
+        /** Id key shared by the extractors of this process (so ids stay stable across listener restarts). */
+        private val PROCESS_ID_KEY: ByteArray = ByteArray(32).also(SecureRandom()::nextBytes)
 
         /** Package names of common messaging apps (used when an app sets no category or style). */
         public val KNOWN_MESSAGING_APPS: Set<String> =
@@ -172,14 +199,6 @@ public class MessagingNotificationExtractor(
 
         internal fun stripCounters(title: String): String = title.replace(COUNTER_SUFFIX, "")
 
-        private fun digest(vararg parts: String): String {
-            val sha = MessageDigest.getInstance("SHA-256")
-            for (part in parts) {
-                sha.update(part.toByteArray(Charsets.UTF_8))
-                sha.update(0)
-            }
-            return sha.digest().take(10).joinToString("") { String.format(Locale.ROOT, "%02x", it) }
-        }
     }
 }
 

@@ -64,10 +64,11 @@ background behind that reflection is the sky. Hence:
 - **IPS.** You look at the panel at a steep angle via the reflection; TN panels lose contrast and
   shift colour there.
 - **Backlight control.** At night the image must be dim, and an LCD's "black" still glows: without
-  dimming the backlight you see a faint grey rectangle on the windshield. The HUD dims the page
-  in any case, and writes the brightness to the panel's backlight when Linux exposes one
-  (`/sys/class/backlight/*`, typical for DSI panels; see `--backlight`). A panel with a
-  hardware dimmer (PWM input or knob) works too.
+  dimming the backlight you see a faint grey rectangle on the windshield. When Linux exposes the
+  panel's backlight (`/sys/class/backlight/*`, typical for DSI panels; see `--backlight`), the
+  HUD writes the brightness to it and draws the page at full brightness; otherwise it dims the
+  page itself. A backlight device that appears after the HUD started (driver or udev rule late at
+  boot) is picked up within 10 s. A panel with a hardware dimmer (PWM input or knob) works too.
 - **Size and resolution**: 5–7" suits most dashboards. The layouts are tested at **800×480**,
   **1024×600** and the wide **1280×480** "bar" format (about 8.8"), which gives room for widgets
   left and right of the speed; the developer console also previews 1920×720 (12.3" bars).
@@ -170,6 +171,14 @@ leave the car, without corrupting the SD card and without draining the battery.
     supercapacitors: lithium cells do not like a car interior in summer.
   - A **read-only root file system** makes an unclean power cut harmless for the OS; trips and
     settings are written crash-safely anyway ([architecture](architecture.md#persistence)).
+
+  On the stop signal the HUD saves its state — odometer, service records and the trip in
+  progress — before anything else, then shuts its parts down (a few seconds; systemd allows it
+  30 s). Give the controller or supercap enough time for the whole shutdown. A trip only ends by
+  itself after 5 minutes without the engine (`trip.endAfterEngineOffMs`, so a fuel stop does not
+  split it), long after such a power-down: the saved trip is closed at the next start (ending at
+  its last activity) and then appears in the trip log and on the phone — or continued, if the
+  car was off only briefly.
 - **Don't drain the battery.** Never power the Pi from permanent 12 V without a controller that
   switches it off: a Pi 4 idling at 2–3 W takes roughly 5 Ah from the battery per day. A halted
   Pi 4 or 5 still draws power unless the bootloader is told to switch off completely on halt
@@ -178,9 +187,13 @@ leave the car, without corrupting the SD card and without draining the battery.
 ## Clock
 
 The Raspberry Pi has no battery-backed clock (the Pi 5 has one, but only with its optional
-battery fitted). Without network time it boots with the time it last shut down. The HUD tolerates
-that — its internal timing never goes backwards — but the clock widget, trip timestamps,
-date-based service reminders and sun-based night mode are only as right as the system time.
+battery fitted). Without network time it boots with the time it last shut down, and network time
+arriving later steps the clock — forwards, or backwards if a real-time clock ran fast. The HUD's
+own timing survives both: its time never goes backwards and never stands still, so values still
+expire on time (after a backward step it runs slightly slow until the system clock has caught
+up, and the clock widget can be ahead by up to the size of the step meanwhile). But the clock
+widget, trip timestamps, date-based service reminders and sun-based night mode are only as right
+as the system time.
 
 - **Network time via the phone**: if the Pi joins the phone's hotspot (instead of being the
   hotspot), `systemd-timesyncd` sets the time at every start. See
@@ -278,6 +291,9 @@ decides and sends the result as **newline-delimited JSON over UDP** to the HUD's
   disconnected after **2 s** without a valid message — send a heartbeat at least once a second
   when there is nothing to report.
 - Up to 8 messages per datagram, datagrams up to 4 KiB, at most 50 datagrams per second.
+- The HUD accepts these datagrams from **any** device that can reach the port — it cannot tell
+  the module from a passenger's phone on the same Wi-Fi. Restrict the port to the module with a
+  firewall rule ([how](protocol.md#adas-udp-feed)), or put the module on a link of its own.
 
 Quick tests from any Linux machine on the car's network (`10.42.0.1` is the HUD on its own
 hotspot):

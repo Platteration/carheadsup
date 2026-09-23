@@ -13,14 +13,14 @@ export const MAX_BRIGHTNESS_OFFSET = 0.5;
 
 /**
  * Driver input. Call handling is a side effect (see `deriveEffects`): while a call can be
- * accepted, 'primary' changes nothing else; while it can be declined or hung up, neither does
- * 'secondary'. Otherwise 'primary' acknowledges the top dismissible alert on screen, and
- * 'secondary' dismisses the toast on screen or else that alert.
+ * accepted (phone connected), 'primary' changes nothing else; while it can be declined or hung
+ * up, neither does 'secondary'. Otherwise 'primary' acknowledges the top dismissible alert on
+ * screen, and 'secondary' dismisses the toast on screen or else that alert.
  */
 export function applyInput(state: HudState, action: InputAction, config: HudConfig): HudState {
   const { now } = state;
   const touched: HudState = { ...state, ui: { ...state.ui, lastInputAt: now } };
-  const { canAccept, canDecline } = callControls(state.call);
+  const { canAccept, canDecline } = callControls(state.call, state.phone.connected);
   switch (action) {
     case 'primary':
       return canAccept ? touched : dismissTopAlert(touched, config);

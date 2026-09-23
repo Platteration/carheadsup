@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { dismissAlert, evaluateAlerts } from '../../src/alerts/engine.ts';
 import {
   FUEL_LOW_HYSTERESIS_PCT,
+  FUEL_VERY_LOW_RANGE_KM,
   ICE_RISK_REARM_C,
   ICE_RISK_SHOW_MS,
   OBD_LINK_ALERT_AFTER_MS,
+  TPMS_CRITICAL_FRACTION,
   TPMS_HYSTERESIS_KPA,
 } from '../../src/alerts/rules.ts';
 import { isAlertLive } from '../../src/alerts/visibility.ts';
@@ -373,6 +375,39 @@ describe('fuel low', () => {
     b.at(T0 + 400 + 120_001);
     expect(b.get('fuel-low')).toBeUndefined();
   });
+
+  it('comes back as a warning when the tank runs nearly dry after a dismissal (regression: core-9)', () => {
+    const b = new Bench();
+    b.at(T0 + 100, { fuelLevel: 11 }, withFuel(11, null));
+    b.dismiss('fuel-low');
+    b.at(T0 + 200, { fuelLevel: 7 }, withFuel(7, null));
+    expect(b.live('fuel-low')).toBe(false);
+    b.at(T0 + 300, { fuelLevel: 6 }, withFuel(6, null));
+    expect(b.get('fuel-low')).toMatchObject({
+      severity: 'warning',
+      title: 'FUEL VERY LOW',
+      dismissedAt: null,
+      dismissible: true,
+    });
+    expect(b.live('fuel-low')).toBe(true);
+    // Hysteresis: it stays a warning until clearly above half the threshold again.
+    b.at(T0 + 400, { fuelLevel: 7 }, withFuel(6 + FUEL_LOW_HYSTERESIS_PCT, null));
+    expect(b.get('fuel-low')?.severity).toBe('warning');
+    b.at(T0 + 500, { fuelLevel: 9 }, withFuel(8.5, null));
+    expect(b.get('fuel-low')?.severity).toBe('caution');
+  });
+
+  it('also escalates on a short remaining range', () => {
+    const b = new Bench();
+    b.at(T0 + 100, { fuelLevel: 11 }, withFuel(11, 60));
+    expect(b.get('fuel-low')?.severity).toBe('caution');
+    b.at(T0 + 200, { fuelLevel: 10 }, withFuel(10, FUEL_VERY_LOW_RANGE_KM));
+    expect(b.get('fuel-low')).toMatchObject({ severity: 'warning', detail: 'Range 30 km' });
+    b.at(T0 + 300, { fuelLevel: 10 }, withFuel(10, FUEL_VERY_LOW_RANGE_KM + 4));
+    expect(b.get('fuel-low')?.severity).toBe('warning');
+    b.at(T0 + 400, { fuelLevel: 10 }, withFuel(10, FUEL_VERY_LOW_RANGE_KM + 6));
+    expect(b.get('fuel-low')?.severity).toBe('caution');
+  });
 });
 
 describe('maintenance due', () => {
@@ -496,6 +531,29 @@ describe('tyre pressure', () => {
     expect(b.get('tpms')).toBeDefined();
     b.at(T0 + 300, { tirePressureFL: 180 + TPMS_HYSTERESIS_KPA });
     expect(b.get('tpms')).toBeUndefined();
+  });
+
+  it('turns critical when a dismissed low tyre goes on deflating (regression: core-9)', () => {
+    const b = new Bench(tpms);
+    b.at(T0 + 100, { tirePressureFL: 175 });
+    b.dismiss('tpms');
+    b.at(T0 + 200, { tirePressureFL: 140 });
+    expect(b.live('tpms')).toBe(false);
+    b.at(T0 + 300, { tirePressureFL: 90 });
+    expect(b.get('tpms')).toMatchObject({
+      severity: 'critical',
+      title: 'TYRE PRESSURE CRITICAL',
+      detail: 'Front left 90 kPa',
+      dismissible: false,
+      dismissedAt: null,
+    });
+    expect(b.live('tpms')).toBe(true);
+    // Back to a warning only clearly above the critical limit.
+    const criticalKpa = 180 * TPMS_CRITICAL_FRACTION;
+    b.at(T0 + 400, { tirePressureFL: criticalKpa + TPMS_HYSTERESIS_KPA - 1 });
+    expect(b.get('tpms')?.severity).toBe('critical');
+    b.at(T0 + 500, { tirePressureFL: criticalKpa + TPMS_HYSTERESIS_KPA });
+    expect(b.get('tpms')).toMatchObject({ severity: 'warning', title: 'TYRE PRESSURE LOW' });
   });
 
   it('stays silent for vehicles without TPMS', () => {

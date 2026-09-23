@@ -8,7 +8,8 @@ import { callControls } from './selectors.ts';
 /**
  * Side effects implied by the transition `prev --event--> next`. Pure.
  *  - input 'primary' / 'secondary' while a call is ringing → phone/call-action accept / decline
- *    ('secondary' also hangs up a dialing or active call, matching `CallFrame.canDecline`)
+ *    ('secondary' also hangs up a dialing or active call, matching `CallFrame.canDecline`);
+ *    never while the phone is disconnected
  *  - trip.completedCount increased → trip/completed with trip.lastCompleted
  *  - a maintenance item changed into 'due-soon' or 'overdue' → maintenance/due
  *  - odometer crossed a whole km, learned gear ratios changed, or a service was recorded → persist
@@ -24,7 +25,7 @@ export function deriveEffects(
   const effects: HudEffect[] = [];
 
   if (event.type === 'input' && prev.call !== null) {
-    const { canAccept, canDecline } = callControls(prev.call);
+    const { canAccept, canDecline } = callControls(prev.call, prev.phone.connected);
     if (event.action === 'primary' && canAccept) {
       effects.push({ type: 'phone/call-action', callId: prev.call.id, action: 'accept' });
     } else if (event.action === 'secondary' && canDecline) {

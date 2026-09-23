@@ -9,13 +9,17 @@
  *  - medium (~1 s), slow (~5 s) and very slow (~10 s) tiers, earliest-deadline-first within a
  *    budget of extra requests per cycle, so a burst of due PIDs is spread over several cycles
  *    and no PID is ever starved;
- *  - custom PIDs (Torque-style formulas) at their own intervals; battery voltage (AT RV) every
+ *  - custom PIDs (Torque-style formulas) at their own intervals, earliest-deadline-first within
+ *    their own small budget per cycle (a custom PID behind a header costs five adapter round
+ *    trips, so a long list must not hold up the fast tier); battery voltage (AT RV) every
  *    2 s; trouble codes right after connecting and every `dtcIntervalMs`; the VIN once.
  *
  * Service 01 requests carry up to six PIDs on CAN. A PID that keeps answering NO DATA while
  * others answer is backed off exponentially; when nothing answers at all (ignition off) the
- * poller drops to a slow probe instead and reports it on the link. All samples of a cycle
- * are emitted as one `obd/samples` event with a single timestamp from the injected clock.
+ * poller drops to a slow probe instead and reports it on the link. The values a request
+ * returns are emitted as an `obd/samples` event as soon as it completes, stamped with the
+ * injected clock at that moment: a slow request later in the cycle must not make them look
+ * fresher than they are (the HUD server also stamps events on arrival).
  */
 import {
   MODE01_PIDS,
@@ -61,13 +65,19 @@ export interface PollerTuning {
   voltageIntervalMs: number;
   /** Service 01 requests for non-fast PIDs per cycle. */
   extraRequestsPerCycle: number;
+  /** Custom-PID requests per cycle (at least 1). */
+  customRequestsPerCycle: number;
   /** Consecutive NO DATA answers before a PID is backed off. */
   backoffAfterEmpty: number;
   maxBackoffMs: number;
   /** Cycles without any answer before switching to the slow probe. */
   silentAfterCycles: number;
   silentProbeIntervalMs: number;
-  /** Consecutive failed requests (errors, not NO DATA) before giving up on the session. */
+  /**
+   * Consecutive failed requests (errors, not NO DATA) before giving up on the session. Only
+   * an answer from the vehicle resets the count: the adapter answering AT RV says nothing
+   * about the vehicle link.
+   */
   maxConsecutiveErrors: number;
   /** Retry delay after a failed DTC read. */
   dtcRetryMs: number;
@@ -82,6 +92,7 @@ export const DEFAULT_POLLER_TUNING: Readonly<PollerTuning> = Object.freeze({
   verySlowIntervalMs: 10_000,
   voltageIntervalMs: 2000,
   extraRequestsPerCycle: 2,
+  customRequestsPerCycle: 1,
   backoffAfterEmpty: 3,
   maxBackoffMs: 60_000,
   silentAfterCycles: 3,
@@ -160,6 +171,8 @@ export class ObdPoller {
   private pidItems: PidItem[] = [];
   private customItems: CustomItem[] = [];
   private customSignals = new Set<SignalId>();
+  /** The signal list last emitted as `obd/supported`. */
+  private announcedSignals: string | null = null;
   private voltageDueAt = 0;
   private dtcDueAt = 0;
   private lastDtcReadAt: number | null = null;
@@ -224,7 +237,10 @@ export class ObdPoller {
   }): void {
     if (options.customPids) {
       this.setCustomPids(options.customPids);
-      if (this.supported) this.buildPidSchedule(this.supported);
+      if (this.supported) {
+        this.buildPidSchedule(this.supported);
+        this.announceSupported();
+      }
     }
     if (options.dtcIntervalMs !== undefined && Number.isFinite(options.dtcIntervalMs)) {
       this.dtcIntervalMs = Math.max(1000, options.dtcIntervalMs);
@@ -266,15 +282,28 @@ export class ObdPoller {
     this.buildPidSchedule(supported);
     await this.probeMultiPid();
 
-    const provided = new Set<SignalId>(signalsForPids(supported));
-    for (const signal of this.customSignals) provided.add(signal);
-    if (this.voltageSupported) provided.add('batteryVoltage');
-    const signals = SIGNAL_IDS.filter((id) => provided.has(id));
+    const signals = this.supportedSignals();
     this.logger.info(
       `OBD: ${supported.length} PIDs supported (${signals.length} signals); polling ${this.pidItems.length}`,
     );
-    this.emit({ type: 'obd/supported', signals, at: this.now() });
+    this.announceSupported(true);
     return signals;
+  }
+
+  private supportedSignals(): SignalId[] {
+    const provided = new Set<SignalId>(signalsForPids(this.supported ?? []));
+    for (const signal of this.customSignals) provided.add(signal);
+    if (this.voltageSupported) provided.add('batteryVoltage');
+    return SIGNAL_IDS.filter((id) => provided.has(id));
+  }
+
+  /** Emit `obd/supported` (after discovery, or when the custom PIDs change what is provided). */
+  private announceSupported(always = false): void {
+    const signals = this.supportedSignals();
+    const key = signals.join(',');
+    if (!always && key === this.announcedSignals) return;
+    this.announcedSignals = key;
+    this.emit({ type: 'obd/supported', signals, at: this.now() });
   }
 
   private async withRetries<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
@@ -360,21 +389,32 @@ export class ObdPoller {
     }
   }
 
+  /**
+   * Replace the custom PID list. An entry that was already configured keeps its item (and so
+   * its schedule and back-off), also while a cycle that planned it is still running.
+   */
   private setCustomPids(configs: readonly CustomPidConfig[]): void {
     const previous = new Map(this.customItems.map((item) => [item.key, item]));
     const items: CustomItem[] = [];
     for (const config of configs) {
       const key = customKey(config);
+      const intervalMs = Math.max(0, Number.isFinite(config.intervalMs) ? config.intervalMs : 1000);
+      const old = previous.get(key);
+      if (old) {
+        previous.delete(key); // an identical duplicate gets an item of its own
+        old.config = config;
+        old.intervalMs = intervalMs;
+        items.push(old);
+        continue;
+      }
       try {
-        const evaluate = previous.get(key)?.evaluate ?? compileFormula(config.formula);
-        const old = previous.get(key);
         items.push({
           config,
           key,
-          evaluate,
-          intervalMs: Math.max(0, Number.isFinite(config.intervalMs) ? config.intervalMs : 1000),
-          dueAt: old?.dueAt ?? 0,
-          empty: old?.empty ?? 0,
+          evaluate: compileFormula(config.formula),
+          intervalMs,
+          dueAt: 0,
+          empty: 0,
         });
       } catch (err) {
         this.logger.warn(`OBD: skipping custom PID for ${config.signal}: ${errorMessage(err)}`);
@@ -423,7 +463,6 @@ export class ObdPoller {
   private async cycle(): Promise<void> {
     const now = this.now();
     const outcome: CycleOutcome = { requests: 0, answered: 0 };
-    const samples = new Map<SignalId, number>();
     const unanswered: Scheduled[] = [];
 
     if (this.silent) {
@@ -432,30 +471,33 @@ export class ObdPoller {
         (a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier] || a.empty - b.empty,
       );
       const probe = this.packBatches(likely)[0];
-      if (probe) await this.pollPids(probe, now, samples, unanswered, outcome);
+      if (probe) await this.pollPids(probe, now, unanswered, outcome);
     } else {
       for (const batch of this.planPidRequests(now)) {
-        await this.pollPids(batch, now, samples, unanswered, outcome);
+        await this.pollPids(batch, now, unanswered, outcome);
       }
-      for (const item of this.customItems.filter((c) => c.dueAt <= now)) {
-        await this.pollCustom(item, now, samples, unanswered, outcome);
+      for (const item of this.planCustomRequests(now)) {
+        await this.pollCustom(item, now, unanswered, outcome);
       }
     }
-    if (this.voltageSupported && this.voltageDueAt <= now) await this.pollVoltage(now, samples);
+    if (this.voltageSupported && this.voltageDueAt <= now) await this.pollVoltage(now);
 
     this.updateSilence(outcome, unanswered, now);
-    if (samples.size > 0) {
-      const at = this.now();
-      for (const [signal, value] of samples) this.latestSamples.set(signal, { value, at });
-      this.emit({
-        type: 'obd/samples',
-        samples: [...samples].map(([signal, value]) => ({ signal, value })),
-        at,
-      });
-    }
 
     if (!this.silent && this.dtcDueAt <= now) await this.pollDtcs();
     if (!this.silent && !this.vin.done && this.vin.dueAt <= now) await this.pollVin();
+  }
+
+  /** Emit the values one request returned, stamped when it completed. */
+  private publish(samples: ReadonlyArray<readonly [SignalId, number]>): void {
+    if (samples.length === 0) return;
+    const at = this.now();
+    for (const [signal, value] of samples) this.latestSamples.set(signal, { value, at });
+    this.emit({
+      type: 'obd/samples',
+      samples: samples.map(([signal, value]) => ({ signal, value })),
+      at,
+    });
   }
 
   private sortedByUrgency<T extends PidItem>(items: readonly T[]): T[] {
@@ -469,6 +511,14 @@ export class ObdPoller {
     const others = this.sortedByUrgency(due.filter((item) => item.tier !== 'fast'));
     const extra = this.packBatches(others).slice(0, this.tuning.extraRequestsPerCycle);
     return [...this.packBatches(fast), ...extra];
+  }
+
+  /** The most overdue custom PIDs within their per-cycle budget (ties in config order). */
+  private planCustomRequests(now: number): CustomItem[] {
+    return this.customItems
+      .filter((item) => item.dueAt <= now)
+      .sort((a, b) => a.dueAt - b.dueAt)
+      .slice(0, Math.max(1, this.tuning.customRequestsPerCycle));
   }
 
   /**
@@ -497,7 +547,6 @@ export class ObdPoller {
   private async pollPids(
     batch: readonly PidItem[],
     now: number,
-    samples: Map<SignalId, number>,
     unanswered: Scheduled[],
     outcome: CycleOutcome,
   ): Promise<void> {
@@ -516,15 +565,16 @@ export class ObdPoller {
       if (result.answers.has(item.pid)) item.empty = 0;
       else unanswered.push(item);
     }
-    for (const [signal, value] of Object.entries(result.values) as Array<[SignalId, number]>) {
-      if (!this.customSignals.has(signal) && Number.isFinite(value)) samples.set(signal, value);
-    }
+    this.publish(
+      (Object.entries(result.values) as Array<[SignalId, number]>).filter(
+        ([signal, value]) => !this.customSignals.has(signal) && Number.isFinite(value),
+      ),
+    );
   }
 
   private async pollCustom(
     item: CustomItem,
     now: number,
-    samples: Map<SignalId, number>,
     unanswered: Scheduled[],
     outcome: CycleOutcome,
   ): Promise<void> {
@@ -543,8 +593,14 @@ export class ObdPoller {
         return;
       }
       if (err instanceof RangeError) {
+        // E.g. a header that does not suit the vehicle's bus, which the config cannot know.
         this.logger.warn(`OBD: custom PID for ${signal} is invalid (${err.message}); disabling it`);
-        this.customItems = this.customItems.filter((c) => c !== item);
+        this.setCustomPids(this.customItems.filter((c) => c !== item).map((c) => c.config));
+        if (this.supported) {
+          // The standard PID it replaced (if any) is polled again.
+          this.buildPidSchedule(this.supported);
+          this.announceSupported();
+        }
         return;
       }
       this.handleRequestError(err, outcome, `custom PID ${mode}${pid} (${signal})`);
@@ -561,18 +617,18 @@ export class ObdPoller {
     const value = item.evaluate(first.data);
     if (Number.isFinite(value)) {
       item.empty = 0;
-      samples.set(signal, value);
+      this.publish([[signal, value]]);
     } else {
       unanswered.push(item);
     }
   }
 
-  private async pollVoltage(now: number, samples: Map<SignalId, number>): Promise<void> {
+  private async pollVoltage(now: number): Promise<void> {
     this.voltageDueAt = now + this.tuning.voltageIntervalMs;
     try {
       const volts = await this.driver.readVoltage();
-      this.consecutiveErrors = 0;
-      if (volts !== null) samples.set('batteryVoltage', volts);
+      // No reset of consecutiveErrors: the adapter answering says nothing about the vehicle.
+      if (volts !== null) this.publish([['batteryVoltage', volts]]);
     } catch (err) {
       this.handleRequestError(err, null, 'battery voltage');
     }

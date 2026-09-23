@@ -155,6 +155,34 @@ export function localStorageTokenStore(
   };
 }
 
+/**
+ * Take a token handed over in the page address (`?token=<api token>`, e.g. by the companion
+ * app): store it on this device and remove it from the address bar so it does not linger in
+ * history or screenshots. Returns whether a token was adopted.
+ */
+export function adoptTokenFromUrl(
+  tokens: TokenStore,
+  location: { href: string } = window.location,
+  replace: (url: string) => void = (url) => history.replaceState(history.state, '', url),
+): boolean {
+  let url: URL;
+  try {
+    url = new URL(location.href);
+  } catch {
+    return false;
+  }
+  const token = url.searchParams.get('token');
+  if (token === null) return false;
+  tokens.set(token);
+  url.searchParams.delete('token');
+  try {
+    replace(`${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // Not fatal: the token is stored either way.
+  }
+  return true;
+}
+
 function safeLocalStorage(): Storage | null {
   try {
     return typeof localStorage === 'undefined' ? null : localStorage;

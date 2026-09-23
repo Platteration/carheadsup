@@ -4,16 +4,26 @@ import { cx } from '../hud/util.ts';
 import { appendLog, deriveLogEntries } from './log.ts';
 import type { LogEntry } from './log.ts';
 
-/** Accumulate log entries from successive frames (see `deriveLogEntries`). */
+const monotonicNow = (): number => performance.now();
+
+/**
+ * Accumulate log entries from successive frames (see `deriveLogEntries`). Every entry is stamped
+ * on the HUD's clock: frame entries with the frame's `at`, and "feed lost" with the last frame's
+ * `at` plus the time that has passed here since it arrived (`now`, a monotonic clock) — never the
+ * browser's own wall clock, which may be minutes off the HUD's.
+ */
 export function useFrameLog(
   frame: HudFrame | null,
-  now: () => number = Date.now,
+  now: () => number = monotonicNow,
 ): [LogEntry[], () => void] {
   const [log, setLog] = useState<LogEntry[]>([]);
-  const prev = useRef<HudFrame | null>(null);
+  const prev = useRef<{ frame: HudFrame; receivedAt: number } | null>(null);
   useEffect(() => {
-    const entries = deriveLogEntries(prev.current, frame, now());
-    prev.current = frame;
+    const t = now();
+    const last = prev.current;
+    const hudTime = last === null ? 0 : last.frame.at + Math.max(0, t - last.receivedAt);
+    const entries = deriveLogEntries(last?.frame ?? null, frame, hudTime);
+    prev.current = frame === null ? null : { frame, receivedAt: t };
     if (entries.length > 0) setLog((current) => appendLog(current, entries));
   }, [frame]);
   return [log, () => setLog([])];

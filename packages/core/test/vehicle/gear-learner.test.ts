@@ -11,6 +11,7 @@ import {
   normaliseLearnedRatios,
   observeGearSample,
   ratioBin,
+  secondGearHint,
   type GearCluster,
   type GearLearnerState,
   type LearnSample,
@@ -303,5 +304,87 @@ describe('launch tracking', () => {
     expect(state.launchRatios).toHaveLength(7);
     const hint = firstGearHint(state) ?? 0;
     expect(Math.abs(hint / 118 - 1)).toBeLessThan(0.02);
+  });
+});
+
+describe('first upshift tracking (automatics)', () => {
+  const SLIP = 1.08;
+
+  /**
+   * Pull away in 1st through a slipping torque converter, change up at `shiftAtKph` (the ratio
+   * then becomes `after`), and keep accelerating for 2 s with the throttle at `throttleAfter`.
+   */
+  function autoLaunch(
+    shiftAtKph: number,
+    { after = 68 * SLIP, throttleAfter = 25, from = T0 } = {},
+  ): LearnSample[] {
+    const out: LearnSample[] = [{ at: from, speedKph: 0, rpm: 800, throttlePct: 0 }];
+    let at = from;
+    let kph = 0;
+    while (kph < shiftAtKph) {
+      at += 100;
+      kph = Math.min(shiftAtKph, kph + 0.5);
+      out.push({
+        at,
+        speedKph: Math.round(kph),
+        rpm: Math.max(1800, 118 * kph) * SLIP,
+        throttlePct: 30,
+      });
+    }
+    for (let i = 0; i < 20; i++) {
+      at += 100;
+      kph += 0.4;
+      out.push({ at, speedKph: Math.round(kph), rpm: after * kph, throttlePct: throttleAfter });
+    }
+    return out;
+  }
+
+  it('records the ratios before and after the first upshift after pulling away', () => {
+    const state = feed(autoLaunch(18));
+    expect(state.upshifts).toHaveLength(1);
+    const [before, after] = state.upshifts[0] ?? [0, 0];
+    expect(Math.abs(before / (118 * SLIP) - 1)).toBeLessThan(0.04);
+    expect(Math.abs(after / (68 * SLIP) - 1)).toBeLessThan(0.03);
+  });
+
+  it('hints at 2nd gear only after two upshifts', () => {
+    const once = feed(autoLaunch(18));
+    expect(secondGearHint(once)).toBeNull();
+    const twice = feed(autoLaunch(20, { from: T0 + 100_000 }), once);
+    expect(Math.abs((secondGearHint(twice) ?? 0) / (68 * SLIP) - 1)).toBeLessThan(0.03);
+  });
+
+  it('ignores easing off the throttle in 1st', () => {
+    // Off the throttle: the ratio that follows says nothing about a gear.
+    expect(feed(autoLaunch(18, { throttleAfter: 0 })).upshifts).toEqual([]);
+    // Partly off: rpm drops by over 20 % as the converter slips less, but the ratio by less
+    // than a gear step.
+    expect(feed(autoLaunch(18, { after: 118 * SLIP * 0.78 })).upshifts).toEqual([]);
+    expect(feed(autoLaunch(18, { after: 118 * SLIP * 0.75 })).upshifts).toHaveLength(1);
+  });
+
+  it('needs a standstill first and records one upshift per launch', () => {
+    const rolling = autoLaunch(18)
+      .slice(1)
+      .map((x) => ({ ...x, speedKph: (x.speedKph ?? 0) + 6 }));
+    expect(feed(rolling).upshifts).toEqual([]);
+    // 1 → 2, then 2 → 3 a little later: only the first counts.
+    const launch = autoLaunch(18);
+    const last = launch.at(-1);
+    let at = last?.at ?? T0;
+    let kph = last?.speedKph ?? 0;
+    const third: LearnSample[] = [];
+    for (let i = 0; i < 30; i++) {
+      at += 100;
+      kph += 0.3;
+      third.push({ at, speedKph: Math.round(kph), rpm: 46 * kph * SLIP, throttlePct: 25 });
+    }
+    expect(feed([...launch, ...third]).upshifts).toHaveLength(1);
+  });
+
+  it('keeps the last 7 upshifts', () => {
+    let state = createGearLearner();
+    for (let i = 0; i < 9; i++) state = feed(autoLaunch(18, { from: T0 + i * 100_000 }), state);
+    expect(state.upshifts).toHaveLength(7);
   });
 });

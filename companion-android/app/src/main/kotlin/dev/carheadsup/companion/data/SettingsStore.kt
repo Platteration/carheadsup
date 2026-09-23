@@ -24,8 +24,11 @@ data class CompanionSettings(
     val shareLocation: Boolean = true,
     /** Look up speed limits (and cameras) on OpenStreetMap (uses mobile data). */
     val osmLookups: Boolean = true,
-    /** Warn about speed cameras from OpenStreetMap (illegal to use while driving in some countries). */
-    val cameraWarnings: Boolean = true,
+    /**
+     * Warn about speed cameras from OpenStreetMap. Off unless the driver turns it on: using such
+     * warnings while driving is illegal in some countries (e.g. Germany, Switzerland).
+     */
+    val cameraWarnings: Boolean = false,
     /** The user wants the HUD connection service running (restored after app restarts). */
     val serviceEnabled: Boolean = false,
 ) {

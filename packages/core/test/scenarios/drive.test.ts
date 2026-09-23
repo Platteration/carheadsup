@@ -121,7 +121,7 @@ describe('scenario: a complete drive', () => {
       }),
       at: h.now,
     });
-    h.send({ type: 'road/update', road: roadInfo(50), at: h.now });
+    car.setRoad(roadInfo(50));
     car.go(h.now + 12_000, 50, 5);
 
     frame = h.frame();
@@ -204,7 +204,7 @@ describe('scenario: a complete drive', () => {
       }),
       at: h.now,
     });
-    h.send({ type: 'road/update', road: roadInfo(120, { roadClass: 'motorway' }), at: h.now });
+    car.setRoad(roadInfo(120, { roadClass: 'motorway' }));
     h.send({
       type: 'hazards/update',
       hazards: [
@@ -251,7 +251,7 @@ describe('scenario: a complete drive', () => {
     expect(widget(frame, 'lanes')).toBeUndefined();
 
     // Limit drops before the exit: 115 in a 100 zone.
-    h.send({ type: 'road/update', road: roadInfo(100, { roadClass: 'motorway' }), at: h.now });
+    car.setRoad(roadInfo(100, { roadClass: 'motorway' }));
     expect(widget(h.frame(), 'speed')).toMatchObject({ value: 115, overLimit: true, overBy: 15 });
 
     // The engine starts to overheat.
@@ -316,7 +316,7 @@ describe('scenario: a complete drive', () => {
       }),
       at: h.now,
     });
-    h.send({ type: 'road/update', road: roadInfo(60), at: h.now });
+    car.setRoad(roadInfo(60));
     car.go(h.now + 20_000, 50, 4, () => {
       car.coolantC = Math.max(98, car.coolantC - 0.3);
     });

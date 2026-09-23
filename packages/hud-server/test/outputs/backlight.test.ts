@@ -5,6 +5,7 @@ import type { HudFrame } from '@carheadsup/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   BACKLIGHT_MIN_INTERVAL_MS,
+  BACKLIGHT_REPROBE_MS,
   BacklightSink,
   backlightLevel,
   frameBacklightBrightness,
@@ -60,6 +61,18 @@ describe('backlightLevel', () => {
     expect(backlightLevel(3, 255)).toBe(255);
     expect(backlightLevel(0.5, 1)).toBe(1);
     expect(backlightLevel(0.5, 0)).toBe(1);
+  });
+
+  it('keeps the backlight up for a critical alert or collision cue breaking through the blank', () => {
+    const blanked = frame(0.7, true);
+    const alert = { key: 'coolant', kind: 'coolant', severity: 'critical', title: 'OVERHEATING' };
+    expect(frameBacklightBrightness({ ...blanked, alerts: [alert] } as unknown as HudFrame)).toBe(
+      0.7,
+    );
+    expect(frameBacklightBrightness({ ...blanked, collision: 'warning' } as HudFrame)).toBe(0.7);
+    expect(
+      frameBacklightBrightness({ ...blanked, alerts: [], collision: 'none' } as HudFrame),
+    ).toBe(0);
   });
 
   it('reads the brightness a frame asks for (minimum while blanked)', () => {
@@ -174,6 +187,24 @@ describe('BacklightSink', () => {
     expect(clock.pendingTimers).toBe(0);
   });
 
+  it('keeps following the frames when the wall clock steps back', async () => {
+    const dir = await device('panel', 255);
+    const { clock, deps } = setup();
+    const sink = new BacklightSink({ directory: dir }, deps);
+    await sink.whenReady();
+    sink.onFrame(frame(1));
+    await sink.whenIdle();
+    expect(await readLevel(dir)).toBe('255');
+    // NTP steps the clock back a minute; then the car enters a tunnel at night.
+    clock.current -= 60_000;
+    await clock.advance(BACKLIGHT_MIN_INTERVAL_MS);
+    sink.onFrame(frame(0.2));
+    await clock.advance(BACKLIGHT_MIN_INTERVAL_MS);
+    await sink.whenIdle();
+    expect(await readLevel(dir)).toBe(String(backlightLevel(0.2, 255)));
+    await sink.stop();
+  });
+
   it('auto-detects the first usable device', async () => {
     const broken = join(root, 'a-broken');
     await mkdir(broken);
@@ -257,9 +288,75 @@ describe('BacklightSink', () => {
     }
     expect(attempts).toBe(2);
     expect(logger.lines('warn')).toEqual([
-      expect.stringMatching(/failed \(ENODEV\); backlight control disabled/),
+      expect.stringMatching(/failed \(ENODEV\); backlight control stopped/),
     ]);
+    expect(sink.drivesBrightness).toBe(false);
     await sink.stop();
+  });
+
+  it('reports whether it drives the backlight, and changes of it', async () => {
+    const dir = await device('panel', 255);
+    const { clock, deps } = setup();
+    let fail = false;
+    const fs: BacklightFs = {
+      ...nodeBacklightFs,
+      writeFile: async (path, data) => {
+        if (fail) throw Object.assign(new Error('gone'), { code: 'EIO' });
+        await nodeBacklightFs.writeFile(path, data);
+      },
+    };
+    const sink = new BacklightSink({ directory: dir, fs }, deps);
+    const changes: boolean[] = [];
+    sink.onDrivesBrightnessChange((drives) => changes.push(drives));
+    expect(sink.drivesBrightness).toBe(false); // not opened yet
+    await sink.whenReady();
+    expect(sink.drivesBrightness).toBe(true);
+    fail = true;
+    sink.onFrame(frame(0.4));
+    await sink.whenIdle();
+    expect(sink.drivesBrightness).toBe(false);
+    // Found again on the next look; writes work again.
+    fail = false;
+    await clock.advance(BACKLIGHT_REPROBE_MS);
+    await sink.whenIdle();
+    expect(sink.drivesBrightness).toBe(true);
+    expect(await readLevel(dir)).toBe(String(backlightLevel(0.4, 255)));
+    expect(changes).toEqual([true, false, true]);
+    await sink.stop();
+    expect(sink.drivesBrightness).toBe(false);
+    expect(clock.pendingTimers).toBe(0);
+  });
+
+  it('takes the device once it becomes writable (udev rule applied after start)', async () => {
+    const dir = await device('panel', 255);
+    const { clock, deps, logger } = setup();
+    let writable = false;
+    const fs: BacklightFs = {
+      ...nodeBacklightFs,
+      checkWritable: async (path) => {
+        if (!writable) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+        await nodeBacklightFs.checkWritable(path);
+      },
+    };
+    const [sink] = createFrameSinks({ backlight: null }, deps, { backlightRoot: root, fs });
+    const backlight = sink as BacklightSink;
+    expect(await backlight.whenReady()).toBeNull();
+    sink!.onFrame(frame(0.6));
+    await clock.advance(BACKLIGHT_REPROBE_MS);
+    await backlight.whenIdle();
+    expect(backlight.drivesBrightness).toBe(false);
+    writable = true;
+    await clock.advance(BACKLIGHT_REPROBE_MS);
+    await backlight.whenIdle();
+    expect(backlight.drivesBrightness).toBe(true);
+    // The latest brightness lands as soon as the device is usable.
+    expect(await readLevel(dir)).toBe(String(backlightLevel(0.6, 255)));
+    // One warning with the hint for the first look; later looks stay quiet until one succeeds.
+    expect(logger.lines('warn')).toHaveLength(1);
+    expect(logger.lines('warn')[0]).toContain('99-carheadsup-backlight.rules');
+    expect(logger.lines('info').join('\n')).toMatch(/controlling .*panel/);
+    await sink!.stop();
+    expect(clock.pendingTimers).toBe(0);
   });
 
   it('is not created when disabled', () => {

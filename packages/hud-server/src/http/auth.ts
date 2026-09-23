@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { isIPv4 } from 'node:net';
+import { isIPv4, isIPv6 } from 'node:net';
 
 /**
  * Access rules for the REST API and the renderer socket, as pure functions.
@@ -10,6 +10,8 @@ import { isIPv4 } from 'node:net';
  *    API is open to the car's network.
  *  - Browsers are additionally protected from cross-site request forgery: state-changing requests
  *    and WebSocket upgrades whose `Origin` is not the HUD itself are refused.
+ *  - DNS rebinding (a foreign site's name made to resolve to the HUD, which makes its pages
+ *    "same-origin") is stopped by refusing requests whose `Host` is not a name of the HUD.
  */
 
 /** Whether `address` (as reported by `socket.remoteAddress`) is a loopback address. */
@@ -22,11 +24,16 @@ export function isLoopbackAddress(address: string | null | undefined): boolean {
   return isIPv4(v4) && v4.startsWith('127.');
 }
 
-/** The token of an `Authorization: Bearer <token>` header, or null. The scheme is case-insensitive. */
+/**
+ * The token of an `Authorization: Bearer <token>` header, or null. The scheme is
+ * case-insensitive; the token is everything after it (so it may contain spaces), without the
+ * surrounding whitespace.
+ */
 export function bearerToken(header: string | string[] | null | undefined): string | null {
   if (typeof header !== 'string') return null;
-  const match = /^\s*bearer\s+(\S+)\s*$/i.exec(header);
-  return match?.[1] ?? null;
+  const match = /^\s*bearer\s+(.*?)\s*$/i.exec(header);
+  const token = match?.[1];
+  return token === undefined || token === '' ? null : token;
 }
 
 const digest = (value: string): Buffer => createHash('sha256').update(value, 'utf8').digest();
@@ -53,15 +60,19 @@ export interface AuthInput {
 /**
  * Whether a client may use the API: loopback always; otherwise any client when no token is
  * configured, else only with the right token (Bearer header or explicit `token`).
+ *
+ * Whitespace around a token is not part of it: an HTTP header cannot carry it, and the settings
+ * app trims what it keeps. Spaces inside a token are.
  */
 export function isAuthorized(input: AuthInput): boolean {
   if (isLoopbackAddress(input.remoteAddress)) return true;
   if (input.apiToken === '') return true;
-  const candidates = [bearerToken(input.authorization), input.token ?? null];
+  const expected = input.apiToken.trim();
+  const candidates = [bearerToken(input.authorization), input.token?.trim() ?? null];
   let ok = false;
   for (const candidate of candidates) {
     // Evaluate every candidate so the time taken does not depend on which one matched.
-    if (candidate !== null && candidate !== '' && secretsEqual(candidate, input.apiToken)) {
+    if (candidate !== null && candidate !== '' && secretsEqual(candidate, expected)) {
       ok = true;
     }
   }
@@ -99,4 +110,67 @@ export function isCrossSiteRequest(headers: OriginHeaders): boolean {
 function stripDefaultPort(host: string, origin: string): string {
   const defaultPort = origin.toLowerCase().startsWith('https:') ? ':443' : ':80';
   return host.endsWith(defaultPort) ? host.slice(0, -defaultPort.length) : host;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Host names (DNS-rebinding protection)
+
+/** A host name in comparable form: lower case, without one trailing dot. */
+function normalizeName(name: string): string {
+  const lower = name.trim().toLowerCase();
+  return lower.endsWith('.') ? lower.slice(0, -1) : lower;
+}
+
+/**
+ * The names the HUD answers to besides IP addresses and localhost: the machine's host name, its
+ * first label and `<label>.local` (mDNS), plus `extra` names (e.g. a name the home router's DNS
+ * gives the Pi). Lower case, without ports.
+ */
+export function hudHostNames(machineName: string, extra: readonly string[] = []): Set<string> {
+  const names = new Set<string>();
+  const full = normalizeName(machineName);
+  if (full !== '') {
+    const label = full.split('.')[0] ?? full;
+    names.add(full);
+    names.add(label);
+    names.add(`${label}.local`);
+  }
+  for (const name of extra) {
+    const normalized = normalizeName(name);
+    if (normalized !== '') names.add(normalized);
+  }
+  return names;
+}
+
+/**
+ * Whether a request's `Host` header addresses this HUD: an IP address (a rebound name is never
+ * an address), `localhost` / `*.localhost` (browsers resolve those to loopback themselves) or one
+ * of `names` (see {@link hudHostNames}), with or without a port. A request without a Host header
+ * does not come from a browser and is allowed; a malformed one is not.
+ *
+ * Without this check a page on `http://evil.example:8080` whose name was rebound to the HUD's
+ * address would be same-origin with the HUD (its Origin and Host match), so the cross-site
+ * checks would let it drive the API and the WebSockets.
+ */
+export function isAllowedHost(
+  header: string | string[] | undefined,
+  names: ReadonlySet<string>,
+): boolean {
+  if (header === undefined) return true;
+  if (typeof header !== 'string') return false;
+  const text = header.trim().toLowerCase();
+  if (text === '') return true;
+  if (text.startsWith('[')) {
+    const end = text.indexOf(']');
+    if (end < 0 || !/^(:\d{1,5})?$/.test(text.slice(end + 1))) return false;
+    const address = text.slice(1, end).split('%')[0] ?? '';
+    return isIPv6(address);
+  }
+  const match = /^([^:]+)(?::\d{1,5})?$/.exec(text);
+  if (match === null) return false;
+  const name = normalizeName(match[1] ?? '');
+  if (name === '') return false;
+  if (isIPv4(name)) return true;
+  if (name === 'localhost' || name.endsWith('.localhost')) return true;
+  return names.has(name);
 }

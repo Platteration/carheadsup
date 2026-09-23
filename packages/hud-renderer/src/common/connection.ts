@@ -69,6 +69,21 @@ export function hudSocketUrl(location: { protocol: string; host: string }): stri
 }
 
 /**
+ * `url` with the API token as its `token` query parameter — how a browser authenticates a
+ * WebSocket, which cannot carry an Authorization header. An empty token leaves `url` unchanged.
+ */
+export function withToken(url: string, token: string): string {
+  if (token === '' || url === '') return url;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('token', token);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Delay before reconnect attempt number `attempt` (0-based): 0.5 s, 1 s, 2 s, 4 s, then 5 s.
  * Deterministic on purpose — there is a single client per server, so no thundering herd to jitter.
  */
@@ -152,7 +167,13 @@ export function parseServerMessage(data: unknown): ServerToRenderer | null {
     isProjection(parsed.projection) &&
     typeof parsed.simulated === 'boolean'
   ) {
-    return { t: 'display', projection: parsed.projection, simulated: parsed.simulated };
+    return {
+      t: 'display',
+      projection: parsed.projection,
+      simulated: parsed.simulated,
+      // Absent from older servers: the renderer dims by itself.
+      hardwareBrightness: parsed.hardwareBrightness === true,
+    };
   }
   return null;
 }

@@ -27,6 +27,37 @@ import kotlin.random.Random
 
 class LinkTest {
     @Nested
+    inner class FixWatchdogTest {
+        @Test
+        fun `road data is withdrawn once when fixes stop (android-3)`() {
+            val watchdog = FixWatchdog(timeoutMs = 5_000)
+            // Nothing to withdraw before the first fix.
+            assertFalse(watchdog.expired(60_000))
+            watchdog.onFix(61_000)
+            assertFalse(watchdog.expired(65_999))
+            assertTrue(watchdog.expired(66_000))
+            assertFalse(watchdog.expired(90_000))
+            // Fixes resume, then stop again (a tunnel, location switched off).
+            watchdog.onFix(100_000)
+            assertFalse(watchdog.expired(104_000))
+            assertTrue(watchdog.expired(105_500))
+            // A clock that went backwards counts as a gap too.
+            watchdog.onFix(200_000)
+            assertTrue(watchdog.expired(150_000))
+        }
+
+        @Test
+        fun `fixes too inaccurate to match a road do not count`() {
+            val watchdog = FixWatchdog(maxAccuracyM = 50.0)
+            assertTrue(watchdog.isUsable(null))
+            assertTrue(watchdog.isUsable(12.0))
+            assertTrue(watchdog.isUsable(50.0))
+            assertFalse(watchdog.isUsable(180.0))
+            assertFalse(watchdog.isUsable(Double.NaN))
+        }
+    }
+
+    @Nested
     inner class Backoff {
         @Test
         fun `grows exponentially up to the cap without jitter`() {
@@ -68,6 +99,19 @@ class LinkTest {
             val backoff = ReconnectBackoff(jitter = 0.0)
             repeat(10_000) { backoff.nextDelayMs() }
             assertEquals(30_000L, backoff.nextDelayMs())
+        }
+
+        @Test
+        fun `a session the HUD replaced does not come straight back (android-8)`() {
+            // Welcome reset the backoff; the HUD then closes the session with 4000 "replaced"
+            // because another phone took over. Reconnecting after ~1 s would take it back.
+            val backoff = ReconnectBackoff(jitter = 0.0)
+            backoff.reset()
+            assertEquals(30_000L, backoff.delayAfterClose(PhoneCloseCode.REPLACED))
+            backoff.reset()
+            assertEquals(1_000L, backoff.delayAfterClose(1006))
+            assertEquals(2_000L, backoff.delayAfterClose(null))
+            assertEquals(4_000L, backoff.delayAfterClose(PhoneCloseCode.BUSY))
         }
 
         @Test
@@ -281,6 +325,23 @@ class LinkTest {
             assertEquals("http://192.168.4.1:8080/api/info", v4.apiUrl("api/info"))
             assertEquals("ws://[fd00::10]:8080/ws/phone", HudEndpoint("fd00::10").webSocketUrl)
             assertEquals("[fd00::10]:8080", HudEndpoint("fd00::10").display())
+        }
+
+        @Test
+        fun `hands the API token to the settings page`() {
+            val hud = HudEndpoint("192.168.4.1")
+            assertEquals("http://192.168.4.1:8080/settings", hud.settingsUrl(""))
+            assertEquals("http://192.168.4.1:8080/settings", hud.settingsUrl("   "))
+            assertEquals("http://192.168.4.1:8080/settings?token=K7f-Q2_z~9", hud.settingsUrl(" K7f-Q2_z~9 "))
+            // Spaces, reserved and non-ASCII characters are percent-encoded (URLSearchParams decodes them).
+            assertEquals(
+                "http://192.168.4.1:8080/settings?token=a%20b%26c%3D%2B%C3%A4",
+                hud.settingsUrl("a b&c=+ä"),
+            )
+            assertEquals(
+                "http://hud.local:8080/settings?page=1&token=t#trips",
+                HudEndpoint.withApiToken("http://hud.local:8080/settings?page=1#trips", "t"),
+            )
         }
 
         @Test

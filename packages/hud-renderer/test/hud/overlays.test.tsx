@@ -49,6 +49,16 @@ describe('alert banner', () => {
     expect(critical).toContain('role="alert"');
   });
 
+  it('draws an unknown severity from a newer server as critical, not as a quiet info line', () => {
+    const html = renderToString(
+      <AlertBanner alert={{ ...ALERT, severity: 'emergency' as AlertFrame['severity'] }} />,
+    );
+    expect(html).toContain('hud-tone--critical');
+    expect(html).toContain('hud-flash');
+    expect(html).toContain('data-severity="critical"');
+    expect(html).toContain('role="alert"');
+  });
+
   it('survives an alert kind from a newer server', () => {
     const html = renderToString(
       <AlertBanner alert={{ ...ALERT, kind: 'meteor' as AlertFrame['kind'] }} />,
@@ -217,5 +227,22 @@ describe('robustness against enum values from a newer server', () => {
       },
     } as unknown as Parameters<typeof renderHud>[0];
     expect(() => renderHud(odd)).not.toThrow();
+  });
+
+  it('shows an unknown collision level as the full warning', async () => {
+    const { renderHud } = await import('./render.ts');
+    const { SAMPLE_FRAMES } = await import('../../src/hud/fixtures.ts');
+    const frame = {
+      ...SAMPLE_FRAMES['highway-cruise']!,
+      collision: 'imminent',
+    } as unknown as Parameters<typeof renderHud>[0];
+    const html = renderHud(frame);
+    expect(html).toContain('data-collision="warning"');
+    expect(html).toContain('BRAKE');
+    expect(html).toContain('hud-collision-border');
+    // …also while the driver has blanked the display.
+    const blanked = renderHud({ ...frame!, blanked: true });
+    expect(blanked).toContain('BRAKE');
+    expect(blanked).toContain('hud-collision-border');
   });
 });

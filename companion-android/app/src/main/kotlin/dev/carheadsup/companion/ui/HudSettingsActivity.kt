@@ -17,6 +17,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import dev.carheadsup.companion.CompanionApp
 import dev.carheadsup.companion.ui.screens.startSafely
+import dev.carheadsup.protocol.link.HudEndpoint
 
 /**
  * The HUD's own settings app (`http://<hud>/settings`, served by the HUD) in a WebView, so the
@@ -79,10 +80,11 @@ class HudSettingsActivity : ComponentActivity() {
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
         } else {
-            // The document request carries the API token; the page's own API calls handle auth themselves.
-            val token = (application as CompanionApp).graph.settings.value.apiToken.trim()
-            val headers = if (token.isEmpty()) emptyMap() else mapOf("Authorization" to "Bearer $token")
-            webView.loadUrl(url, headers)
+            // The page makes its own API calls, which a WebView cannot add a header to: it takes the
+            // token from `?token=`, keeps it in its storage (DOM storage is on above) and removes it
+            // from the address.
+            val token = (application as CompanionApp).graph.settings.value.apiToken
+            webView.loadUrl(HudEndpoint.withApiToken(url, token))
         }
     }
 

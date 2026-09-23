@@ -72,7 +72,16 @@ export interface SettingsAppProps {
   editorOptions?: ConfigEditorOptions;
 }
 
-type Connection = 'connecting' | 'online' | 'offline' | 'locked';
+export type Connection = 'connecting' | 'online' | 'offline' | 'locked';
+
+/**
+ * The header pill, from the latest status poll: a failed poll means offline (or locked) even
+ * though the last good data is still on screen, marked stale.
+ */
+export function connectionOf(info: { data: unknown; error: unknown }): Connection {
+  if (info.error !== null) return needsToken(info.error) ? 'locked' : 'offline';
+  return info.data !== null ? 'online' : 'connecting';
+}
 
 export function SettingsApp({ api, editorOptions }: SettingsAppProps) {
   const editor = useConfigEditor(api, editorOptions);
@@ -84,14 +93,10 @@ export function SettingsApp({ api, editorOptions }: SettingsAppProps) {
   /** Bumped when the token changes, remounting sections so they refetch with it. */
   const [session, setSession] = useState(0);
 
-  const connection: Connection =
-    info.data !== null
-      ? 'online'
-      : info.error === null
-        ? 'connecting'
-        : needsToken(info.error)
-          ? 'locked'
-          : 'offline';
+  const connection = connectionOf(info);
+  // Sections that need the HUD stay mounted once it has answered (a missed poll must not throw
+  // away what is open or being typed there); they show their own "stale" state meanwhile.
+  const reachable = info.data !== null;
 
   // The HUD came (back) within reach: retry loading the config if that had failed.
   useEffect(() => {
@@ -116,11 +121,10 @@ export function SettingsApp({ api, editorOptions }: SettingsAppProps) {
   };
 
   const root = editor.root;
-  const online = connection === 'online';
 
   return (
     <FormContext.Provider value={form}>
-      <div class={cx('app', !online && 'app--offline')}>
+      <div class={cx('app', connection !== 'online' && 'app--offline')}>
         <header class="topbar">
           <div class="topbar__title">
             <h1>HUD settings</h1>
@@ -131,7 +135,7 @@ export function SettingsApp({ api, editorOptions }: SettingsAppProps) {
         <SectionNav sections={SECTIONS} />
         <main class="content" id="content">
           <StatusSection api={api} info={info} onTokenChange={onTokenChange} />
-          {online ? (
+          {reachable ? (
             <>
               <DiagnosticsSection key={`d${session}`} api={api} units={units} />
               <TripsSection key={`t${session}`} api={api} units={units} root={root} />

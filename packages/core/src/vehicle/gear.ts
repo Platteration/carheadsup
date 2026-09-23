@@ -1,20 +1,26 @@
 import type { TransmissionType, VehicleConfig } from '../types/config.ts';
 import {
   GEAR_RATIO_TOLERANCE,
+  LAUNCH_HINT_KPH,
   LEARN_ANALYSE_EVERY,
+  UPSHIFT_HINT_KPH,
   createGearLearner,
   findGearClusters,
   firstGearHint,
   mergeLearnedRatios,
   normaliseLearnedRatios,
   observeGearSample,
+  secondGearHint,
   type GearLearnerState,
 } from './gear-learner.ts';
 
 export type { GearLearnerState } from './gear-learner.ts';
 
 export interface GearEstimate {
-  /** Gear number (1 = first), 'N' when the rpm/speed ratio matches no gear (clutch in / coasting), null when unknown. */
+  /**
+   * Gear number (1 = first); 'N' when the clutch is in / the box is in neutral (inferred only
+   * with a clutch); null when unknown.
+   */
   gear: number | 'N' | null;
   /** True when inferred from rpm/speed rather than reported by the vehicle (PID 0xA4). */
   inferred: boolean;
@@ -120,6 +126,11 @@ export function createGearState(learnedRatios: number[] | null): GearState {
  * otherwise learned ratios; keeps learning from steady-state samples (not idling, not shifting,
  * speed above a floor). CVTs never report a gear. Reported gears (PID 0xA4) win over inference.
  *
+ * A learned ratio is shown as a gear number only while its number is proven (see
+ * `learnedNumbering`): a gear the learner has not found yet must not shift the numbers of the
+ * others. An automatic never shows an inferred 'N' (in D it is always in gear; no match means
+ * converter slip or a shift in progress), just no gear.
+ *
  * Inputs are expected to be fresh values (see `freshValue`); null means unknown. An inferred
  * change is shown only once it has held for 2 samples / 300 ms (3 samples / 600 ms on
  * automatics), so shifts do not flicker; changes to "unknown" and reported gears apply at once.
@@ -153,13 +164,20 @@ export function updateGear(state: GearState, input: GearInput, vehicle: VehicleC
 
   const recent = updateRecent(state.recent, input);
   const reported = reportedGear(input.reportedGear);
-  const ratios = vehicle.gearRatiosRpmPerKph ?? learnedRatios;
+  const configured = vehicle.gearRatiosRpmPerKph;
+  const ratios = configured ?? learnedRatios;
+  const numbering =
+    configured !== null
+      ? { firstGear: 1, proven: configured.length }
+      : learnedRatios === null
+        ? UNPROVEN
+        : learnedNumbering(learnedRatios, vehicle.transmission, learner);
   const raw: GearEstimate =
     reported !== null
       ? { gear: reported, inferred: false, confidence: 1 }
-      : inferGear(input, ratios, vehicle, vehicle.gearRatiosRpmPerKph === null, recent);
+      : inferGear(input, ratios, numbering, vehicle, configured === null, recent);
 
-  const neutral = neutralEstimate(vehicle.transmission, vehicle.gearRatiosRpmPerKph === null);
+  const neutral = neutralEstimate(vehicle.transmission, configured === null);
   const { estimate, pending } = debounce(state, raw, input.at, vehicle.transmission, neutral);
   return { estimate, learnedRatios, pending, recent, learner };
 }
@@ -210,6 +228,79 @@ function decoupled(recent: GearState['recent'], speedKph: number, rpm: number): 
     }
   }
   return false;
+}
+
+/** How a ratio list maps to gear numbers. */
+export interface GearNumbering {
+  /** Gear number of the first (highest) ratio. */
+  firstGear: number;
+  /** How many leading ratios have proven gear numbers; the others are never shown. */
+  proven: number;
+}
+
+const UNPROVEN: GearNumbering = { firstGear: 1, proven: 0 };
+
+/** The largest step between adjacent gears of a real gearbox (quotient of overall ratios). */
+export const MAX_GEAR_STEP = 1.9;
+/**
+ * Gearing is progressive: each step is at most slightly larger than the one below it and not
+ * much larger than the one above it. A step that breaks this spans a gear the learner has not
+ * found (yet), or one the driver skips.
+ */
+const MAX_STEP_GROWTH = 1.15;
+const MAX_STEP_OVER_NEXT = 1.3;
+
+/**
+ * How many leading ratios (highest first) are free of a gap: up to, not including, the first
+ * ratio below a step that is too large on its own or next to its neighbouring steps.
+ */
+export function gaplessPrefix(ratios: readonly number[]): number {
+  const steps = ratios.slice(1).map((r, i) => (ratios[i] ?? NaN) / r);
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i] ?? NaN;
+    const below = steps[i - 1];
+    const above = steps[i + 1];
+    if (
+      !(step > 1 && step <= MAX_GEAR_STEP) ||
+      (below !== undefined && step > below * MAX_STEP_GROWTH) ||
+      (above !== undefined && step > above * MAX_STEP_OVER_NEXT)
+    ) {
+      return i + 1;
+    }
+  }
+  return ratios.length;
+}
+
+/**
+ * Which learned ratios can be shown as gear numbers. The numbering needs an anchor seen this
+ * session, and stops at the first gap (see `gaplessPrefix`):
+ *  - manual / dual-clutch: the ratio after pulling away is 1st gear, and must be the highest
+ *    learned ratio (the first publication waits for it; without a launch seen yet, the
+ *    persisted ladder, anchored when it was first learned, is trusted);
+ *  - automatic: the ratio after the first upshift is 2nd gear. It matches the highest learned
+ *    ratio (1st, which the torque converter's slip keeps out of the histogram, is missing: number
+ *    from 2) or the second highest (number from 1). Anything else — including no upshift seen
+ *    yet — proves nothing, and no inferred number is shown.
+ */
+export function learnedNumbering(
+  ratios: readonly number[],
+  transmission: TransmissionType,
+  learner: GearLearnerState,
+): GearNumbering {
+  let firstGear = 1;
+  if (transmission === 'automatic') {
+    const second = secondGearHint(learner);
+    const match =
+      second === null ? null : matchGearRatio(second, UPSHIFT_HINT_KPH, ratios, transmission);
+    if (match === null || match.index > 1) return UNPROVEN;
+    firstGear = 2 - match.index;
+  } else {
+    const first = firstGearHint(learner);
+    const match =
+      first === null ? null : matchGearRatio(first, LAUNCH_HINT_KPH, ratios, transmission);
+    if (first !== null && match?.index !== 0) return UNPROVEN;
+  }
+  return { firstGear, proven: gaplessPrefix(ratios) };
 }
 
 /** PID 0xA4 gear: 0 = neutral, 1…12 = gear; anything else is ignored. */
@@ -305,6 +396,7 @@ const round2 = (v: number): number => Math.round(v * 100) / 100;
 function inferGear(
   input: GearInput,
   ratios: readonly number[] | null,
+  numbering: GearNumbering,
   vehicle: VehicleConfig,
   learned: boolean,
   recent: GearState['recent'],
@@ -324,15 +416,21 @@ function inferGear(
     return UNKNOWN;
   }
   const idling = rpm <= vehicle.idleRpm * IDLE_BAND_FACTOR && speedKph > CREEP_MAX_KPH;
-  const match =
-    idling || decoupled(recent, speedKph, rpm)
-      ? null
-      : matchGearRatio(rpm / speedKph, speedKph, ratios, transmission);
-  if (match === null) return neutralEstimate(transmission, learned);
+  const disengaged = idling || decoupled(recent, speedKph, rpm);
+  const match = disengaged ? null : matchGearRatio(rpm / speedKph, speedKph, ratios, transmission);
+  if (match === null) {
+    // With a clutch, no matching gear means it is in (or the box is in neutral) when the engine
+    // has visibly let go of the wheels, or when every ratio is configured. Learned ratios may just
+    // lack this gear so far; an automatic in D is never in neutral.
+    if (transmission === 'automatic' || (learned && !disengaged)) return UNKNOWN;
+    return neutralEstimate(transmission, learned);
+  }
+  // A gear whose number is not proven is in gear all the same: unknown, never 'N'.
+  if (match.index >= numbering.proven) return UNKNOWN;
   const sourceFactor = learned ? LEARNED_CONFIDENCE : 1;
   const closeness = 1 - 0.5 * match.score * match.score;
   return {
-    gear: match.index + 1,
+    gear: match.index + numbering.firstGear,
     inferred: true,
     confidence: round2(closeness * transmissionConfidence(transmission, speedKph) * sourceFactor),
   };

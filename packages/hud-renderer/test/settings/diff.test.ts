@@ -159,6 +159,45 @@ describe('rebaseDraft', () => {
     const rebased = rebaseDraft(oldBase, result.config, draft);
     expect(rebased).toEqual(draft);
     expect(diffConfig(result.config, rebased)).not.toEqual({});
+    // The same holds when the rebase knows what was sent.
+    expect(rebaseDraft(oldBase, result.config, draft, diffConfig(oldBase, draft))).toEqual(draft);
+  });
+
+  it('keeps a field changed back to its old value while the PATCH was in flight', () => {
+    const grid = ['display', 'projection', 'showGrid'] as const;
+    const oldBase = setAt(config(), grid, false);
+    // The grid is switched on and the live PATCH goes out…
+    const sentDraft = setAt(oldBase, grid, true);
+    const sent = livePatch(oldBase, sentDraft, ['display', 'projection'])!;
+    expect(sent).toEqual({ display: { projection: { showGrid: true } } });
+    // …the grid is switched off again before the reply, which says "on".
+    const draftNow = setAt(sentDraft, grid, false);
+    const newBase = setAt(oldBase, grid, true);
+    const rebased = rebaseDraft(oldBase, newBase, draftNow, sent);
+    expect(getAt(rebased, grid)).toBe(false);
+    // Still pending, so it is sent again.
+    expect(livePatch(newBase, rebased, ['display', 'projection'])).toEqual({
+      display: { projection: { showGrid: false } },
+    });
+  });
+
+  it('keeps a saved value the user reverted during the save, and later edits too', () => {
+    const min = ['display', 'brightness', 'minLevel'] as const;
+    const oldBase = setAt(config(), min, 0.1);
+    const edited = setAt(oldBase, min, 0.2);
+    const sent = pendingPatch(oldBase, edited);
+    let draftNow = setAt(edited, min, 0.1);
+    draftNow = setAt(draftNow, ['units', 'system'], 'imperial');
+    const saved = setAt(oldBase, min, 0.2);
+    const rebased = rebaseDraft(oldBase, saved, draftNow, sent);
+    expect(getAt(rebased, min)).toBe(0.1);
+    expect(rebased.units.system).toBe('imperial');
+    expect(pendingPatch(saved, rebased)).toEqual({
+      display: { brightness: { minLevel: 0.1 } },
+      units: { system: 'imperial' },
+    });
+    // Accepted and untouched since: equal to the new base, nothing pending.
+    expect(pendingPatch(saved, rebaseDraft(oldBase, saved, edited, sent))).toEqual({});
   });
 });
 

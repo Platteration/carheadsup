@@ -318,19 +318,67 @@ export function signalInDriverUnits(meta: SignalMeta, value: number, units: Unit
   }
 }
 
+/** Per signal: its latest sample time, and the local (monotonic) time that last moved. */
+export type SignalWatch = ReadonlyMap<SignalId, { at: number; changedAt: number }>;
+
 /**
- * Rows for the live signal table, in the canonical signal order. Staleness is judged against the
- * newest sample in the same response (the phone's clock may differ from the HUD's), and every
- * value counts as stale while the OBD link is not connected — a frozen reading is never shown as
- * live.
+ * Follow each signal's sample time across polls. A signal is "changed" at `now` when it is new or
+ * its `at` moved; otherwise it keeps the moment it last changed. Only the HUD's own timestamps are
+ * compared with each other, so the phone's clock never matters.
  */
-export function signalRows(diagnostics: ApiDiagnostics, units: UnitsConfig): SignalRow[] {
+export function watchSignals(
+  previous: SignalWatch,
+  diagnostics: ApiDiagnostics,
+  now: number,
+): SignalWatch {
+  const next = new Map<SignalId, { at: number; changedAt: number }>();
+  for (const id of SIGNAL_IDS) {
+    const sample = diagnostics.signals[id];
+    if (sample === undefined || !Number.isFinite(sample.at)) continue;
+    const before = previous.get(id);
+    next.set(
+      id,
+      before !== undefined && before.at === sample.at ? before : { at: sample.at, changedAt: now },
+    );
+  }
+  return next;
+}
+
+export interface SignalAging {
+  /** From {@link watchSignals}, updated with the same response. */
+  watch: SignalWatch;
+  /** Local monotonic time, same clock as the watch. */
+  now: number;
+  /** Poll interval: a value is only seen to change once per poll, so it gets this much slack. */
+  poll: number;
+}
+
+/**
+ * Rows for the live signal table, in the canonical signal order. A value is stale when it is
+ * older than its limit relative to the newest sample in the same response (the phone's clock may
+ * differ from the HUD's); when, across polls (`aging`), its sample time has not moved for longer
+ * than its limit — which catches a car that stopped answering altogether while the adapter link
+ * still reports connected; and always while the OBD link is not connected. A frozen reading is
+ * never shown as live.
+ */
+export function signalRows(
+  diagnostics: ApiDiagnostics,
+  units: UnitsConfig,
+  aging?: SignalAging,
+): SignalRow[] {
   const entries = SIGNAL_IDS.flatMap((id) => {
     const sample = diagnostics.signals[id];
     return sample !== undefined && Number.isFinite(sample.value) ? [{ id, ...sample }] : [];
   });
   const newest = entries.reduce((max, e) => Math.max(max, e.at), Number.NEGATIVE_INFINITY);
   const linkUp = diagnostics.link.state === 'connected';
+  /** How long the signal's sample time has stood still, beyond one poll of slack. */
+  const frozenFor = (id: SignalId): number => {
+    const seen = aging?.watch.get(id);
+    return aging === undefined || seen === undefined
+      ? 0
+      : aging.now - seen.changedAt - Math.max(0, aging.poll);
+  };
   return entries.map(({ id, value, at }) => {
     const meta = SIGNAL_META[id];
     const shown = signalInDriverUnits(meta, value, units);
@@ -343,7 +391,7 @@ export function signalRows(diagnostics: ApiDiagnostics, units: UnitsConfig): Sig
       value: formatNumber(shown.value, shown.decimals),
       unit: shown.unit,
       abnormal,
-      stale: !linkUp || newest - at > staleLimitMs(id),
+      stale: !linkUp || newest - at > staleLimitMs(id) || frozenFor(id) > staleLimitMs(id),
     };
   });
 }

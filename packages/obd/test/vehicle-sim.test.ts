@@ -258,7 +258,7 @@ describe('VehicleSimulator engine and body signals', () => {
     expect(new VehicleSimulator({ tirePressuresKpa: null }).snapshot().tirePressuresKpa).toBeNull();
   });
 
-  it('exposes SimStatus with every field', () => {
+  it('exposes the vehicle part of SimStatus with every field', () => {
     const sim = warm({ lux: 1500, ambientTempC: 3 });
     expect(sim.status()).toEqual({
       mode: 'manual',
@@ -272,9 +272,42 @@ describe('VehicleSimulator engine and body signals', () => {
       lux: 1500,
       ambientTempC: 3,
       scenarioStep: null,
+      coolantOverrideC: null,
+      voltageOverrideV: null,
+      fuelLevelOverridePct: null,
+      tirePressuresKpa: { fl: 235, fr: 235, rl: 230, rr: 230 },
     });
     sim.setControls({ lux: 20, ambientTempC: -2 });
     expect(sim.status()).toMatchObject({ lux: 20, ambientTempC: -2 });
+  });
+
+  it('reports the overrides and tyre pressures as set, so a reloaded console shows them', () => {
+    const sim = warm();
+    sim.setControls({
+      coolantOverrideC: 121,
+      voltageOverrideV: 11.4,
+      fuelLevelOverridePct: 140,
+      tirePressuresKpa: { fl: 230, fr: 228, rl: 165, rr: 231 },
+    });
+    for (let i = 0; i < 60; i++) sim.step(1000); // the tyres warm up; the setting does not move
+    expect(sim.status()).toMatchObject({
+      coolantOverrideC: 121,
+      voltageOverrideV: 11.4,
+      fuelLevelOverridePct: 100, // clamped
+      tirePressuresKpa: { fl: 230, fr: 228, rl: 165, rr: 231 },
+    });
+    sim.setControls({
+      coolantOverrideC: null,
+      voltageOverrideV: null,
+      fuelLevelOverridePct: null,
+      tirePressuresKpa: null,
+    });
+    expect(sim.status()).toMatchObject({
+      coolantOverrideC: null,
+      voltageOverrideV: null,
+      fuelLevelOverridePct: null,
+      tirePressuresKpa: null,
+    });
   });
 });
 
@@ -394,5 +427,34 @@ describe('SimulationClock', () => {
     await clock.advance(500);
     expect(stepped).toHaveLength(4);
     expect(driver.running).toBe(false);
+  });
+});
+
+describe('VehicleSimulator regressions', () => {
+  it('applies the engine switch sent together with the switch to manual (obd-15)', () => {
+    const sim = new VehicleSimulator(); // the demo script, engine running
+    sim.step(1000);
+    expect(sim.snapshot().engineRunning).toBe(true);
+    sim.setControls({ mode: 'manual', engineRunning: false });
+    sim.step(3000);
+    expect(sim.snapshot()).toMatchObject({ engineRunning: false, rpm: 0 });
+  });
+
+  it('keeps the engine switch set while scripted for when manual mode resumes (obd-15)', () => {
+    const sim = new VehicleSimulator();
+    sim.setControls({ engineRunning: false });
+    sim.step(1000);
+    expect(sim.snapshot().engineRunning).toBe(true); // the script drives the engine
+    sim.setControls({ mode: 'manual' });
+    sim.step(3000);
+    expect(sim.snapshot()).toMatchObject({ engineRunning: false, rpm: 0 });
+  });
+
+  it('continues as the script left the engine when the switch was not touched', () => {
+    const sim = new VehicleSimulator({ engineRunning: false }); // the script starts it anyway
+    sim.step(1000);
+    sim.setControls({ mode: 'manual' });
+    sim.step(1000);
+    expect(sim.snapshot().engineRunning).toBe(true);
   });
 });

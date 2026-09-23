@@ -76,7 +76,8 @@ public object NavLanguages {
             ),
             bareStreetToward = w("^(.+?)\\s+towards?\\s+(.+)$", ignoreCase = true),
             towardOnly = w("^towards?\\s+(.+)$", ignoreCase = true),
-            notAStreet = w("^(?:(?:the|your)\\s+)?(?:left|right)(?:\\s+side)?$|^stay\\s", ignoreCase = true),
+            notAStreet =
+            w("^(?:(?:the|your)\\s+)?(?:left|right)(?:\\s+side)?$|^stay\\s|^route$", ignoreCase = true),
             trailingVerbs = null,
             leadingArticle = w("^the\\s+", ignoreCase = true),
             statusText =
@@ -114,6 +115,15 @@ public object NavLanguages {
                 "yard" to 0.9144, "yards" to 0.9144,
             ),
             distancePrefix = w("^(?:in|after)\\s+", ignoreCase = true),
+            laneGuidance = w("^use\\s+(.{0,40}?)\\s*\\blanes?\\b\\s*,?\\s*(?:to\\s+)?", ignoreCase = true),
+            inlineThen = w("\\s*[,;]\\s*(?:and\\s+)?then\\s+", ignoreCase = true),
+            sentence =
+            w(
+                "^(?:pass|go|drive|cross|enter|exit|leave|take|continue|head|proceed|follow|turn|keep|stay|merge|" +
+                    "make|use|get|board|park|walk|pay)\\s+(?:the|a|an|through|over|across|past|onto|on|to|into|" +
+                    "out|around|under|via|your|straight|toward|towards)\\b",
+                ignoreCase = true,
+            ),
         )
 
     public val GERMAN: NavLanguage =
@@ -140,7 +150,8 @@ public object NavLanguages {
                 ),
                 rule(
                     "\\b(links|rechts) abbiegen\\b|\\bbiegen sie (links|rechts) ab\\b|" +
-                        "\\bnach (links|rechts) abbiegen\\b|\\babbiegen nach (links|rechts)\\b|^(links|rechts) (auf|in)\\b",
+                        "\\bnach (links|rechts) abbiegen\\b|\\babbiegen nach (links|rechts)\\b|" +
+                        "^(links|rechts) (auf|in)\\b|\\b(nach )?(links|rechts) abzubiegen\\b",
                     ManeuverKind.TURN,
                 ),
                 rule("\\b(ziel|zielort|angekommen)\\b|\\bziel erreicht\\b", ManeuverKind.ARRIVE),
@@ -161,6 +172,8 @@ public object NavLanguages {
                 street("\\bauf\\s+(?:die\\s+|den\\s+|der\\s+|das\\s+)?(.+?)(?:\\s+richtung\\s+.+)?$"),
                 street("\\bin\\s+(?:die|den|das)\\s+(.+?)(?:\\s+richtung\\s+.+)?$"),
                 street("\\brichtung\\s+(.+)$"),
+                // "…, um die A8 zu nehmen": the trailing "zu nehmen" is stripped by trailingVerbs.
+                street("\\bum\\s+(?:die\\s+|den\\s+|der\\s+|das\\s+)?(.+?\\s+zu\\s+\\p{L}+)$"),
             ),
             bareStreetToward = w("^(.+?)\\s+richtung\\s+(.+)$", ignoreCase = true),
             towardOnly = w("^richtung\\s+(.+)$", ignoreCase = true),
@@ -172,7 +185,9 @@ public object NavLanguages {
             ),
             trailingVerbs =
             w(
-                "(?:,?\\s+um)?\\s+(?:zu bleiben|bleiben|auffahren|abbiegen|einfädeln|weiterfahren|fahren|nehmen|folgen|wechseln)$",
+                "(?:,?\\s+um)?\\s+(?:zu bleiben|bleiben|auffahren|abbiegen|einfädeln|weiterfahren|fahren|" +
+                    "nehmen|folgen|wechseln|abzubiegen|aufzufahren|einzufädeln|weiterzufahren|zu fahren|" +
+                    "zu nehmen|zu folgen|zu wechseln)$",
                 ignoreCase = true,
             ),
             leadingArticle = w("^(?:die|den|der|das)\\s+", ignoreCase = true),
@@ -213,6 +228,12 @@ public object NavLanguages {
                 "yards" to 0.9144,
             ),
             distancePrefix = w("^(?:in|nach)\\s+", ignoreCase = true),
+            laneGuidance =
+            w(
+                "^(.{0,40}?)\\s*\\bspur(?:en)?\\s+(?:benutzen|nehmen|verwenden|wählen)\\b\\s*,?\\s*(?:um\\s+)?",
+                ignoreCase = true,
+            ),
+            inlineThen = w("\\s*[,;]\\s*(?:und\\s+)?(?:dann|danach|anschließend)\\s+", ignoreCase = true),
         )
 
     /** All built-in languages, English first. */

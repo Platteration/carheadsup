@@ -1,3 +1,4 @@
+import { tpmsLowLimitKpa, voltageFaultOf } from '../alerts/rules.ts';
 import { resolveLayout } from '../config/config.ts';
 import {
   ENGINE_RUNNING_RPM,
@@ -5,7 +6,6 @@ import {
   freshSpeedKph,
   freshSupplyVoltage,
   hazardDistanceM,
-  isEngineRunning,
   navDistanceM,
   navRemainingM,
 } from '../state/selectors.ts';
@@ -32,6 +32,7 @@ import type {
   WidgetFrame,
   WidgetFrameById,
 } from '../types/frame.ts';
+import type { Alert } from '../types/alerts.ts';
 import type { Hazard, HazardType, Maneuver, NavInfo } from '../types/nav.ts';
 import type { SignalId } from '../types/signals.ts';
 import type { HudState } from '../types/state.ts';
@@ -190,26 +191,37 @@ function boostWidget({ state, config }: WidgetEnv, zone: Zone): BoostWidget | nu
   };
 }
 
+/**
+ * The alert under `key` once it has been raised (dismissed or not). The out-of-range widgets
+ * follow their alert rather than bare thresholds, so they share its hysteresis and its
+ * persistence time and do not flicker with a reading that straddles a threshold.
+ */
+function raisedAlert(state: HudState, key: string): Alert | undefined {
+  return state.alerts.find((a) => a.key === key && a.raisedAt <= state.now);
+}
+
+/** Coolant temperature while the overheating alert is up. */
 function coolantWidget({ state, config }: WidgetEnv, zone: Zone): CoolantWidget | null {
   const temp = freshSignal(state, 'coolantTemp');
-  if (temp === null || temp < config.alerts.coolantHighC) return null;
+  const alert = raisedAlert(state, 'coolant');
+  if (temp === null || alert === undefined) return null;
   const unit = config.units.temperature;
   return {
     id: 'coolant',
     zone,
     value: displayTemperature(temp, unit),
     unit: temperatureUnitLabel(unit),
-    status: temp >= config.alerts.coolantCriticalC ? 'critical' : 'hot',
+    status: alert.severity === 'critical' ? 'critical' : 'hot',
   };
 }
 
-function voltageWidget({ state, config }: WidgetEnv, zone: Zone): VoltageWidget | null {
+/** Supply voltage while a voltage alert is up (after its persistence time: no cranking dips). */
+function voltageWidget({ state }: WidgetEnv, zone: Zone): VoltageWidget | null {
   const volts = freshSupplyVoltage(state);
-  if (volts === null) return null;
-  const a = config.alerts;
-  const low = isEngineRunning(state) ? a.voltageLowRunningV : a.voltageLowOffV;
-  const status = volts >= a.voltageHighV ? 'high' : volts <= low ? 'low' : null;
-  return status === null ? null : { id: 'voltage', zone, value: roundTo(volts, 1), status };
+  const fault = voltageFaultOf(raisedAlert(state, 'voltage'));
+  if (volts === null || fault === null) return null;
+  const status = fault === 'overvoltage' ? 'high' : 'low';
+  return { id: 'voltage', zone, value: roundTo(volts, 1), status };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -306,9 +318,13 @@ const HAZARD_LABELS: Readonly<Record<HazardType, string>> = {
   other: 'Hazard',
 };
 
-/** Short label; free-text descriptions are used only for 'other' and kept glanceable. */
-export function hazardLabel(hazard: Hazard): string {
-  if (hazard.type === 'other' && hazard.description !== null) {
+/**
+ * Short label, chosen by the HUD from the hazard type. The phone's free-text description is used
+ * only for 'other', kept glanceable, and only while the vehicle is not moving: a moving driver
+ * gets the fixed "Hazard" label, never third-party text to read.
+ */
+export function hazardLabel(hazard: Hazard, moving = false): string {
+  if (!moving && hazard.type === 'other' && hazard.description !== null) {
     const text = hazard.description.trim();
     if (text !== '') return text.length <= 24 ? text : `${text.slice(0, 23).trimEnd()}…`;
   }
@@ -316,7 +332,7 @@ export function hazardLabel(hazard: Hazard): string {
 }
 
 /** The nearest hazard ahead within reveal range (dead-reckoned; passed hazards are skipped). */
-function hazardWidget({ state, config }: WidgetEnv, zone: Zone): HazardWidget | null {
+function hazardWidget({ state, config, moving }: WidgetEnv, zone: Zone): HazardWidget | null {
   let nearest: { hazard: Hazard; distanceM: number } | null = null;
   for (const tracked of state.hazards) {
     const d = hazardDistanceM(state, tracked);
@@ -339,7 +355,7 @@ function hazardWidget({ state, config }: WidgetEnv, zone: Zone): HazardWidget | 
     limitStyle: config.display.speedLimitSign,
     delayMinutes:
       delay !== null && Number.isFinite(delay) && delay > 0 ? Math.ceil(delay / 60) : null,
-    label: hazardLabel(hazard),
+    label: hazardLabel(hazard, moving),
   };
 }
 
@@ -379,17 +395,19 @@ const TYRE_SIGNALS = {
   rr: 'tirePressureRR',
 } as const satisfies Record<string, SignalId>;
 
-/** Tyre pressures; while moving only when a tyre is low. */
+/** Tyre pressures; while moving only when a tyre is low ("low" as for the tyre alert). */
 function tpmsWidget({ state, config, moving }: WidgetEnv, zone: Zone): TpmsWidget | null {
   if (!config.vehicle.hasTpms) return null;
   const unit = config.units.pressure;
+  const alerting = state.alerts.some((a) => a.key === 'tpms');
+  const limit = tpmsLowLimitKpa(config, alerting);
   let anyLow = false;
   let anyValue = false;
   const tyre = (signal: SignalId): TireReading => {
     const kpa = freshSignal(state, signal);
     if (kpa === null) return { value: null, low: false };
     anyValue = true;
-    const low = kpa < config.alerts.tpmsLowKpa;
+    const low = kpa < limit;
     anyLow ||= low;
     return { value: displayPressure(kpa, unit), low };
   };

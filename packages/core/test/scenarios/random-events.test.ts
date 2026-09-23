@@ -175,12 +175,18 @@ function hazards(rand: Rand, at: number): Hazard[] {
   }));
 }
 
-/** A generator of plausible event streams around a random-walk vehicle speed. */
+/**
+ * A generator of plausible event streams around a random-walk vehicle speed, with the odd
+ * parking stop (a moving car only parks after standing still; losing data alone never parks it).
+ */
 function eventStream(seed: number): (at: number) => HudEvent {
   const rand = prng(seed);
   let speed = 0;
+  let parkedFor = 0;
   return (at) => {
-    speed = Math.min(200, Math.max(0, speed + between(rand, -8, 8)));
+    if (parkedFor > 0) parkedFor--;
+    else if (chance(rand, 0.004)) parkedFor = Math.floor(between(rand, 50, 250));
+    speed = parkedFor > 0 ? 0 : Math.min(200, Math.max(0, speed + between(rand, -8, 8)));
     const roll = rand();
     if (roll < 0.35) {
       const signals = new Set<SignalId>(['speed', 'rpm']);
@@ -371,7 +377,9 @@ function assertValidFrame(frame: HudFrame, state: HudState, config: HudConfig): 
     if (w.id === 'gear') expect(config.vehicle.transmission).not.toBe('cvt');
   }
 
-  expect(frame.alerts.length).toBeLessThanOrEqual(config.display.maxAlerts);
+  // Every critical alert is shown; the others only fill the room left under the cap.
+  const critical = frame.alerts.filter((a) => a.severity === 'critical').length;
+  expect(frame.alerts.length).toBeLessThanOrEqual(Math.max(config.display.maxAlerts, critical));
   const ranks = frame.alerts.map((a) => ALERT_SEVERITY_RANK[a.severity]);
   expect(ranks).toEqual([...ranks].sort((a, b) => b - a));
   for (const alert of frame.alerts) {

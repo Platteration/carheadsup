@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { LINK_LOSS_GRACE_MS } from '../../src/display/context.ts';
+import { DATA_GAP_GRACE_MS } from '../../src/display/context.ts';
+import { staleLimitMs } from '../../src/staleness.ts';
 import {
   EMPTY_PERSISTED_STATE,
   createInitialState,
+  extractActiveTrip,
   extractPersisted,
   reduce,
+  type PersistedStateWithTrip,
 } from '../../src/state/reducer.ts';
+import { tripId } from '../../src/trip/trip.ts';
 import { TRACK_NOT_ANNOUNCED } from '../../src/state/phone.ts';
 import {
   ENDED_CALL_SHOW_MS,
@@ -13,6 +17,7 @@ import {
   MAX_MESSAGES,
   MESSAGE_TTL_MS,
   PHONE_DATA_GRACE_MS,
+  ROAD_TTL_MS,
 } from '../../src/state/selectors.ts';
 import type { HudEvent } from '../../src/types/events.ts';
 import type { Hazard } from '../../src/types/nav.ts';
@@ -28,6 +33,7 @@ import {
   persisted,
   roadInfo,
   samplesEvent,
+  widget,
 } from './fixtures.ts';
 
 const DAY = 86_400_000;
@@ -137,6 +143,66 @@ describe('createInitialState', () => {
   });
 });
 
+describe('a trip across a power-down', () => {
+  /** 20 minutes at 60 km/h, stop, the ECU goes silent, the HUD powers down 20 s later. */
+  function driveThenPowerDown(config = makeConfig()): Harness {
+    const h = new Harness(config, persisted({ odometerKm: 1000 }));
+    h.obdConnected(T0);
+    h.run(T0 + 20 * 60_000, { speed: 60, rpm: 2000 }, 1000);
+    h.run(h.now + 5000, { speed: 0, rpm: 800 }, 1000);
+    h.send({ type: 'obd/link', state: 'error', message: 'No response', at: h.now + 1000 });
+    h.idle(h.now + 20_000);
+    expect(h.state.trip.active).not.toBeNull();
+    expect(h.effects.filter((e) => e.type === 'trip/completed')).toEqual([]);
+    return h;
+  }
+
+  /** What the server writes at shutdown and reads back at the next start-up. */
+  function saved(h: Harness): PersistedStateWithTrip {
+    return JSON.parse(
+      JSON.stringify({ ...extractPersisted(h.state), activeTrip: extractActiveTrip(h.state) }),
+    ) as PersistedStateWithTrip;
+  }
+
+  it('completes the trip on the first tick after the next start-up (regression: core-1)', () => {
+    const before = driveThenPowerDown();
+    const lastActivity = before.state.trip.active?.lastActivityAt;
+    const boot = before.now + 2 * 3_600_000;
+    const after = new Harness(makeConfig(), saved(before), boot);
+    expect(after.state.trip.current?.distanceKm).toBeCloseTo(20, 0);
+    after.tick(boot + 100);
+    const completed = after.effects.filter((e) => e.type === 'trip/completed');
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({
+      trip: { id: tripId(T0 + 1000), endedAt: lastActivity, startOdometerKm: 1000 },
+    });
+    expect(after.state.trip.active).toBeNull();
+  });
+
+  it('carries on with the same trip after a short power blip', () => {
+    const before = driveThenPowerDown();
+    const boot = before.now + 60_000;
+    const after = new Harness(makeConfig(), saved(before), boot);
+    after.obdConnected(boot);
+    after.run(boot + 60_000, { speed: 60, rpm: 2000 }, 1000);
+    expect(after.state.trip.current?.startedAt).toBe(T0 + 1000);
+    expect(after.state.trip.current?.distanceKm).toBeGreaterThan(20.9);
+    expect(after.effects.filter((e) => e.type === 'trip/completed')).toEqual([]);
+  });
+
+  it('ignores a missing or corrupt saved trip', () => {
+    for (const activeTrip of [undefined, null, { distanceKm: 'far' }]) {
+      const h = new Harness(makeConfig(), { ...persisted(), activeTrip });
+      expect(h.state.trip).toEqual({
+        current: null,
+        lastCompleted: null,
+        completedCount: 0,
+        active: null,
+      });
+    }
+  });
+});
+
 describe('reduce — general', () => {
   it('never moves time backwards', () => {
     const h = new Harness();
@@ -228,18 +294,55 @@ describe('obd/samples', () => {
     expect(h.state.odometer.km).toBeCloseTo(1000.02, 9);
   });
 
-  it('snaps to the odometer PID, extrapolates while it is fresh, then estimates', () => {
+  it('snaps to the odometer PID once confirmed, extrapolates while it is fresh, then estimates', () => {
     const h = new Harness(makeConfig(), persisted({ odometerKm: 1000 }));
     h.samples(T0, { speed: 72, odometer: 52_000.4 });
+    // Far from the known value: taken only once the next reading confirms it.
+    expect(h.state.odometer).toMatchObject({ km: 1000, source: 'estimated' });
+    h.samples(T0 + 1000, { speed: 72, odometer: 52_000.4 });
     expect(h.state.odometer).toMatchObject({ km: 52_000.4, source: 'pid' });
-    h.samples(T0 + 1000, { speed: 72 });
+    h.samples(T0 + 2000, { speed: 72 });
     expect(h.state.odometer.source).toBe('pid');
     expect(h.state.odometer.km).toBeCloseTo(52_000.42, 9);
     // The PID goes stale after 120 s without readings.
-    h.samples(T0 + 121_000, { speed: 72 });
     h.samples(T0 + 122_000, { speed: 72 });
+    h.samples(T0 + 123_000, { speed: 72 });
     expect(h.state.odometer.source).toBe('estimated');
     expect(h.state.odometer.km).toBeCloseTo(52_000.44, 9);
+  });
+
+  it('takes a PID reading that continues the known odometer at once', () => {
+    const h = new Harness(makeConfig(), persisted({ odometerKm: 48_213.4 }));
+    h.samples(T0, { speed: 50, odometer: 48_213.5 });
+    expect(h.state.odometer).toMatchObject({ km: 48_213.5, source: 'pid' });
+  });
+
+  it('ignores implausible odometer readings (regression: core-7)', () => {
+    const config = makeConfig();
+    const h = new Harness(
+      config,
+      persisted({
+        odometerKm: 48_213.4,
+        maintenanceRecords: [{ itemId: 'oil', odometerKm: 45_000, at: T0 - DAY }],
+      }),
+    );
+    const oil = () => h.state.maintenance.status.find((i) => i.itemId === 'oil')?.remainingKm;
+    const remaining = oil();
+    // An ECU that lists PID 0xA6 but answers 0, then a bit error, then a garbled value.
+    for (const [i, bad] of [0, 48_213.4 + 6553.6, 1234.5].entries()) {
+      h.samples(T0 + i * 10_000, { odometer: bad });
+      expect(h.state.odometer).toMatchObject({ km: 48_213.4, source: 'estimated' });
+    }
+    expect(h.effects).toEqual([]); // nothing to persist
+    expect(extractPersisted(h.state).odometerKm).toBe(48_213.4);
+    h.tick(T0 + 120_000);
+    expect(oil()).toBe(remaining);
+    // A later service without an explicit reading uses the real odometer.
+    h.send({ type: 'maintenance/done', itemId: 'oil', odometerKm: null, at: T0 + 121_000 });
+    expect(h.state.maintenance.records.at(-1)).toMatchObject({ odometerKm: 48_213.4 });
+    // The next good reading is taken.
+    h.samples(T0 + 130_000, { odometer: 48_213.5 });
+    expect(h.state.odometer).toMatchObject({ km: 48_213.5, source: 'pid' });
   });
 
   it('keeps the odometer unknown without a baseline or PID', () => {
@@ -276,13 +379,45 @@ describe('obd/samples', () => {
 });
 
 describe('tick', () => {
-  it('parks after vehicle data is lost for the grace period', () => {
-    const h = driving(50);
+  it('keeps driving when the adapter dies at speed (regression: core-4)', () => {
+    const h = driving(120);
+    h.send({ type: 'obd/link', state: 'error', message: 'Bluetooth link lost', at: h.now });
+    h.idle(h.now + 10 * 60_000);
     expect(h.state.context.context).toBe('city');
-    h.idle(h.now + LINK_LOSS_GRACE_MS - 5000);
-    expect(h.state.context.context).toBe('city');
-    h.idle(h.now + 10_000);
+    expect(h.frame().diagnostics).toBeNull();
+    // Back with a reading of standstill: the normal parking rules apply again.
+    h.obdConnected(h.now + 1000);
+    h.run(h.now + 5000, { speed: 0, rpm: 800 });
+    expect(h.state.context.context).toBe('stopped');
+  });
+
+  it('parks when the ECU falls silent at a standstill (ignition off)', () => {
+    const h = driving(40);
+    h.run(h.now + 3000, { speed: 0, rpm: 750 });
+    expect(h.state.context.context).toBe('stopped');
+    // Speed is known until it goes stale, then the grace runs.
+    const unknownFrom = h.now + staleLimitMs('speed');
+    h.idle(unknownFrom + DATA_GAP_GRACE_MS - 1000);
+    expect(h.state.context.context).toBe('stopped');
+    h.idle(unknownFrom + DATA_GAP_GRACE_MS);
     expect(h.state.context.context).toBe('parked');
+  });
+
+  it('does not open the dashboard during a long start-stop red light (regression: core-12)', () => {
+    const h = driving(40);
+    h.run(h.now + 120_000, { speed: 0, rpm: 0 }, 500); // engine stopped by start-stop
+    expect(h.state.context.context).toBe('stopped');
+    expect(h.frame().diagnostics).toBeNull();
+  });
+
+  it('does not park on a 2.5 s OBD data gap at a red light (regression: core-11)', () => {
+    const h = driving(40);
+    h.run(h.now + 3000, { speed: 0, rpm: 750 });
+    expect(h.state.context.context).toBe('stopped');
+    h.idle(h.now + 2500, 100);
+    h.run(h.now + 20_000, { speed: 0, rpm: 750 });
+    expect(h.state.context.context).toBe('stopped');
+    expect(h.frame().diagnostics).toBeNull();
   });
 
   it('drops the gear estimate once its inputs go stale', () => {
@@ -412,6 +547,49 @@ describe('tick', () => {
     expect(h.state.hazards).toEqual([]);
     expect(h.state.media).toBeNull();
     expect(h.state.call).toBeNull();
+  });
+
+  it('drops a ringing or dialing call at once when the phone disconnects (regression: core-6)', () => {
+    for (const state of ['ringing', 'dialing'] as const) {
+      const h = new Harness();
+      h.phoneConnected(T0);
+      h.send({ type: 'call/update', call: callInfo({ state }), at: T0 });
+      h.send({ type: 'phone/link', connected: false, at: T0 + 1000 });
+      expect(h.state.call).toBeNull();
+      expect(h.frame().call).toBeNull();
+    }
+    // An answered call keeps its card through the grace period, but without controls.
+    const h = new Harness();
+    h.phoneConnected(T0);
+    h.send({ type: 'call/update', call: callInfo({ state: 'active' }), at: T0 });
+    h.send({ type: 'phone/link', connected: false, at: T0 + 1000 });
+    h.tick(T0 + 10_000);
+    expect(h.frame().call).toMatchObject({ state: 'active', canAccept: false, canDecline: false });
+  });
+
+  it("drops the previous phone's route, road, call and media when another phone takes over", () => {
+    const h = new Harness();
+    h.phoneConnected(T0); // "Pixel"
+    h.send({ type: 'nav/update', nav: navInfo(), at: T0 });
+    h.send({ type: 'road/update', road: roadInfo(50), at: T0 });
+    h.send({ type: 'hazards/update', hazards: [hazard('h1', 500)], at: T0 });
+    h.send({ type: 'media/update', media: mediaInfo(), at: T0 });
+    h.send({ type: 'call/update', call: callInfo({ state: 'active' }), at: T0 });
+    h.send({ type: 'phone/link', connected: false, at: T0 + 1000 });
+    // Within the grace period, another phone connects: nothing of the first one stays.
+    h.send({ type: 'phone/link', connected: true, deviceName: 'Galaxy', at: T0 + 5000 });
+    expect(h.state.phone).toMatchObject({ connected: true, deviceName: 'Galaxy' });
+    expect(h.state.nav).toBeNull();
+    expect(h.state.road).toBeNull();
+    expect(h.state.hazards).toEqual([]);
+    expect(h.state.media).toBeNull();
+    expect(h.state.call).toBeNull();
+    expect(h.frame().call).toBeNull();
+    // The new phone's own data then stays, also over a reconnect that repeats its name.
+    h.send({ type: 'road/update', road: roadInfo(80), at: T0 + 6000 });
+    h.send({ type: 'phone/link', connected: true, deviceName: 'Galaxy', at: T0 + 7000 });
+    h.send({ type: 'phone/link', connected: true, at: T0 + 8000 });
+    expect(h.state.road).not.toBeNull();
   });
 
   it('keeps phone data when the phone reconnects within the grace period', () => {
@@ -553,8 +731,28 @@ describe('phone events', () => {
 
   it('stores road info', () => {
     const h = new Harness();
-    h.send({ type: 'road/update', road: roadInfo(80), at: T0 });
-    expect(h.state.road).toEqual(roadInfo(80));
+    h.send({ type: 'road/update', road: roadInfo(80, { updatedAt: T0 - 5000 }), at: T0 });
+    // Re-stamped with the HUD's receipt time.
+    expect(h.state.road).toEqual(roadInfo(80, { updatedAt: T0 }));
+  });
+
+  it('drops a speed limit the phone stopped refreshing (regression: core-8)', () => {
+    const h = driving(95);
+    h.phoneConnected(h.now);
+    h.send({ type: 'road/update', road: roadInfo(50), at: h.now });
+    // Refreshed every 30 s: kept.
+    for (let i = 0; i < 4; i++) {
+      h.run(h.now + 30_000, { speed: 95, rpm: 2500 }, 1000);
+      h.send({ type: 'road/update', road: roadInfo(50), at: h.now });
+    }
+    expect(widget(h.frame(), 'speed')).toMatchObject({ value: 95, overLimit: true });
+    // The location feed stops but the socket stays up: 10 minutes without a refresh.
+    h.run(h.now + ROAD_TTL_MS, { speed: 95, rpm: 2500 }, 1000);
+    expect(h.state.road).not.toBeNull();
+    h.run(h.now + 10 * 60_000, { speed: 95, rpm: 2500 }, 1000);
+    expect(h.state.road).toBeNull();
+    expect(widget(h.frame(), 'speedLimit')).toBeUndefined();
+    expect(widget(h.frame(), 'speed')).toMatchObject({ value: 95, overLimit: false, overBy: null });
   });
 
   it('replaces hazards, stamping them with the receipt time', () => {
@@ -774,6 +972,7 @@ describe('input', () => {
 
   it('primary on a ringing call changes nothing but the input time', () => {
     const h = withAlerts();
+    h.phoneConnected(T0 + 250);
     h.send({ type: 'call/update', call: callInfo(), at: T0 + 300 });
     const before = h.state;
     h.input('primary', T0 + 400);
@@ -798,6 +997,7 @@ describe('input', () => {
   it('secondary on a ringing or active call changes nothing but the input time', () => {
     for (const state of ['ringing', 'dialing', 'active'] as const) {
       const h = withAlerts();
+      h.phoneConnected(T0 + 250);
       h.send({ type: 'call/update', call: callInfo({ state }), at: T0 + 300 });
       const before = h.state;
       h.input('secondary', T0 + 400);
@@ -853,6 +1053,31 @@ describe('input', () => {
     expect(h.frame().diagnostics?.page).toBe('engine');
     h.idle(T0 + 20_000, 5000);
     expect(h.frame().diagnostics?.page).toBe('trouble-codes');
+  });
+
+  it('re-raises dismissed tyre and fuel alerts as they worsen on the highway (regression: core-9)', () => {
+    const h = new Harness(makeConfig({ vehicle: { hasTpms: true } }));
+    h.obdConnected(T0);
+    const drive = (tyre: number, fuel: number) => ({
+      speed: 110,
+      rpm: 2600,
+      tirePressureFL: tyre,
+      tirePressureFR: 230,
+      tirePressureRL: 230,
+      tirePressureRR: 230,
+      fuelLevel: fuel,
+    });
+    h.run(T0 + 20_000, drive(175, 11), 500);
+    expect(h.state.context.context).toBe('highway');
+    h.input('primary');
+    h.input('primary');
+    expect(h.frame().alerts).toEqual([]);
+    // A puncture and a nearly empty tank.
+    h.run(h.now + 5 * 60_000, drive(90, 1.5), 1000);
+    expect(h.frame().alerts.map((a) => [a.kind, a.severity])).toEqual([
+      ['tpms', 'critical'],
+      ['fuel-low', 'warning'],
+    ]);
   });
 
   it('toggles blanking', () => {
@@ -958,6 +1183,19 @@ describe('config', () => {
     ]);
     expect(h.state.env.brightness.level).toBe(0.4);
     expect(h.state.alerts.map((a) => a.key).sort()).toEqual(['coolant', 'maintenance-due:oil']);
+  });
+
+  it('forgets learned gear ratios when the transmission type changes (regression: core-3)', () => {
+    const config = makeConfig({ vehicle: { transmission: 'automatic' } });
+    const h = new Harness(config, persisted({ learnedGearRatios: [72, 48, 35.5, 28, 23] }));
+    h.send({ type: 'config', config: makeConfig({ units: { clock: '12h' } }), at: T0 + 100 });
+    expect(h.state.gear.learnedRatios).toEqual([72, 48, 35.5, 28, 23]);
+    expect(h.lastEffects).toEqual([]);
+    const manual = makeConfig({ vehicle: { transmission: 'manual' } });
+    h.send({ type: 'config', config: manual, at: T0 + 200 });
+    expect(h.state.gear.learnedRatios).toBeNull();
+    expect(h.lastEffects).toEqual([{ type: 'persist' }]);
+    expect(extractPersisted(h.state).learnedGearRatios).toBeNull();
   });
 });
 

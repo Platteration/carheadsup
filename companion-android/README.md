@@ -49,17 +49,17 @@ put on the build classpath in that case, so `./gradlew :protocol:test` works on 
 | Component | Role |
 | --- | --- |
 | `HudConnectionService` | Foreground service (types `connectedDevice` + `location`) that owns the link, GPS, media, call and road monitoring while driving. Sticky; "Stop" in its notification. |
-| `HudLink` | WebSocket client for `ws://<hud>:8080/ws/phone`. Finds the HUD by mDNS (`_carheadsup._tcp`, `HudDiscovery`) or uses the manual `host:port`; sends `hello` with the pairing token; after `welcome` replays the latest nav/road/hazards/media/call state and forwards new messages rate-limited per type (nav ≤ 4 Hz, location 1 Hz, media/road/hazards ≤ 2 Hz); pings every 5 s and reconnects when the HUD is silent for 15 s; exponential backoff (1 s → 30 s, jittered); a refused pairing (`bad-token`) waits the maximum. |
+| `HudLink` | WebSocket client for `ws://<hud>:8080/ws/phone`. Finds the HUD by mDNS (`_carheadsup._tcp`, `HudDiscovery`) or uses the manual `host:port`; sends `hello` with the pairing token; after `welcome` replays the latest nav/road/hazards/media/call state and forwards new messages rate-limited per type (nav ≤ 4 Hz, location 1 Hz, media/road/hazards ≤ 2 Hz); pings every 5 s and reconnects when the HUD is silent for 15 s; exponential backoff (1 s → 30 s, jittered); a refused pairing (`bad-token`) or a session the same phone replaced (close 4000) waits the maximum; while another phone holds the HUD it is refused with close 1013 and backs off as usual. Restarts mDNS discovery when it finds nothing for 30 s or on *Retry now*. |
 | `LocalNetwork` | Binds HUD sockets to the Wi-Fi network. The HUD usually runs an access point without internet, which Android does not use as the default network; unbound sockets would go out over mobile data and never reach it. |
-| `NavNotificationListener` | Notification access: parses Google Maps' guidance (`GoogleMapsNotificationParser`), encodes the maneuver icon as a ≤ 32 KiB PNG, ends guidance 10 s after the notification disappears; extracts message senders (`MessagingNotificationExtractor`) and dialer caller names. |
-| `MessageRelay` / `MessageReader` | Sends `message` (sender, app, `readingAloud`) while connected; reads the text aloud with TextToSpeech under transient, ducking audio focus. Never talks over a call. |
+| `NavNotificationListener` | Notification access: parses Google Maps' guidance (`GoogleMapsNotificationParser`), encodes the maneuver icon as a ≤ 32 KiB PNG, ends guidance 10 s after the notification disappears (at once when the listener is unbound); extracts message senders (`MessagingNotificationExtractor`) and caller names from call notifications that describe the tracked call. |
+| `MessageRelay` / `MessageReader` | Sends `message` (sender, app, `readingAloud`) while connected; reads the text aloud with TextToSpeech under transient, ducking audio focus (`SpeechQueue`). Pauses for navigation prompts and resumes afterwards; never talks over a call — messages wait for it to end (up to 3 min). `readingAloud` is only set for messages that will be read. |
 | `MediaMonitor` | `MediaSessionManager.getActiveSessions` (allowed for the notification listener) → `media`. |
-| `CallMonitor` | `TelephonyCallback` (Android 12+) / `PhoneStateListener` + the `PHONE_STATE` broadcast for the number, contact lookup, `TelecomManager.acceptRingingCall()` / `endCall()` for the HUD's `call-action`. |
+| `CallMonitor` | `TelephonyCallback` (Android 12+) / `PhoneStateListener` + the `PHONE_STATE` broadcast for the number, contact lookup, `TelecomManager.acceptRingingCall()` / `endCall()` for the HUD's `call-action`. Android does not say whether a waiting call was answered or declined, so the call that goes on is shown without a caller (unless the HUD did it), until the dialer's ongoing-call notification names it. |
 | `LocationFeed` | Platform `LocationManager` GPS at 1 Hz → `location`. |
-| `RoadInfoProvider` | Overpass tiles (≈2 km) around the car, one polite request at a time, cached in memory and on disk (fresh for 7 days, used up to 90 days offline) → `road` and `hazards`. Unknown rather than stale when there is no data. |
+| `RoadInfoProvider` | Overpass tiles (≈2 km) around the car, one polite request at a time, cached in memory and on disk (fresh for 7 days, used up to 90 days offline) → `road` and `hazards`. Unknown rather than stale when there is no data or no usable GPS fix for 5 s; while stopped, cameras are looked for in the last direction of travel. |
 | `TripStore` / `HudApi` | Trip log merged from `trip-completed`, `trips` and `GET /api/trips`; maintenance from `GET /api/maintenance`; units from `GET /api/config`; `POST /api/input` for the remote when the socket is down. |
 | `MainActivity` | Compose UI: **Status** (connection, permission checklist, battery optimisation), **Remote** (primary / secondary / pages / blank / brightness), **Trips** (log + maintenance), **Setup** (address, pairing and API tokens, feature switches, HUD settings). |
-| `HudSettingsActivity` | The HUD's `/settings` page in a WebView (the process is bound to the HUD's Wi-Fi while it is open). |
+| `HudSettingsActivity` | The HUD's `/settings` page in a WebView (the process is bound to the HUD's Wi-Fi while it is open). The API token is handed to the page as `?token=` (`HudEndpoint.withApiToken`): the page keeps it in its storage, removes it from the address and sends it with its own API calls, which a WebView cannot add a header to. |
 
 ### Protocol conformance
 
@@ -118,13 +118,18 @@ What you get:
 
 - Maneuver types from the instruction verbs (turn / slight / sharp / keep / merge / exit / ramp /
   fork / U-turn / roundabout with exit number / continue / arrive / ferry), resolved for left- or
-  right-hand traffic (from the mobile network's country). When Maps only shows a street
-  ("Main St toward X") the type is `unknown` and the HUD draws **Maps' own arrow icon** instead.
+  right-hand traffic (from the mobile network's country, looked up again every minute). The side
+  comes from the maneuver's own words: lane guidance ("Use the right lane to turn left") only
+  hints at the side of an exit that names none, and an inline follow-up ("Turn left, then keep
+  right") becomes the next maneuver. When Maps only shows a street ("Main St toward X") the type
+  is `unknown` and the HUD draws **Maps' own arrow icon** instead; text that is neither a known
+  instruction nor a name ("Pass through the toll plaza") is never shown as the street.
 - Distance, next street (and current street for "continue/head"), remaining time and distance,
-  and the ETA as an absolute time (resolved in the phone's time zone; crossing midnight and
-  12/24-hour formats handled).
+  and the ETA as an absolute time (resolved in the phone's time zone; crossing midnight, the
+  night the clocks go back and 12/24-hour formats handled; a clock time that disagrees with the
+  remaining time by more than 20 min yields to it).
 - Guidance ends on the HUD 10 s after the notification disappears (Maps briefly removes and
-  re-posts it during normal guidance).
+  re-posts it during normal guidance), and at once when notification access goes away.
 
 Limits:
 
@@ -154,7 +159,7 @@ and `type=enforcement` relations (speed, red-light, section control) within 1.5 
 Data quality is only as good as the local map. Overpass is a free community service: the app
 sends at most one request at a time and a few per minute, backs off on errors and `Retry-After`,
 and caches tiles for a week. **Speed-camera warnings are illegal while driving in some countries**
-(e.g. Germany, Switzerland); they have their own switch in *Setup*.
+(e.g. Germany, Switzerland), so they are off until the driver turns them on in *Setup*.
 
 ## Building
 
@@ -203,7 +208,14 @@ services aggressively — allow auto-start / exclude the app there as well.
 ## Privacy
 
 - Message content is only read aloud on the phone; the `message` frame has no content field (the
-  HUD rejects frames that try) and message ids are one-way hashes.
+  HUD rejects frames that try) and message ids are keyed hashes (HMAC with a random key that
+  never leaves the phone), so they cannot be matched against guessed texts.
+- **The phone does not verify the HUD.** The protocol only authenticates the phone (pairing
+  token in `hello`); nothing proves that the peer is your HUD. With automatic discovery the phone
+  connects to whatever advertises `_carheadsup._tcp` on its current Wi-Fi, which then receives the
+  pairing and API tokens, the position, caller and message-sender names, and can answer or decline
+  calls. Use the car's own password-protected Wi-Fi, prefer a manual address on shared networks,
+  and stop the service (notification → *Stop*) when not driving.
 - Nothing is sent anywhere but the HUD, except Overpass requests with the area around the car
   (tile bounding boxes, not the exact position).
 - Tokens live in app-private storage; backups are disabled.

@@ -156,6 +156,19 @@
   min-width: 0;
 }
 
+/*
+ * The top-centre zone leads with the collision cue and alert banners (`.hud-lead`), which must
+ * never be dropped or clipped. The zone therefore clips only sideways — hiding the wrapped-away
+ * widget column as usual — and lets a tall stack grow down over the centre, painted above the
+ * other zones. Banners are opaque (black-backed), so nothing underneath shows through them.
+ */
+.hud-zone--top {
+  overflow-x: clip;
+  overflow-y: visible;
+  position: relative;
+  z-index: 1;
+}
+
 .hud-row--top {
   justify-content: flex-start;
 }
@@ -295,6 +308,13 @@
 /* ------------------------------------------------------------------------------------------ */
 /* Alerts, toast, call */
 
+/* Collision cue, alert banners and "+N more", kept together as one block (see `.hud-zone--top`). */
+.hud-lead {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--u) * 1.2);
+}
+
 .hud-alert {
   display: flex;
   align-items: center;
@@ -302,8 +322,43 @@
   padding: calc(var(--u) * 1) calc(var(--u) * 1.8);
   border: calc(var(--u) * 0.6) solid currentColor;
   border-radius: calc(var(--u) * 1.6);
-  background: color-mix(in srgb, currentColor 10%, transparent);
+  /* Opaque: a tall stack may overlap widgets below it, which must not show through. */
+  background: color-mix(in srgb, currentColor 10%, #000);
   text-align: left;
+}
+
+/* Several items: every banner shrinks to its title and one detail line. */
+.hud-lead--compact .hud-alert {
+  padding: calc(var(--u) * 0.7) calc(var(--u) * 1.6);
+}
+
+.hud-lead--compact .hud-alert__icon {
+  width: calc(var(--u) * 5);
+  height: calc(var(--u) * 5);
+}
+
+.hud-lead--compact .hud-alert__detail {
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+}
+
+.hud-lead--compact .hud-collision__chevrons {
+  width: calc(var(--u) * 10);
+  height: calc(var(--u) * 6.5);
+}
+
+.hud-lead--compact .hud-collision__text {
+  font-size: calc(var(--u) * 7);
+}
+
+.hud-alert-more {
+  align-self: center;
+  padding: 0 calc(var(--u) * 1.5);
+  border-radius: calc(var(--u) * 1);
+  background: #000;
+  font-size: calc(var(--u) * 2.8);
+  color: var(--c-secondary);
+  letter-spacing: 0.06em;
 }
 
 .hud-alert__icon {

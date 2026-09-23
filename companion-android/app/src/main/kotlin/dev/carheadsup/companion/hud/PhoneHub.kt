@@ -1,5 +1,6 @@
 package dev.carheadsup.companion.hud
 
+import dev.carheadsup.protocol.PhoneNav
 import dev.carheadsup.protocol.PhoneToHud
 import dev.carheadsup.protocol.link.LatestState
 import kotlinx.coroutines.channels.BufferOverflow
@@ -30,4 +31,7 @@ class PhoneHub {
 
     /** State messages to send right after `welcome`. */
     fun replay(): List<PhoneToHud> = latest.replay()
+
+    /** The nav state last published, if any. */
+    fun latestNav(): PhoneNav? = latest.latestNav()
 }

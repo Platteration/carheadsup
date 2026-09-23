@@ -5,12 +5,15 @@
 # /etc/pam.d/carheadsup-kiosk. It runs as the unprivileged user carheadsup-kiosk in its own logind
 # session (which grants access to the display and input devices), replaces the login prompt on
 # tty1 and is restarted whenever cage or Chromium exits. cage has no idle timeout, so the panel
-# never blanks by itself; the only blanking is the HUD's own (blank button / B key).
+# never blanks by itself; the only blanking is the HUD's own (blank button / B key). Until the
+# HUD page loads (server starting, stopped, or on another port) the screen stays black: the
+# launcher never shows Chromium's bright error page on the windshield.
 #
-# Change the page or Chromium flags with a drop-in (`sudo systemctl edit carheadsup-kiosk`):
+# Change the page, the scale or extra Chromium flags (CARHEADSUP_KIOSK_FLAGS, see kiosk.sh) with
+# a drop-in (`sudo systemctl edit carheadsup-kiosk`):
 #   [Service]
 #   Environment=CARHEADSUP_KIOSK_URL=http://localhost:8081/
-#   Environment=CARHEADSUP_KIOSK_FLAGS=--force-device-scale-factor=1.25
+#   Environment=CARHEADSUP_KIOSK_SCALE=1.25
 
 [Unit]
 Description=carheadsup HUD kiosk (Chromium in cage)

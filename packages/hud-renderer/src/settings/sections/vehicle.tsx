@@ -32,7 +32,7 @@ import {
 } from '../ui/fields.tsx';
 import type { Option } from '../ui/fields.tsx';
 import { useForm } from '../ui/form-context.ts';
-import { useArmed } from '../ui/hooks.ts';
+import { useArmed, useRowKeys } from '../ui/hooks.ts';
 
 const FUEL_TYPES: ReadonlyArray<Option<FuelType>> = [
   { value: 'gasoline', label: 'Petrol / gasoline' },
@@ -205,6 +205,7 @@ function CustomPids({
   preferTyres: boolean;
 }) {
   const pids = scope.value;
+  const rows = useRowKeys(pids.length);
   const listIssue = scope.issuesWithin().find((i) => i.message.toLowerCase().includes('duplicate'));
   return (
     <Card>
@@ -223,10 +224,13 @@ function CustomPids({
         <ol class="pid-list" data-path={scope.key}>
           {pids.map((_, index) => (
             <PidRow
-              key={index}
+              key={rows.keys[index]}
               scope={scope.child(index)}
               index={index}
-              onRemove={() => scope.replace(pids.filter((_, i) => i !== index))}
+              onRemove={() => {
+                rows.remove(index);
+                scope.replace(pids.filter((_, i) => i !== index));
+              }}
             />
           ))}
         </ol>

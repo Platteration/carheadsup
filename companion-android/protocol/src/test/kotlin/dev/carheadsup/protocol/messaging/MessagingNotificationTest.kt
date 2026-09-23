@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
+import java.security.MessageDigest
 
 class MessagingNotificationTest {
     private val now = 1_758_620_000_000L
@@ -124,7 +125,7 @@ class MessagingNotificationTest {
         val sms =
             MessagingNotificationContent(
                 "0|com.android.mms|123|null|10001", "com.android.mms", "Messages", now, null, false, false,
-                "+49 170 1234567 (2 messages)", "Call me back",
+                "+49 170 1234567 (2 messages)", "Call me back", hasReplyAction = true,
             )
         val message = extractor.extract(sms, now)!!
         assertEquals("+49 170 1234567", message.sender)
@@ -144,6 +145,27 @@ class MessagingNotificationTest {
         assertNull(extractor.extract(email, now))
         val call = custom.copy(packageName = "com.whatsapp", category = "call", title = "Incoming voice call")
         assertNull(extractor.extract(call, now))
+    }
+
+    @Test
+    fun `missed calls and other app notifications are not messages (android-18)`() {
+        val missedCall =
+            MessagingNotificationContent(
+                "k1", "com.whatsapp", "WhatsApp", now, "missed_call", false, false, "Alice", "Missed voice call",
+            )
+        assertNull(extractor.extract(missedCall, now))
+        for (category in listOf("reminder", "event", "recommendation", "status", "promo", "err")) {
+            assertNull(extractor.extract(missedCall.copy(category = category), now), category)
+        }
+        // A known messaging app without MessagingStyle, category or reply action: not a message.
+        val joined =
+            MessagingNotificationContent(
+                "k2", "org.telegram.messenger", "Telegram", now, null, false, false, "Bob joined Telegram!", "Say hi",
+            )
+        assertNull(extractor.extract(joined, now))
+        // The same app with a reply action (or category msg) is one.
+        assertEquals("Bob", extractor.extract(joined.copy(title = "Bob", hasReplyAction = true), now)!!.sender)
+        assertEquals("Bob", extractor.extract(joined.copy(title = "Bob", category = "msg"), now)!!.sender)
     }
 
     @Test
@@ -187,6 +209,28 @@ class MessagingNotificationTest {
         assertEquals(a.id, extractor.extract(repost, now)!!.id)
         assertNotEquals(a.id, extractor.extract(next, now)!!.id)
         assertNotEquals(a.id, extractor.extract(first.copy(key = "other-chat"), now)!!.id)
+    }
+
+    @Test
+    fun `message ids cannot be recomputed from the message (android-17)`() {
+        val content = whatsApp(listOf(StyleMessage("Alice", "ok", now)))
+        val id = extractor.extract(content, now)!!.id
+        // Whoever sees the id knows the app, roughly the time and the sender: with an unkeyed
+        // digest, hashing likely short replies would give the text away.
+        val sha = MessageDigest.getInstance("SHA-256")
+        for (part in listOf(content.packageName, content.key, now.toString(), "Alice", "ok")) {
+            sha.update(part.toByteArray(Charsets.UTF_8))
+            sha.update(0)
+        }
+        val unkeyed = "msg-" + sha.digest().take(10).joinToString("") { "%02x".format(it) }
+        assertNotEquals(unkeyed, id)
+        // Keyed with a secret that stays on the phone: another key, another id; same key, same id.
+        val keyA = ByteArray(32) { it.toByte() }
+        val keyB = ByteArray(32) { (it + 1).toByte() }
+        val withA = MessagingNotificationExtractor(idKey = keyA).extract(content, now)!!.id
+        assertEquals(withA, MessagingNotificationExtractor(idKey = keyA).extract(content, now)!!.id)
+        assertNotEquals(withA, MessagingNotificationExtractor(idKey = keyB).extract(content, now)!!.id)
+        assertTrue(Regex("msg-[0-9a-f]{20}").matches(withA))
     }
 
     @Test

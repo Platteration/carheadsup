@@ -1,3 +1,4 @@
+import type { CollisionLevel } from './adas.ts';
 import type { HudConfig } from './config.ts';
 import type { DiagnosticDtc } from './frame.ts';
 import type { MaintenanceItemStatus, TripRecord } from './records.ts';
@@ -11,7 +12,7 @@ import type { ObdLinkStatus } from './vehicle.ts';
  *
  *   GET    /api/info                         → ApiInfo
  *   GET    /api/config                       → HudConfig
- *   PUT    /api/config        HudConfig      → ApiConfigResult   (full replace, validated)
+ *   PUT    /api/config        HudConfig      → ApiConfigResult   (lenient replace, see below)
  *   PATCH  /api/config        DeepPartial    → ApiConfigResult   (deep merge, validated)
  *   GET    /api/diagnostics                  → ApiDiagnostics
  *   POST   /api/diagnostics/clear-dtcs       → ApiClearDtcsResult (refused unless parked with engine off)
@@ -24,6 +25,13 @@ import type { ObdLinkStatus } from './vehicle.ts';
  *   POST   /api/input                     { action: InputAction } → { ok: true }
  *   GET    /api/sim                          → SimStatus         (404 when not simulating)
  *   POST   /api/sim                       SimControl → SimStatus (404 when not simulating)
+ *
+ * PUT /api/config is a lenient replace, not a reset: every field present in the body is
+ * validated and applied; fields missing from the body keep their current value; invalid fields
+ * also keep their current value and are listed in `errors`. PUT and PATCH answer 200 when
+ * `errors` is empty and 422 otherwise — the valid fields have been applied and saved even then.
+ * They answer 503 (nothing changed) while the HUD is starting, and when config.json could not
+ * be loaded at start-up (unreadable or not JSON): it is never replaced by the defaults.
  */
 
 export interface ApiInfo {
@@ -36,8 +44,12 @@ export interface ApiInfo {
 }
 
 export interface ApiConfigResult {
+  /** The resulting stored config. */
   config: HudConfig;
-  /** Validation problems; offending fields were left unchanged. */
+  /**
+   * Validation problems ("dotted.path: message"); offending fields were left unchanged. The
+   * response status is 422 when this is not empty.
+   */
   errors: string[];
 }
 
@@ -111,6 +123,11 @@ export interface SimControl {
   tirePressuresKpa?: { fl: number; fr: number; rl: number; rr: number } | null;
 }
 
+/**
+ * The simulator's state, including everything the dev console controls, so that the console
+ * shows the server's state after a reload (or when another console changed it) rather than
+ * toggles remembered locally.
+ */
 export interface SimStatus {
   mode: SimDriveMode;
   throttle: number;
@@ -123,4 +140,27 @@ export interface SimStatus {
   lux: number;
   ambientTempC: number;
   scenarioStep: string | null;
+  /** Forced coolant temperature (°C), or null when the simulated value is used. */
+  coolantOverrideC: number | null;
+  /** Forced battery voltage, or null. */
+  voltageOverrideV: number | null;
+  /** Forced fuel level (%), or null. */
+  fuelLevelOverridePct: number | null;
+  /**
+   * Tyre pressures as last set (kPa gauge, cold; the reported ones rise as the tyres warm up),
+   * or null while the simulated car reports no TPMS.
+   */
+  tirePressuresKpa: { fl: number; fr: number; rl: number; rr: number } | null;
+  /** The simulated ADAS module's warnings. */
+  adas: { blindSpotLeft: boolean; blindSpotRight: boolean; collision: CollisionLevel };
+  /** The simulated phone. */
+  phone: {
+    /** Its link as set with SimControl.phone connect / disconnect. */
+    connected: boolean;
+    /** A real phone is connected, so the simulated one is silent until it goes. */
+    steppedAside: boolean;
+  };
 }
+
+/** The part of {@link SimStatus} the vehicle simulator itself knows (not the peripherals). */
+export type SimVehicleStatus = Omit<SimStatus, 'adas' | 'phone'>;

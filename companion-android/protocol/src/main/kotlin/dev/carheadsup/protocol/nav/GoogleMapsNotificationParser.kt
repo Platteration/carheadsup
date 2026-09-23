@@ -52,7 +52,15 @@ public class GoogleMapsNotificationParser(
         require(languages.isNotEmpty()) { "at least one language is required" }
     }
 
-    public fun parse(content: NavNotificationContent, clock: Clock): PhoneNav? {
+    /**
+     * Parses [content]; [drivingSide] is where traffic keeps to right now (it can change during a
+     * drive, e.g. from France into the UK), defaulting to the side given at construction.
+     */
+    public fun parse(
+        content: NavNotificationContent,
+        clock: Clock,
+        drivingSide: DrivingSide = this.drivingSide,
+    ): PhoneNav? {
         if (content.packageName != GOOGLE_MAPS_PACKAGE) return null
         val isNavigationCategory = content.category == CATEGORY_NAVIGATION
         if (!content.isOngoing && !isNavigationCategory) return null
@@ -83,12 +91,21 @@ public class GoogleMapsNotificationParser(
         }
         if (distanceM == null && chip != null) distanceM = Quantities.parseDistance(chip, language)
 
+        // Follow-up maneuvers: whole lines ("Then turn left") and inline clauses ("Turn left, then
+        // keep right"), which are cut off so that they cannot decide this maneuver or its street.
         val thenLines = (listOfNotNull(text) + bigLines).mapNotNull {
             language.thenMarker.find(it)?.groupValues?.get(1)
+        }.toMutableList()
+        fun mainClause(part: String?): String? {
+            if (part == null || language.thenMarker.find(part) != null) return null
+            val separator = language.inlineThen?.find(part) ?: return part
+            part.substring(separator.range.last + 1).trim().takeIf { it.isNotEmpty() }?.let(thenLines::add)
+            return part.substring(0, separator.range.first).trim().ifEmpty { null }
         }
+        val titleClause = mainClause(titleInstruction)
         val instructionParts =
-            (listOfNotNull(titleInstruction, text) + (if (text == null) bigLines else emptyList()))
-                .filter { part -> language.thenMarker.find(part) == null }
+            (listOf(titleClause, mainClause(text)) + (if (text == null) bigLines.map(::mainClause) else emptyList()))
+                .filterNotNull()
                 .distinct()
 
         val summary = subText?.let { parseSummary(it, language) } ?: Summary()
@@ -98,9 +115,10 @@ public class GoogleMapsNotificationParser(
         if (!isNavigationCategory && !hasQuantities) return null
 
         // A title is a distance or a sentence, never a bare street name.
-        val guidance = parseGuidance(instructionParts, language, instructionParts - setOfNotNull(titleInstruction))
+        val guidance =
+            parseGuidance(instructionParts, language, instructionParts - setOfNotNull(titleClause), drivingSide)
         val thenManeuver = thenLines.firstNotNullOfOrNull { line ->
-            parseGuidance(listOf(line), language, bareCandidates = emptyList()).toManeuver(line)
+            parseGuidance(listOf(line), language, bareCandidates = emptyList(), drivingSide).toManeuver(line)
         }
         val maneuver = Maneuver(
             type = guidance.type,
@@ -177,22 +195,35 @@ public class GoogleMapsNotificationParser(
      * the parts that may be a bare street name when no maneuver verb is found (the notification
      * text, but never a title, which is a distance or a sentence).
      */
-    private fun parseGuidance(parts: List<String>, language: NavLanguage, bareCandidates: List<String>): Guidance {
+    private fun parseGuidance(
+        parts: List<String>,
+        language: NavLanguage,
+        bareCandidates: List<String>,
+        drivingSide: DrivingSide,
+    ): Guidance {
         // The maneuver comes from the first part that names one: its head (before the street
-        // part) first, so a street such as "Exit Rd" cannot masquerade as a maneuver.
-        var kind: ManeuverKind? = null
-        var primary: String? = null
+        // part) first, so a street such as "Exit Rd" cannot masquerade as a maneuver. Leading
+        // lane guidance ("Use the right lane to …") is set aside: its side is the lanes' side.
+        var found: ManeuverMatch? = null
+        var primaryPart: String? = null
+        var primary: LaneGuidance? = null
         for (part in parts) {
-            val lower = part.lowercase(Locale.ROOT)
+            val guidance = language.withoutLaneGuidance(part)
+            val lower = guidance.instruction.lowercase(Locale.ROOT)
             val head = language.streetStart.find(lower)?.let { lower.substring(0, it.range.first) } ?: lower
-            kind = language.matchManeuver(head) ?: language.matchManeuver(lower)
-            if (kind != null) {
-                primary = part
+            found = language.findManeuver(head) ?: language.findManeuver(lower)
+            if (found != null) {
+                primaryPart = part
+                primary = guidance
                 break
             }
         }
-        val lowerPrimary = primary?.lowercase(Locale.ROOT)
-        val type = kind?.resolve(lowerPrimary?.let(language::sideOf), drivingSide) ?: ManeuverType.UNKNOWN
+        val kind = found?.kind
+        val lowerPrimary = primary?.instruction?.lowercase(Locale.ROOT)
+        // The side named with the maneuver ("turn left") wins; then any side named in the
+        // instruction ("take the exit on the left"); the lanes to use only hint at it last.
+        val side = found?.side ?: lowerPrimary?.let(language::sideOf) ?: primary?.laneSide
+        val type = kind?.resolve(side, drivingSide) ?: ManeuverType.UNKNOWN
         val exit = if (kind == ManeuverKind.ROUNDABOUT) lowerPrimary?.let(language::roundaboutExitOf) else null
 
         val streetParts = parts.filter { !language.statusText.containsMatchIn(it) }
@@ -200,14 +231,16 @@ public class GoogleMapsNotificationParser(
             when (kind) {
                 ManeuverKind.ARRIVE -> null
 
-                // No verb: the text is the street itself, possibly with a direction.
+                // No verb: the text may be the street itself, possibly with a direction.
                 null ->
                     bareCandidates
                         .filter { !language.statusText.containsMatchIn(it) }
                         .firstNotNullOfOrNull { bareStreet(it, language) }
 
                 else -> {
-                    val ordered = listOfNotNull(primary) + streetParts.filter { it != primary }
+                    val others =
+                        streetParts.filter { it != primaryPart }.map { language.withoutLaneGuidance(it).instruction }
+                    val ordered = listOfNotNull(primary?.instruction) + others
                     ordered.firstNotNullOfOrNull { streetFromPattern(it, language) }
                 }
             }
@@ -228,16 +261,27 @@ public class GoogleMapsNotificationParser(
         return null
     }
 
-    /** Text without a maneuver verb: "Main St toward Downtown", "toward Downtown", "Main St". */
+    /**
+     * Text without a maneuver verb: "Main St toward Downtown", "toward Downtown", "Main St". Only
+     * text that reads as a name is taken for the street — the HUD shows the street while moving,
+     * so an unrecognised sentence ("Pass through the toll plaza") must not end up there; a street
+     * named inside such a sentence ("Enter the tunnel on I-90 E") is still found.
+     */
     private fun bareStreet(text: String, language: NavLanguage): String? {
         language.towardOnly.find(text)?.let { return cleanStreet(it.groupValues[1], language) }
-        language.bareStreetToward.find(text)?.let { match ->
-            return cleanStreet(match.groupValues[1], language) ?: cleanStreet(match.groupValues[2], language)
-        }
-        if (Quantities.parseDistance(text, language) != null || Quantities.findClockTime(text, language) != null) {
+        val toward = language.bareStreetToward.find(text)
+        if (toward == null &&
+            (Quantities.parseDistance(text, language) != null || Quantities.findClockTime(text, language) != null)
+        ) {
             return null
         }
-        return cleanStreet(text, language)
+        // The name test runs before cleanStreet strips anything: "Durch den Tunnel fahren" is an
+        // instruction even though "Durch den Tunnel" alone could be a name.
+        val candidate = toward?.groupValues?.get(1) ?: text
+        val name = if (looksLikeName(candidate.trim(), language)) cleanStreet(candidate, language) else null
+        return name
+            ?: streetFromPattern(text, language)
+            ?: toward?.let { cleanStreet(it.groupValues[2], language) }
     }
 
     private fun cleanStreet(raw: String, language: NavLanguage): String? {
@@ -247,7 +291,25 @@ public class GoogleMapsNotificationParser(
         if (street.isEmpty() || street.length > MAX_STREET_CHARS) return null
         if (language.notAStreet.containsMatchIn(street)) return null
         if (street.none { it.isLetterOrDigit() }) return null
+        if (!looksLikeName(street, language)) return null
         return street
+    }
+
+    /**
+     * Whether [text] reads as a name ("Main St", "I-90 E", "Rue de la Paix", "Unter den Linden")
+     * rather than a sentence ("Cross the bridge", "Mautstelle passieren"): a few words, no
+     * clause punctuation, mostly capitalised, not ending in a lower-case word (German
+     * instructions end in a verb) and not opening like an instruction.
+     */
+    private fun looksLikeName(text: String, language: NavLanguage): Boolean {
+        if (text.any { it in CLAUSE_PUNCTUATION }) return false
+        if (language.sentence?.containsMatchIn(text) == true) return false
+        val words = text.split(' ').filter { it.isNotEmpty() }
+        if (words.size > MAX_STREET_WORDS) return false
+        val lettered = words.filter { it.first().isLetter() }
+        val last = lettered.lastOrNull() ?: return true
+        if (last.first().isLowerCase()) return false
+        return lettered.count { it.first().isLowerCase() } * 2 <= lettered.size
     }
 
     private fun detectLanguage(instructions: List<String>, summary: String?): NavLanguage {
@@ -262,6 +324,8 @@ public class GoogleMapsNotificationParser(
         public const val GOOGLE_MAPS_PACKAGE: String = "com.google.android.apps.maps"
         public const val CATEGORY_NAVIGATION: String = "navigation"
         private const val MAX_STREET_CHARS = 100
+        private const val MAX_STREET_WORDS = 8
+        private const val CLAUSE_PUNCTUATION = ",;!?"
 
         private val SUMMARY_SEPARATOR = Regex("\\s*[·•‧∙|]\\s*")
         private val DISTANCE_PREFIXED = Regex("^(.{1,24}?)\\s*[-–—·•:|]\\s+(.+)$")

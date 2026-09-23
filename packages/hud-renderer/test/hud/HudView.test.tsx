@@ -106,6 +106,37 @@ describe('HudView — layout', () => {
     expect(bottom.indexOf('data-call')).toBeLessThan(bottom.indexOf('data-toast'));
   });
 
+  it('keeps the cue and every banner in one lead block, compacted when there are several', () => {
+    const one = renderHud(withFrame(CITY, { alerts: [CAUTION] }));
+    expect(one).toContain('class="hud-lead" data-lead="true"');
+    const several = renderHud(
+      withFrame(CITY, {
+        collision: 'warning',
+        alerts: [CRITICAL, { ...CRITICAL, key: 'oil', title: 'Oil pressure low' }],
+      }),
+    );
+    const lead = several.slice(several.indexOf('class="hud-lead hud-lead--compact"'));
+    expect(lead.indexOf('data-collision="warning"')).toBeGreaterThan(-1);
+    expect(lead.match(/data-alert="/g)).toHaveLength(2);
+    expect(renderHud(CITY)).not.toContain('hud-lead');
+  });
+
+  it('summarises lower-priority alerts beyond three banners but never drops a critical one', () => {
+    const alerts = [
+      CRITICAL,
+      { ...CRITICAL, key: 'oil' },
+      { ...CRITICAL, key: 'brakes' },
+      { ...CRITICAL, key: 'charging' },
+      CAUTION,
+      { ...CAUTION, key: 'washer' },
+    ];
+    const html = renderHud(withFrame(CITY, { alerts }));
+    expect(html.match(/data-severity="critical"/g)).toHaveLength(4);
+    expect(html).not.toContain('data-alert="fuel-low"');
+    expect(html).toContain('data-alerts-more="2"');
+    expect(textOf(html)).toContain('+2 more');
+  });
+
   it('shows the status icons with the simulator badge only when simulated', () => {
     expect(textOf(renderHud(CITY))).not.toContain('SIM');
     const sim = renderHud(
@@ -144,6 +175,15 @@ describe('HudView — theme', () => {
     expect(renderHud(withFrame(CITY, { theme: { night: false, brightness: -2 } }))).toContain(
       'filter:brightness(0.05)',
     );
+  });
+
+  it('leaves dimming to the backlight when the server drives one (no double dimming)', () => {
+    const dim = withFrame(CITY, { theme: { night: true, brightness: 0.3 } });
+    const html = renderHud(dim, { hardwareBrightness: true });
+    expect(html).not.toContain('filter:');
+    expect(html).toContain('data-brightness="1"');
+    expect(html).toContain('hud--night'); // the palette still follows the frame
+    expect(renderHud(dim, { hardwareBrightness: false })).toContain('filter:brightness(0.3)');
   });
 
   it('omits the filter at full brightness and for invalid values', () => {
@@ -269,15 +309,54 @@ describe('HudView — projection', () => {
     expect(textOf(html)).toContain('Rosenheimer');
   });
 
-  it('draws the alignment grid instead of the HUD while calibrating', () => {
-    const html = renderHud(CITY, { projection: { ...MIRROR, showGrid: true }, preview: true });
-    expect(html).toContain('data-alignment-grid="true"');
-    expect(html).not.toContain('data-widget');
-    expect(textOf(html)).toBe('TL TR BR BL');
+  it('draws the alignment grid instead of the widgets while standing still', () => {
+    const grid = { projection: { ...MIRROR, showGrid: true }, preview: true };
+    for (const context of ['parked', 'stopped'] as const) {
+      const html = renderHud(withFrame(CITY, { context }), grid);
+      expect(html, context).toContain('data-alignment-grid="true"');
+      expect(html, context).not.toContain('data-widget');
+      expect(textOf(html), context).toBe('TL TR BR BL');
+    }
     // Also without a frame: calibration does not need live data.
     expect(renderHud(null, { projection: { ...MIRROR, showGrid: true } })).toContain(
       'data-alignment-grid',
     );
+  });
+
+  it('never lets the grid hide the HUD of a moving car', () => {
+    const highway = withFrame(SAMPLE_FRAMES['highway-cruise']!, {
+      collision: 'warning',
+      alerts: [CRITICAL, { ...CRITICAL, key: 'voltage', title: 'Charging fault' }, CAUTION],
+    });
+    for (const frame of [CITY, highway]) {
+      const html = renderHud(frame, { projection: { ...MIRROR, showGrid: true } });
+      expect(html, frame.context).not.toContain('data-alignment-grid');
+      expect(html, frame.context).toContain('data-widget="speed"');
+    }
+    const html = renderHud(highway, { projection: { ...MIRROR, showGrid: true } });
+    expect(html).toContain('data-collision="warning"');
+    expect(html).toContain('hud-collision-border');
+    expect(html.match(/data-alert="/g)).toHaveLength(3);
+  });
+
+  it('keeps safety cues and alerts drawn over the grid', () => {
+    const html = renderHud(
+      withFrame(CITY, {
+        context: 'stopped',
+        collision: 'warning',
+        blindSpot: { left: true, right: false },
+        alerts: [CRITICAL, CAUTION],
+      }),
+      { projection: { ...MIRROR, showGrid: true }, preview: true },
+    );
+    expect(html).toContain('data-alignment-grid="true"');
+    expect(html).toContain('data-mode="calibration"');
+    expect(html).toContain('data-collision="warning"');
+    expect(html).toContain('hud-collision-border');
+    expect(html).toContain('data-blindspot="left"');
+    expect(html).toContain('data-alert="coolant"');
+    expect(html).toContain('data-alert="fuel-low"');
+    expect(html).not.toContain('data-widget');
   });
 
   it('passes a class name through', () => {

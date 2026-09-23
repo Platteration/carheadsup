@@ -191,12 +191,19 @@ export interface RendererFrameMessage {
   frame: HudFrame;
 }
 
-/** Sent on connect and whenever the display config changes. */
+/** Sent on connect and whenever the projection or `hardwareBrightness` changes. */
 export interface RendererDisplayMessage {
   t: 'display';
   projection: HudConfig['display']['projection'];
   /** True when the server runs the simulator (enables the dev console controls). */
   simulated: boolean;
+  /**
+   * True while the server applies `theme.brightness` to the display hardware (a Linux backlight
+   * device): the kiosk must then not dim the content as well, or the result would be about
+   * b × b^2.2 instead of b. Previews on other screens keep dimming (they are not lit by that
+   * backlight). Absent from older servers: treat as false.
+   */
+  hardwareBrightness: boolean;
 }
 
 export type ServerToRenderer = RendererFrameMessage | RendererDisplayMessage;

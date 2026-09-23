@@ -80,6 +80,85 @@ export function createTripState(): TripState {
   return { current: null, lastCompleted: null, completedCount: 0, active: null };
 }
 
+/**
+ * Trip state that carries on with a trip persisted before a restart (see `restoreActiveTrip`).
+ * The first update afterwards ends it — with its last activity as the end time — when the
+ * restart came after `endAfterEngineOffMs` (the usual ignition-off power-down), and continues
+ * it after a shorter power blip.
+ */
+export function resumeTripState(active: ActiveTrip, pricing: TripPricing): TripState {
+  return { ...createTripState(), active, current: summarise(active, pricing) };
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+const isTime = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isAmount = (v: unknown): v is number => isTime(v) && v >= 0;
+const isAmountOrNull = (v: unknown): v is number | null => v === null || isAmount(v);
+const TRIP_AMOUNTS = ['distanceKm', 'movingMs', 'idleMs', 'fuelL', 'fuelDistanceKm', 'maxSpeedKph'];
+const ODOMETER_FIELDS = ['firstKm', 'distanceAtFirst', 'lastKm', 'distanceAtLast'];
+
+/**
+ * Validate a trip in progress read back from disk (written from `ActiveTrip` as JSON). Returns
+ * a fresh copy, or null when anything is missing, of the wrong type, negative, out of order or
+ * later than `now` (a trip that cannot have happened before this start-up).
+ */
+export function restoreActiveTrip(value: unknown, now: number): ActiveTrip | null {
+  if (!isRecord(value)) return null;
+  const { startedAt, lastActivityAt, last, odometer } = value;
+  if (!isTime(startedAt) || !isTime(lastActivityAt) || lastActivityAt < startedAt) return null;
+  if (!TRIP_AMOUNTS.every((k) => isAmount(value[k])) || typeof value['fuelKnown'] !== 'boolean') {
+    return null;
+  }
+  if (
+    !isRecord(last) ||
+    !isTime(last['at']) ||
+    last['at'] < lastActivityAt ||
+    last['at'] > now ||
+    !isAmountOrNull(last['speedKph']) ||
+    !isAmountOrNull(last['fuelRateLph']) ||
+    typeof last['engineRunning'] !== 'boolean' ||
+    typeof last['linkUp'] !== 'boolean'
+  ) {
+    return null;
+  }
+  if (
+    odometer !== null &&
+    !(isRecord(odometer) && ODOMETER_FIELDS.every((k) => isAmount(odometer[k])))
+  ) {
+    return null;
+  }
+  // Every field read below was validated above.
+  const trip = value as unknown as ActiveTrip;
+  return {
+    startedAt,
+    lastActivityAt,
+    distanceKm: trip.distanceKm,
+    movingMs: trip.movingMs,
+    idleMs: trip.idleMs,
+    fuelL: trip.fuelL,
+    fuelDistanceKm: trip.fuelDistanceKm,
+    fuelKnown: trip.fuelKnown,
+    maxSpeedKph: trip.maxSpeedKph,
+    odometer:
+      trip.odometer === null
+        ? null
+        : {
+            firstKm: trip.odometer.firstKm,
+            distanceAtFirst: trip.odometer.distanceAtFirst,
+            lastKm: trip.odometer.lastKm,
+            distanceAtLast: trip.odometer.distanceAtLast,
+          },
+    last: {
+      at: trip.last.at,
+      speedKph: trip.last.speedKph,
+      fuelRateLph: trip.last.fuelRateLph,
+      engineRunning: trip.last.engineRunning,
+      linkUp: trip.last.linkUp,
+    },
+  };
+}
+
 /** Deterministic trip id derived from its start time. */
 export function tripId(startedAt: number): string {
   return `trip-${Math.trunc(startedAt).toString(36)}`;

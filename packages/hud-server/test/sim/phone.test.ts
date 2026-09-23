@@ -6,6 +6,8 @@ import {
   CALL_AUTO_ANSWER_MS,
   CALL_DURATION_MS,
   MANUAL_CAMERA_AHEAD_M,
+  NAV_UPDATE_MS,
+  ROAD_REFRESH_MS,
   SCENARIO_CALLER,
   SIM_PHONE_DEVICE,
   SimPhone,
@@ -171,9 +173,13 @@ describe('SimPhone over one demo loop', () => {
   });
 
   it('sends road speed limits as the car moves: 50 in town, 100/120 on the highway', () => {
-    const roads = h
+    const all = h
       .of('road')
       .map((s) => ({ step: s.step, limit: s.message.speedLimitKph, name: s.message.roadName }));
+    // Each road once (it is also re-sent unchanged every 30 s, see the next test).
+    const roads = all.filter(
+      (r, i) => i === 0 || r.name !== all[i - 1]!.name || r.limit !== all[i - 1]!.limit,
+    );
     // Maple St, Station Rd, Bridge Ave, ramp, A7, camera zone, A7, exit, Harbor Rd ×2, then the
     // loop restarts on Maple St.
     expect(roads.map((r) => r.limit)).toEqual([50, 50, 50, 100, 120, 100, 120, 70, 50, 30, 50]);
@@ -181,6 +187,16 @@ describe('SimPhone over one demo loop', () => {
     const highway = roads.filter((r) => r.step === 'highway').map((r) => r.limit);
     expect(new Set(highway)).toEqual(new Set([100, 120]));
     expect(roads.at(-1)).toMatchObject({ step: 'warm-up', name: 'Maple Street' }); // the loop restarts
+  });
+
+  it('re-sends the road at least every 30 s, so the HUD never drops a valid limit', () => {
+    const times = h.of('road').map((s) => s.at);
+    for (let i = 1; i < times.length; i += 1) {
+      expect(times[i]! - times[i - 1]!).toBeLessThanOrEqual(ROAD_REFRESH_MS + NAV_UPDATE_MS);
+    }
+    // Also standing still at the end of the loop, for more than the HUD's 75 s road lifetime.
+    const parked = h.of('road').filter((s) => s.step === 'parked');
+    expect(parked.length).toBeGreaterThanOrEqual(5);
   });
 
   it('reports the speed camera on the highway and clears it once passed', () => {
@@ -230,7 +246,7 @@ describe('SimPhone over one demo loop', () => {
 
   it('changes track every 45 s', () => {
     const media = h.of('media');
-    expect(media.length).toBe(1 + Math.floor(290_000 / TRACK_CHANGE_MS));
+    expect(media.length).toBe(1 + Math.floor(DRIVE_MS / TRACK_CHANGE_MS));
     for (let i = 1; i < media.length; i++) {
       expect(media[i]!.at - media[i - 1]!.at).toBe(TRACK_CHANGE_MS);
       expect(media[i]!.message.trackKey).not.toBe(media[i - 1]!.message.trackKey);
@@ -377,6 +393,55 @@ describe('SimPhone controls', () => {
     expect(resent).toEqual(['road', 'media', 'nav', 'hazards', 'call']);
     expect(h.of('call').at(-1)!.message.state).toBe('active'); // it auto-answered meanwhile
     expect(h.events.filter((e) => e.type === 'phone/link')).toHaveLength(3);
+    await h.phone.stop();
+  });
+
+  it('steps aside while a real phone is connected and takes over again afterwards', async () => {
+    const h = harness();
+    const links = (): boolean[] =>
+      h.events.flatMap((e) => (e.type === 'phone/link' ? [e.connected] : []));
+    await h.phone.start(h.ctx);
+    h.phone.trigger({ kind: 'nav-start' });
+    h.phone.trigger({ kind: 'incoming-call', name: 'Kim' });
+    expect(links()).toEqual([true]);
+
+    h.phone.setRealPhoneConnected(true);
+    expect(h.phone.isSteppedAside).toBe(true);
+    const count = h.sent.length;
+    await h.clock.advance(CALL_AUTO_ANSWER_MS + 1000);
+    h.phone.trigger({ kind: 'message', sender: 'X' });
+    // Dev-console link changes must not touch the real phone's link…
+    h.phone.trigger({ kind: 'disconnect' });
+    h.phone.trigger({ kind: 'connect' });
+    // …and call actions are meant for the real phone's call.
+    h.phone.deliver({ t: 'call-action', callId: 'sim-call-1', action: 'decline' });
+    expect(h.sent.length).toBe(count);
+    expect(links()).toEqual([true]);
+
+    h.phone.setRealPhoneConnected(false);
+    expect(links()).toEqual([true, true]);
+    expect(h.sent.slice(count).map((s) => s.message.t)).toEqual([
+      'road',
+      'media',
+      'nav',
+      'hazards',
+      'call',
+    ]);
+    expect(h.of('call').at(-1)!.message.state).toBe('active'); // not declined; auto-answered
+    await h.phone.stop();
+  });
+
+  it('stays disconnected after a real phone leaves if the dev console disconnected it', async () => {
+    const h = harness();
+    await h.phone.start(h.ctx);
+    h.phone.setRealPhoneConnected(true);
+    h.phone.trigger({ kind: 'disconnect' });
+    const count = h.sent.length;
+    h.phone.setRealPhoneConnected(false);
+    expect(h.sent.length).toBe(count);
+    expect(h.events.filter((e) => e.type === 'phone/link')).toHaveLength(1);
+    h.phone.trigger({ kind: 'connect' });
+    expect(h.events.filter((e) => e.type === 'phone/link')).toHaveLength(2);
     await h.phone.stop();
   });
 

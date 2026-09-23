@@ -21,9 +21,12 @@ export interface ContextState {
    * creeping, so crawling in a traffic jam never counts towards `parkedAfterMs`.
    */
   stillSince: number | null;
-  /** Timestamp of the last input with a known speed (drives the link-loss grace period). */
+  /** Timestamp of the last input with a known speed (drives the data-gap grace period). */
   lastSpeedAt: number | null;
-  /** When the engine was last seen stopping while stationary (start-stop vs switched off). */
+  /**
+   * When the engine was last seen stopping at a complete standstill (start-stop vs switched
+   * off); reset by any creeping, like `stillSince`.
+   */
   engineOffSince: number | null;
 }
 
@@ -37,11 +40,12 @@ export const STATIONARY_HYSTERESIS_KPH = 2;
 export const STILL_KPH = 1;
 
 /**
- * When vehicle data disappears (link down or engine off with no speed) while driving, hold the
- * moving context this long before assuming 'parked', so a momentary adapter drop at speed does
- * not bring up the full-screen parked dashboard.
+ * When vehicle data stops arriving while stopped but the adapter link is still up (ELM327
+ * timeouts, BUS BUSY, a slow trouble-code read), hold 'stopped' this long after speed was last
+ * known before assuming the ignition went off. The poller keeps the link up when the ECU
+ * falls silent, so this is also how long ignition-off takes to bring up the parked dashboard.
  */
-export const LINK_LOSS_GRACE_MS = 30_000;
+export const DATA_GAP_GRACE_MS = 10_000;
 
 export function createContextState(now: number): ContextState {
   return {
@@ -74,18 +78,21 @@ function next(
 
 /**
  * Derive the driving context with hysteresis so the layout does not flicker:
- *  - parked:  stationary with the engine off for ≥ engineOffParkedAfterMs (so automatic
- *             start-stop does not flash the parked dashboard at red lights), stationary with the
- *             engine running for ≥ parkedAfterMs of complete standstill, or no speed at all with
- *             the engine off / link down (ignition off: immediately). Parked is sticky until the
- *             vehicle actually moves (starting the engine alone does not leave it).
+ *  - parked:  at a complete standstill with the engine off for ≥ engineOffParkedAfterMs (so
+ *             automatic start-stop does not flash the parked dashboard at red lights), at a
+ *             complete standstill with the engine running for ≥ parkedAfterMs, or stopped with
+ *             no vehicle data at all: at once when the link is down, after DATA_GAP_GRACE_MS
+ *             when the link is up but the ECU has fallen silent (ignition off). Parked is sticky
+ *             until the vehicle actually moves (starting the engine alone does not leave it).
  *  - stopped: stationary (< stationaryKph, left again only at stationaryKph + hysteresis) but not
  *             yet parked.
  *  - highway: ≥ highwayEnterKph sustained for highwayDwellMs; left below highwayExitKph.
  *  - city:    moving otherwise.
  *
- * Safety exceptions: a vehicle known to be moving is never 'parked' (hybrids drive with the
- * engine off), and losing vehicle data while moving holds the context for LINK_LOSS_GRACE_MS.
+ * Safety exceptions: a vehicle known to be moving is never 'parked' (hybrids drive and creep
+ * with the engine off, so creeping restarts both parking timers), and a moving context is
+ * never left on missing data alone — only a speed reading (e.g. 0 once the adapter is back)
+ * can end it, so a dead adapter at speed never brings up the full-screen dashboard.
  * While speed is unknown but the link is up and the engine runs, the context is held.
  */
 export function updateContext(
@@ -100,12 +107,11 @@ export function updateContext(
       : null;
 
   if (speed === null) {
+    if (isMovingContext(state.context) || state.context === 'parked') return state;
     if (input.linkUp && input.engineRunning) return state;
-    const withinGrace =
-      isMovingContext(state.context) &&
-      state.lastSpeedAt !== null &&
-      at - state.lastSpeedAt < LINK_LOSS_GRACE_MS;
-    if (withinGrace) return state;
+    const briefGap =
+      input.linkUp && state.lastSpeedAt !== null && at - state.lastSpeedAt < DATA_GAP_GRACE_MS;
+    if (briefGap) return state;
     return next(state, 'parked', at, { highwayCandidateSince: null });
   }
 
@@ -118,7 +124,10 @@ export function updateContext(
     const stationarySince = state.stationarySince ?? at;
     const stillSince =
       speed < Math.min(config.stationaryKph, STILL_KPH) ? (state.stillSince ?? at) : null;
-    const engineOffSince = input.engineRunning ? null : (state.engineOffSince ?? at);
+    // Like `stillSince`, engine-off time only counts at a complete standstill: a hybrid (or a
+    // start-stop engine) creeping along in a jam is still driving.
+    const engineOffSince =
+      !input.engineRunning && stillSince !== null ? (state.engineOffSince ?? at) : null;
     const parked =
       state.context === 'parked' ||
       (engineOffSince !== null && at - engineOffSince >= config.engineOffParkedAfterMs) ||

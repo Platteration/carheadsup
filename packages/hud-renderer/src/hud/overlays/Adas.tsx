@@ -1,4 +1,6 @@
 import type { CollisionLevel } from '@carheadsup/core';
+import { BLINK_FAST_PERIOD_MS, useBlinkPhase } from '../flash.ts';
+import { collisionLevel } from '../layout.ts';
 
 /** Glow bars on the screen edges while a vehicle is in the corresponding blind spot. */
 export function BlindSpot({ left, right }: { left: boolean; right: boolean }) {
@@ -45,7 +47,9 @@ function Chevrons() {
  * Forward-collision cue for the top-centre stack: amber chevrons for a caution, flashing red
  * chevrons with "BRAKE" for a warning. Renders nothing when there is no threat.
  */
-export function CollisionCue({ level }: { level: CollisionLevel }) {
+export function CollisionCue({ level: raw }: { level: CollisionLevel }) {
+  const level = collisionLevel(raw);
+  const phase = useBlinkPhase(BLINK_FAST_PERIOD_MS, level === 'warning');
   if (level === 'caution') {
     return (
       <div
@@ -61,6 +65,7 @@ export function CollisionCue({ level }: { level: CollisionLevel }) {
     return (
       <div
         class="hud-collision hud-collision--warning hud-tone--critical hud-flash-fast"
+        style={phase}
         data-collision="warning"
         role="alert"
       >
@@ -74,5 +79,6 @@ export function CollisionCue({ level }: { level: CollisionLevel }) {
 
 /** Red flashing frame around the whole image during a collision warning. */
 export function CollisionBorder() {
-  return <div class="hud-collision-border hud-flash-fast" aria-hidden="true" />;
+  const phase = useBlinkPhase(BLINK_FAST_PERIOD_MS);
+  return <div class="hud-collision-border hud-flash-fast" style={phase} aria-hidden="true" />;
 }

@@ -17,6 +17,7 @@ import {
   maintenanceRemaining,
   signalRows,
   sortMaintenance,
+  watchSignals,
   tripTotals,
   tripView,
 } from '../../src/settings/model/records.ts';
@@ -184,6 +185,38 @@ describe('signalRows', () => {
     expect(rows.find((r) => r.id === 'fuelLevel')?.stale).toBe(false);
     const down = signalRows({ ...diag, link: { ...diag.link, state: 'disconnected' } }, METRIC);
     expect(down.every((r) => r.stale)).toBe(true);
+  });
+
+  it('marks every signal stale when the car stops sending, though the link still says connected', () => {
+    const diag = mockDiagnostics();
+    const poll = 1000;
+    // The same samples come back on every poll: the adapter answers, the car does not.
+    let watch = watchSignals(new Map(), diag, 0);
+    const at = (now: number) =>
+      signalRows(diag, METRIC, { watch: (watch = watchSignals(watch, diag, now)), now, poll });
+    expect(at(1000).find((r) => r.id === 'rpm')?.stale).toBe(false);
+    // rpm may be 2 s old (plus one poll of slack), fuel level 120 s.
+    expect(at(3000).find((r) => r.id === 'rpm')?.stale).toBe(false);
+    expect(at(3001).find((r) => r.id === 'rpm')?.stale).toBe(true);
+    expect(at(3001).find((r) => r.id === 'fuelLevel')?.stale).toBe(false);
+    expect(at(121_001).every((r) => r.stale)).toBe(true);
+    expect(diag.link.state).toBe('connected');
+  });
+
+  it('keeps a signal live while its sample time keeps moving', () => {
+    const diag = mockDiagnostics();
+    let watch = watchSignals(new Map(), diag, 0);
+    for (let t = 1; t <= 10; t += 1) {
+      const next = {
+        ...diag,
+        signals: Object.fromEntries(
+          Object.entries(diag.signals).map(([id, s]) => [id, { ...s!, at: s!.at + t * 1000 }]),
+        ),
+      };
+      watch = watchSignals(watch, next, t * 1000);
+      const rows = signalRows(next, METRIC, { watch, now: t * 1000, poll: 1000 });
+      expect(rows.find((r) => r.id === 'rpm')?.stale).toBe(false);
+    }
   });
 
   it('skips non-finite samples and handles no signals', () => {

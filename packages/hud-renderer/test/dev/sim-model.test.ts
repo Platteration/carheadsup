@@ -12,7 +12,7 @@ import {
   QUICK_DTCS,
   checkDtcEntry,
   describeLux,
-  isEditableTarget,
+  ownsKey,
   luxFromSlider,
   sanitizeTyre,
   sliderFromLux,
@@ -107,9 +107,9 @@ describe('controls', () => {
     expect(sanitizeTyre(Number.NaN, 220)).toBe(220);
   });
 
-  it('only treats real elements that take keys as editable', () => {
-    expect(isEditableTarget(null)).toBe(false);
-    expect(isEditableTarget({} as EventTarget)).toBe(false);
+  it('only treats real elements that take keys as owning them', () => {
+    expect(ownsKey(null, 'b')).toBe(false);
+    expect(ownsKey({} as EventTarget, 'b')).toBe(false);
   });
 });
 

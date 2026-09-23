@@ -351,3 +351,74 @@ describe('ObdService with the simulator', () => {
     expect(links().filter((l) => l.state === 'disconnected')).toHaveLength(1);
   });
 });
+
+describe('ObdService regressions', () => {
+  it('opens the new link only after the old one finished closing (obd-11)', async () => {
+    const sim = new VehicleSimulator({ mode: 'manual', engineTempC: 90 });
+    const log: string[] = [];
+    let handles = 0;
+    let maxHandles = 0;
+    let clock: FakeClock | null = null;
+    /** An emulator whose close takes 200 ms, like an rfcomm TTY draining its output. */
+    class SlowClosing extends Elm327Emulator {
+      private closing: Promise<void> | null = null;
+      private readonly id: number;
+      constructor(id: number) {
+        super(sim, { latencyMs: 0 });
+        this.id = id;
+      }
+      override async open(): Promise<void> {
+        log.push(`open #${this.id}`);
+        handles += 1;
+        maxHandles = Math.max(maxHandles, handles);
+        await super.open();
+      }
+      override close(): Promise<void> {
+        this.closing ??= (async () => {
+          log.push(`close #${this.id} start`);
+          await new Promise<void>((resolve) => clock?.setTimeout(resolve, 200));
+          await super.close();
+          handles -= 1;
+          log.push(`close #${this.id} done`);
+        })();
+        return this.closing;
+      }
+    }
+    let created = 0;
+    const h = harness({}, { createTransport: () => new SlowClosing(++created) });
+    clock = h.clock;
+    h.service.start();
+    await h.clock.advance(2000);
+    expect(h.service.status.state).toBe('connected');
+    h.service.updateConfig({ ...CONFIG, protocol: '6' });
+    await h.clock.advance(2000);
+    expect(h.service.status.state).toBe('connected');
+    expect(log.indexOf('close #1 done')).toBeGreaterThanOrEqual(0);
+    expect(log.indexOf('close #1 done')).toBeLessThan(log.indexOf('open #2'));
+    expect(maxHandles).toBe(1);
+    const stopping = h.service.stop();
+    await h.clock.advance(300);
+    await stopping;
+  });
+
+  it('refuses to clear codes without recent speed and rpm data (obd-14)', async () => {
+    const sim = new VehicleSimulator({ mode: 'manual', engineTempC: 90, engineRunning: false });
+    const { clock, service } = harness(
+      { transport: 'simulator' },
+      { simulator: sim, emulator: { latencyMs: 0 } },
+    );
+    service.start();
+    await clock.advance(2000);
+    expect(service.status.state).toBe('connected');
+    // The session stays up but no service 01 answer arrives any more.
+    service.emulator?.setEcuOnline(false);
+    await clock.advance(6000);
+    expect(service.status.state).toBe('connected');
+    expect(await service.clearDtcs()).toEqual({
+      ok: false,
+      message: 'Vehicle data unavailable: cannot confirm the car is parked with the engine off',
+    });
+    expect(service.emulator?.commandLog).not.toContain('04');
+    await service.stop();
+  });
+});

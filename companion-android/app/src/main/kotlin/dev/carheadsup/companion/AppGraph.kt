@@ -78,14 +78,19 @@ class AppGraph(private val app: Application) {
             .callTimeout(20, TimeUnit.SECONDS)
             .build()
 
-    /** Internet client (Overpass): default network, generous timeouts for big tiles. */
+    /**
+     * Internet client (Overpass): always the default network — even while the settings page has
+     * bound the process to the HUD's Wi-Fi — with generous timeouts for big tiles.
+     */
     val internetClient: OkHttpClient =
-        socketClient.newBuilder()
-            .pingInterval(0, TimeUnit.MILLISECONDS)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(45, TimeUnit.SECONDS)
-            .callTimeout(90, TimeUnit.SECONDS)
-            .build()
+        localNetwork.bindToDefaultNetwork(
+            socketClient.newBuilder()
+                .pingInterval(0, TimeUnit.MILLISECONDS)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(45, TimeUnit.SECONDS)
+                .callTimeout(90, TimeUnit.SECONDS)
+                .build(),
+        )
 
     val calls = CallMonitor(app) { call -> hub.publish(call) }
 

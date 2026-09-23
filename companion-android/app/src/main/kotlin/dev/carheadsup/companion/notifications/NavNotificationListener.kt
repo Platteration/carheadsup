@@ -3,6 +3,7 @@ package dev.carheadsup.companion.notifications
 import android.content.ComponentName
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.telephony.TelephonyManager
@@ -43,17 +44,17 @@ class NavNotificationListener : NotificationListenerService() {
     private var navActive = false
     private var navKey: String? = null
 
+    /** Worker-thread state: the driving side where the phone is, and when it was last looked up. */
+    private var cachedDrivingSide = DrivingSide.RIGHT
+    private var drivingSideCheckedAt: Long? = null
+
     private val endNavigation = Runnable { runOnWorker { publishNavigationEnded() } }
 
     override fun onCreate() {
         super.onCreate()
         graph = (application as CompanionApp).graph
         worker = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "notification-listener") }
-        parser =
-            GoogleMapsNotificationParser(
-                NavLanguages.preferring(Locale.getDefault()),
-                DrivingSide.forCountry(countryCode()),
-            )
+        parser = GoogleMapsNotificationParser(NavLanguages.preferring(Locale.getDefault()))
         iconEncoder = ManeuverIconEncoder(this)
         extractor =
             MessagingNotificationExtractor(
@@ -64,6 +65,11 @@ class NavNotificationListener : NotificationListenerService() {
     override fun onDestroy() {
         mainHandler.removeCallbacks(endNavigation)
         worker.shutdownNow()
+        // Nobody would see guidance end any more (the pending end above is cancelled too): do
+        // not leave the last arrow on the HUD. A new listener re-reads Maps when it connects.
+        if (graph.hub.latestNav()?.active == true) {
+            graph.hub.publish(PhoneMessages.navEnded(PhoneMessages.SOURCE_GOOGLE_MAPS))
+        }
         super.onDestroy()
     }
 
@@ -78,11 +84,19 @@ class NavNotificationListener : NotificationListenerService() {
                     emptyArray()
                 }
             active.filter { it.packageName == GoogleMapsNotificationParser.GOOGLE_MAPS_PACKAGE }.forEach(::handleMaps)
+            // Guidance published before the listener was unbound that has ended meanwhile.
+            if (!navActive && graph.hub.latestNav()?.active == true) {
+                graph.hub.publish(PhoneMessages.navEnded(PhoneMessages.SOURCE_GOOGLE_MAPS))
+            }
         }
     }
 
     override fun onListenerDisconnected() {
         graph.listenerConnected.value = false
+        // No more notification events: guidance can no longer be followed, so end it rather than
+        // leave a frozen arrow on the HUD (it is picked up again on reconnection).
+        mainHandler.removeCallbacks(endNavigation)
+        runOnWorker { publishNavigationEnded() }
         // Ask the system to bind us again (it unbinds listeners e.g. after the app was updated).
         NotificationListenerService.requestRebind(ComponentName(this, NavNotificationListener::class.java))
     }
@@ -109,7 +123,7 @@ class NavNotificationListener : NotificationListenerService() {
             GoogleMapsNotificationParser.GOOGLE_MAPS_PACKAGE -> handleMaps(sbn)
 
             else -> {
-                NotificationContent.callerName(sbn)?.let { graph.calls.onCallerHint(it) }
+                NotificationContent.callerHint(sbn)?.let(graph.calls::onCallerHint)
                 val content = NotificationContent.messaging(this, sbn)
                 extractor.extract(content, System.currentTimeMillis())?.let(graph.messageRelay::onIncoming)
             }
@@ -117,7 +131,7 @@ class NavNotificationListener : NotificationListenerService() {
     }
 
     private fun handleMaps(sbn: StatusBarNotification) {
-        val nav = parser.parse(NotificationContent.nav(sbn), Clock.systemDefaultZone()) ?: return
+        val nav = parser.parse(NotificationContent.nav(sbn), Clock.systemDefaultZone(), drivingSide()) ?: return
         mainHandler.removeCallbacks(endNavigation)
         navActive = true
         navKey = sbn.key
@@ -147,6 +161,21 @@ class NavNotificationListener : NotificationListenerService() {
         }
     }
 
+    /**
+     * The driving side where the phone is now. Looked up again every minute rather than once:
+     * the listener lives as long as the process, and a drive can cross into a country that
+     * drives on the other side (France → UK).
+     */
+    private fun drivingSide(): DrivingSide {
+        val now = SystemClock.elapsedRealtime()
+        val checkedAt = drivingSideCheckedAt
+        if (checkedAt == null || now - checkedAt >= DRIVING_SIDE_REFRESH_MS) {
+            cachedDrivingSide = DrivingSide.forCountry(countryCode())
+            drivingSideCheckedAt = now
+        }
+        return cachedDrivingSide
+    }
+
     /** Where the phone is (for the driving side): the mobile network's country, else the locale's. */
     private fun countryCode(): String? {
         val telephony = getSystemService(TelephonyManager::class.java)
@@ -158,5 +187,6 @@ class NavNotificationListener : NotificationListenerService() {
     private companion object {
         const val TAG = "NavNotificationListener"
         const val NAV_END_DELAY_MS = 10_000L
+        const val DRIVING_SIDE_REFRESH_MS = 60_000L
     }
 }

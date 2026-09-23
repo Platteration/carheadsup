@@ -199,6 +199,12 @@ const SIM_START: SimStatus = {
   lux: 12_000,
   ambientTempC: 17,
   scenarioStep: 'city: approaching junction',
+  coolantOverrideC: null,
+  voltageOverrideV: null,
+  fuelLevelOverridePct: null,
+  tirePressuresKpa: null,
+  adas: { blindSpotLeft: false, blindSpotRight: false, collision: 'none' },
+  phone: { connected: true, steppedAside: false },
 };
 
 export class MockHud {
@@ -298,16 +304,12 @@ export class MockHud {
       case 'POST /api/sim': {
         if (!this.sim) return json(404, { error: 'Not simulating' });
         const control = body as SimControl;
-        const {
-          phone: _phone,
-          adas: _adas,
-          tirePressuresKpa: _tpms,
-          coolantOverrideC: _c,
-          voltageOverrideV: _v,
-          fuelLevelOverridePct: _f,
-          ...rest
-        } = control;
-        this.sim = { ...this.sim, ...rest };
+        const { phone, adas, ...rest } = control;
+        const sim: SimStatus = { ...this.sim, ...rest, adas: { ...this.sim.adas, ...adas } };
+        if (phone?.kind === 'connect' || phone?.kind === 'disconnect') {
+          sim.phone = { ...sim.phone, connected: phone.kind === 'connect' };
+        }
+        this.sim = sim;
         return json(200, this.sim);
       }
       default:

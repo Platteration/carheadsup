@@ -427,6 +427,26 @@ describe('small readings', () => {
     expect(html.match(/hud-tpms__value--low/g)).toHaveLength(1);
     expect(html.match(/hud-tpms__wheel--low/g)).toHaveLength(1);
   });
+
+  it('tpms keeps the decimal that bar readings need', () => {
+    const tyres = (unit: 'bar' | 'psi' | 'kPa', values: [number, number, number, number]) =>
+      textOf(
+        render({
+          id: 'tpms',
+          zone: 'right',
+          unit,
+          fl: { value: values[0], low: false },
+          fr: { value: values[1], low: false },
+          rl: { value: values[2], low: true },
+          rr: { value: values[3], low: false },
+          anyLow: true,
+        }),
+      );
+    // 230 / 240 / 160 / 235 kPa as the composer sends them.
+    expect(tyres('bar', [2.3, 2.4, 1.6, 2.35])).toBe('2.3 2.4 1.6 2.4 bar');
+    expect(tyres('psi', [33.4, 34.8, 23.2, 34.1])).toBe('33 35 23 34 psi');
+    expect(tyres('kPa', [230, 240, 160, 235])).toBe('230 240 160 235 kPa');
+  });
 });
 
 describe('media', () => {

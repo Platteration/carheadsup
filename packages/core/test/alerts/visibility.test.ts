@@ -141,6 +141,27 @@ describe('selectDisplayedAlerts', () => {
     expect(shown.map((a) => a.key)).toEqual(['coolant', 'tpms', 'ice-risk']);
   });
 
+  it('never drops a critical alert to the cap; others fill what room is left', () => {
+    const criticals = [
+      alert({ key: 'brake', kind: 'forward-collision', severity: 'critical', raisedAt: T0 + 4 }),
+      alert({ key: 'voltage', kind: 'voltage', severity: 'critical', raisedAt: T0 + 5 }),
+    ];
+    const at = { now: T0 + 10, context: 'highway', blanked: false } as const;
+    const two = makeConfig({ display: { maxAlerts: 2 } });
+    expect(selectDisplayedAlerts([...alerts, ...criticals], at, two).map((a) => a.key)).toEqual([
+      'voltage',
+      'brake',
+      'coolant',
+    ]);
+    const four = makeConfig({ display: { maxAlerts: 4 } });
+    expect(selectDisplayedAlerts([...alerts, ...criticals], at, four).map((a) => a.key)).toEqual([
+      'voltage',
+      'brake',
+      'coolant',
+      'tpms',
+    ]);
+  });
+
   it('passes only critical alerts while blanked', () => {
     const shown = selectDisplayedAlerts(
       alerts,

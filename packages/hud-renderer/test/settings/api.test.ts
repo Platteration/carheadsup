@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   API_TOKEN_STORAGE_KEY,
   HudApiError,
+  adoptTokenFromUrl,
   createHudApi,
   describeError,
   isAbortError,
@@ -138,6 +139,24 @@ describe('bearer token', () => {
       'Bearer s3cret',
       'Bearer s3cret',
     ]);
+  });
+
+  it('is adopted from ?token= and removed from the address bar', () => {
+    const tokens = memoryTokenStore();
+    const replaced: string[] = [];
+    const adopted = adoptTokenFromUrl(
+      tokens,
+      { href: 'http://hud.local:8080/dev?token=a%20b%2Bc&x=1#live' },
+      (url) => replaced.push(url),
+    );
+    expect(adopted).toBe(true);
+    expect(tokens.get()).toBe('a b+c');
+    expect(replaced).toEqual(['/dev?x=1#live']);
+    const none = memoryTokenStore('kept');
+    expect(adoptTokenFromUrl(none, { href: 'http://hud.local/settings' }, () => undefined)).toBe(
+      false,
+    );
+    expect(none.get()).toBe('kept');
   });
 
   it('is kept in localStorage, and in memory when storage fails', () => {

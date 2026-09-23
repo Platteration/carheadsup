@@ -8,7 +8,9 @@ import dev.carheadsup.protocol.PhoneHazards
 import dev.carheadsup.protocol.PhoneMessages
 import dev.carheadsup.protocol.PhoneToHud
 import dev.carheadsup.protocol.link.ChangeGate
+import dev.carheadsup.protocol.link.FixWatchdog
 import dev.carheadsup.protocol.osm.GeoTile
+import dev.carheadsup.protocol.osm.HeadingMemory
 import dev.carheadsup.protocol.osm.LatLon
 import dev.carheadsup.protocol.osm.OverpassException
 import dev.carheadsup.protocol.osm.OverpassParser
@@ -23,7 +25,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -40,7 +44,11 @@ import java.io.IOException
  *   90 days) are used while offline;
  * - each GPS fix is matched to a way ([WayMatcher]) → `road`; cameras ahead ([SpeedCameraFinder])
  *   → `hazards`, re-sent every few seconds so the HUD's copy stays fresh;
- * - without data for the current tile the limit is reported unknown rather than stale.
+ * - without data for the current tile the limit is reported unknown rather than stale, and so
+ *   is everything when usable fixes stop for a few seconds ([FixWatchdog]: tunnels, location
+ *   switched off, GPS never started) — the HUD must not keep showing the last limit as current;
+ * - while the car is too slow for a GPS bearing, cameras are looked for in the direction it was
+ *   last heading ([HeadingMemory]), not all around it.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class RoadInfoProvider(
@@ -64,7 +72,10 @@ class RoadInfoProvider(
     private val cameraFinder = SpeedCameraFinder()
     private val roadGate = ChangeGate<Any>(refreshMs = ROAD_REFRESH_MS)
     private val hazardGate = ChangeGate<Set<String>>(refreshMs = HAZARD_REFRESH_MS)
+    private val watchdog = FixWatchdog(timeoutMs = FIX_TIMEOUT_MS, maxAccuracyM = MAX_ACCURACY_M)
+    private val heading = HeadingMemory(minSpeedMps = MIN_SPEED_FOR_BEARING_MPS)
     private var previousWayId: Long? = null
+    private var previousForward: Boolean? = null
 
     @Volatile
     private var endpointIndex = 0
@@ -74,12 +85,39 @@ class RoadInfoProvider(
     private class Tile(val data: RoadData, val fetchedAtMs: Long)
 
     init {
-        job = scope.launch(worker) { fixes.collect(::process) }
+        // Nothing is known until the first fix; this also replaces a limit the HUD may still
+        // hold from before (the replay after a reconnect would otherwise bring nothing newer).
+        publish(PhoneMessages.roadUnknown())
+        publish(PhoneMessages.noHazards())
+        job =
+            scope.launch(worker) {
+                launch {
+                    while (isActive) {
+                        delay(WATCHDOG_TICK_MS)
+                        withdrawIfFixesStopped()
+                    }
+                }
+                fixes.collect(::process)
+            }
     }
 
     /** Feed a GPS fix (any thread). */
     fun onLocation(location: Location) {
+        // A fix too inaccurate to place the car on a road counts as none.
+        val accuracy = if (location.hasAccuracy()) location.accuracy.toDouble() else null
+        if (!watchdog.isUsable(accuracy)) return
         fixes.tryEmit(location)
+    }
+
+    /** No usable fix for a while: what the last one said may no longer be true. */
+    private fun withdrawIfFixesStopped() {
+        if (!watchdog.expired(SystemClock.elapsedRealtime())) return
+        Log.i(TAG, "No usable GPS fix for ${FIX_TIMEOUT_MS / 1000} s; speed limit and cameras unknown")
+        // Forget what was sent, so the first value after the gap goes out at once.
+        roadGate.reset()
+        hazardGate.reset()
+        publish(PhoneMessages.roadUnknown())
+        publish(PhoneMessages.noHazards())
     }
 
     /** Stops lookups; tells the HUD the limit and cameras are no longer known. */
@@ -91,6 +129,7 @@ class RoadInfoProvider(
     }
 
     private suspend fun process(location: Location) {
+        watchdog.onFix(SystemClock.elapsedRealtime())
         val position = LatLon(location.latitude, location.longitude)
         val now = System.currentTimeMillis()
         val tiles = GeoTile.covering(position, LOOKAHEAD_M)
@@ -107,14 +146,22 @@ class RoadInfoProvider(
             if (!centerLoaded) {
                 PhoneMessages.roadUnknown()
             } else {
-                val match = matcher.match(data.ways, position, bearing, speed, accuracy, previousWayId)
+                val match =
+                    matcher.match(data.ways, position, bearing, speed, accuracy, previousWayId, previousForward)
                 previousWayId = match?.way?.id
+                previousForward = match?.forward
                 match?.toPhoneRoad() ?: PhoneMessages.roadUnknown()
             }
         if (roadGate.shouldSend(road, now)) publish(road)
 
-        val movingBearing = if ((speed ?: 0.0) >= MIN_SPEED_FOR_BEARING_MPS) bearing else null
-        val cameras = if (camerasEnabled()) cameraFinder.ahead(data.cameras, position, movingBearing) else emptyList()
+        // Without any known heading (parked since the start) nothing counts as ahead.
+        val headingDeg = heading.update(position, bearing, speed, SystemClock.elapsedRealtime())
+        val cameras =
+            if (camerasEnabled() && headingDeg != null) {
+                cameraFinder.ahead(data.cameras, position, headingDeg)
+            } else {
+                emptyList()
+            }
         if (hazardGate.shouldSend(cameras.map { it.id }.toSet(), now)) publish(PhoneHazards(cameras))
     }
 
@@ -237,5 +284,12 @@ class RoadInfoProvider(
         const val ROAD_REFRESH_MS = 30_000L
         const val HAZARD_REFRESH_MS = 5_000L
         const val MIN_SPEED_FOR_BEARING_MPS = 2.5
+
+        /** Without a usable fix for this long, the limit and cameras are withdrawn. */
+        const val FIX_TIMEOUT_MS = 5_000L
+        const val WATCHDOG_TICK_MS = 1_000L
+
+        /** Fixes less accurate than this cannot tell parallel roads apart and are ignored. */
+        const val MAX_ACCURACY_M = 50.0
     }
 }

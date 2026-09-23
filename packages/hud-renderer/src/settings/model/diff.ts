@@ -90,9 +90,21 @@ function mergeValue(base: unknown, patch: unknown): unknown {
  * Carry unsaved edits over to a new server config: the user's changes relative to `oldBase` are
  * re-applied on top of `newBase`. Fields the server rejected therefore stay edited (and dirty);
  * fields it accepted end up equal to the new base.
+ *
+ * When `newBase` answers a PATCH, pass what was `sent`: a field the user changed again while
+ * the request was in flight (even back to its old value) must keep the draft's value, not take
+ * the one the server just stored; it then stays dirty and is sent again.
  */
-export function rebaseDraft(oldBase: HudConfig, newBase: HudConfig, draft: HudConfig): HudConfig {
-  return applyPatch<HudConfig>(newBase, diffConfig(oldBase, draft));
+export function rebaseDraft(
+  oldBase: HudConfig,
+  newBase: HudConfig,
+  draft: HudConfig,
+  sent?: DeepPartial<HudConfig>,
+): HudConfig {
+  const rebased = applyPatch<HudConfig>(newBase, diffConfig(oldBase, draft));
+  if (sent === undefined) return rebased;
+  const afterSend = diffConfig(applyPatch<HudConfig>(oldBase, sent), draft);
+  return applyPatch<HudConfig>(rebased, afterSend);
 }
 
 /** Dotted path of every leaf in a patch (arrays count as one leaf), in `a.b[2].c` form. */

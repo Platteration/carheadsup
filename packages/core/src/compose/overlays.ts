@@ -30,14 +30,15 @@ export function composeToast(state: HudState, config: HudConfig): ToastFrame | n
 
 /**
  * The call card: shown while ringing, dialing, active or held, and for 2 s after the call
- * ended. The timer counts whole seconds since the call was answered.
+ * ended. The timer counts whole seconds since the call was answered. Without a phone link the
+ * card has no controls.
  */
 export function composeCall(state: HudState): CallFrame | null {
   const { call, now } = state;
   if (call === null) return null;
   if (call.state === 'ended' && now - call.updatedAt >= ENDED_CALL_SHOW_MS) return null;
   const answered = call.state === 'active' || call.state === 'held';
-  const { canAccept, canDecline } = callControls(call);
+  const { canAccept, canDecline } = callControls(call, state.phone.connected);
   return {
     state: call.state,
     name: call.callerName?.trim() || call.number?.trim() || 'Unknown caller',

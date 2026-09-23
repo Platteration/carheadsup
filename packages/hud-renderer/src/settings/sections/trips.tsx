@@ -17,6 +17,8 @@ import { Button, Card, Notice, Section, Stat } from '../ui/common.tsx';
 import { FieldGrid, FieldGroup, NumberField } from '../ui/fields.tsx';
 import { useForm } from '../ui/form-context.ts';
 import { useArmed } from '../ui/hooks.ts';
+import { saveTextFile } from '../ui/save-file.ts';
+import type { FileSaveOutcome } from '../ui/save-file.ts';
 
 /** Trips fetched per page. */
 export const TRIPS_PAGE_SIZE = 20;
@@ -27,17 +29,17 @@ export interface TripsSectionProps {
   root: Scope<HudConfig> | null;
 }
 
-/** Save `text` as a file (blob download; works for authenticated requests). */
-function downloadText(text: string, filename: string, type: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
-}
+/** What to tell the person after "Download CSV", when a plain download was not possible. */
+const SAVE_NOTES: Partial<Record<FileSaveOutcome, { tone: 'info' | 'critical'; text: string }>> = {
+  copied: {
+    tone: 'info',
+    text: 'This app cannot save files, so the CSV was copied to the clipboard instead. Paste it into a spreadsheet, or open this page in a browser to download it.',
+  },
+  failed: {
+    tone: 'critical',
+    text: 'This app cannot save files. Open this page in a browser to download the CSV.',
+  },
+};
 
 export function TripsSection({ api, units, root }: TripsSectionProps) {
   const [trips, setTrips] = useState<TripRecord[] | null>(null);
@@ -46,6 +48,7 @@ export function TripsSection({ api, units, root }: TripsSectionProps) {
   const [hasMore, setHasMore] = useState(false);
   const [csvBusy, setCsvBusy] = useState(false);
   const [csvError, setCsvError] = useState<unknown>(null);
+  const [csvOutcome, setCsvOutcome] = useState<FileSaveOutcome | null>(null);
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
@@ -88,9 +91,11 @@ export function TripsSection({ api, units, root }: TripsSectionProps) {
   const downloadCsv = async () => {
     setCsvBusy(true);
     setCsvError(null);
+    setCsvOutcome(null);
     try {
       const csv = await api.getTripsCsv();
-      downloadText(csv, `trips-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv');
+      const filename = `trips-${new Date().toISOString().slice(0, 10)}.csv`;
+      setCsvOutcome(await saveTextFile(csv, filename, 'text/csv'));
     } catch (err) {
       setCsvError(err);
     } finally {
@@ -115,6 +120,11 @@ export function TripsSection({ api, units, root }: TripsSectionProps) {
         </Button>
       }
     >
+      {csvOutcome !== null && SAVE_NOTES[csvOutcome] && (
+        <Notice tone={SAVE_NOTES[csvOutcome].tone} title="Trips CSV">
+          {SAVE_NOTES[csvOutcome].text}
+        </Notice>
+      )}
       {csvError !== null && (
         <Notice tone="critical" title="Download failed">
           {describeError(csvError)}

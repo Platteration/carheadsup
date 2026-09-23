@@ -316,6 +316,40 @@ describe('toCssMatrix3d', () => {
     const m: Mat3 = [2, 0, 4, 0, 2, 6, 0, 0, 2];
     expect(toCssMatrix3d(m)).toBe(toCssMatrix3d(translate(2, 3)));
   });
+
+  it('keeps w positive over the visible image when the origin lies beyond the horizon', () => {
+    // Accepted by the schema (convex), but the stage origin moved past the keystone's horizon:
+    // w is negative at the logical origin while positive over the content that is on screen.
+    const layout = projectionLayout(
+      config({
+        mirrorX: true,
+        offsetY: -0.5,
+        corners: { tl: [0, 0], tr: [1, 0], br: [0.65, 1], bl: [0.35, 1] },
+      }),
+      W,
+      H,
+    );
+    expect(layout.matrix[8]).toBeLessThan(0);
+    const css = toCssMatrix3d(layout.matrix);
+    const cells = css
+      .replace(/^matrix3d\(|\)$/g, '')
+      .split(',')
+      .map(Number);
+    const wOf = ([x, y]: Vec2) => cells[3]! * x + cells[7]! * y + cells[15]!;
+    const m = layout.matrix;
+    let visible = 0;
+    for (let x = 0; x <= W; x += W / 8) {
+      for (let y = 0; y <= H; y += H / 8) {
+        const raw = m[6] * x + m[7] * y + m[8];
+        if (raw <= 0) continue;
+        visible += 1;
+        // The browser culls anything whose w is not positive.
+        expect(wOf([x, y])).toBeGreaterThan(0);
+        expectPoint(applyCss(css, [x, y]), applyToPoint(m, [x, y]), 3);
+      }
+    }
+    expect(visible).toBeGreaterThan(0);
+  });
 });
 
 describe('matrix helpers', () => {

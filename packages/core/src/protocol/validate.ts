@@ -24,7 +24,11 @@ export const PROTOCOL_LIMITS = {
   /** Opaque identifiers (call, message and hazard ids). */
   id: 256,
   trackKey: 512,
-  /** Free text never shown while moving: nav instruction, hazard description. */
+  /**
+   * Free text never shown while moving: the nav instruction (the HUD draws its own maneuver
+   * arrows and street name) and a hazard description (an 'other' hazard is labelled "Hazard"
+   * while moving, see `hazardLabel`).
+   */
   text: 300,
   token: 256,
   version: 64,

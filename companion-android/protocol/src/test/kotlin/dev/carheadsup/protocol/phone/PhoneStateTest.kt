@@ -67,15 +67,113 @@ class PhoneStateTest {
         }
 
         @Test
-        fun `a waiting call replaces the active one`() {
+        fun `a waiting call replaces the active one while it rings`() {
             val tracker = tracker()
             tracker.onTelephonyState(TelephonyState.OFFHOOK)
             val waiting = tracker.onTelephonyState(TelephonyState.RINGING, "555")!!
             assertEquals(PhoneCall("call-2", CallState.RINGING, null, "555"), waiting)
+        }
+
+        /** Alice's call is active, Bob's is waiting (android-6). */
+        private fun callWaiting(tracker: CallStateTracker) {
+            tracker.onTelephonyState(TelephonyState.RINGING, "111")
+            tracker.onCallerIdentified("Alice")
+            tracker.onTelephonyState(TelephonyState.OFFHOOK)
+            tracker.onTelephonyState(TelephonyState.RINGING, "555")
+            assertEquals(PhoneCall("call-2", CallState.RINGING, "Bob", "555"), tracker.onCallerIdentified("Bob"))
+        }
+
+        @Test
+        fun `a waiting call that stops ringing does not pass as the active call (android-6)`() {
+            val tracker = tracker()
+            callWaiting(tracker)
+            // Declined, given up or answered on the phone: Android reports OFFHOOK in every case.
+            val after = tracker.onTelephonyState(TelephonyState.OFFHOOK)!!
+            assertEquals(CallState.ACTIVE, after.state)
+            assertNull(after.callerName)
+            assertNull(after.number)
+            // The PHONE_STATE broadcast repeats OFFHOOK with the waiting call's number: still unknown.
+            assertNull(tracker.onTelephonyState(TelephonyState.OFFHOOK, "555"))
+            assertNull(tracker.currentCall!!.callerName)
+            // The dialer's ongoing-call notification then names the call that is really active.
+            assertEquals("Alice", tracker.onCallerHint(CallerHint("Alice", null, CallHintType.ONGOING))!!.callerName)
+            assertEquals(CallState.ENDED, tracker.onTelephonyState(TelephonyState.IDLE)!!.state)
+        }
+
+        @Test
+        fun `a waiting call declined from the HUD leaves the held call as it was`() {
+            val tracker = tracker()
+            callWaiting(tracker)
+            assertTrue(tracker.accepts("call-2", CallAction.DECLINE))
+            tracker.noteHudAction("call-2", CallAction.DECLINE)
             assertEquals(
-                PhoneCall("call-2", CallState.ACTIVE, null, "555"),
+                PhoneCall("call-1", CallState.ACTIVE, "Alice", "111"),
                 tracker.onTelephonyState(TelephonyState.OFFHOOK),
             )
+        }
+
+        @Test
+        fun `a waiting call answered from the HUD becomes the active call`() {
+            val tracker = tracker()
+            callWaiting(tracker)
+            tracker.noteHudAction("call-2", CallAction.ACCEPT)
+            assertEquals(
+                PhoneCall("call-2", CallState.ACTIVE, "Bob", "555"),
+                tracker.onTelephonyState(TelephonyState.OFFHOOK),
+            )
+        }
+
+        @Test
+        fun `a failed HUD action is forgotten`() {
+            val tracker = tracker()
+            callWaiting(tracker)
+            tracker.noteHudAction("call-2", CallAction.ACCEPT)
+            tracker.noteHudAction("call-2", null)
+            assertNull(tracker.onTelephonyState(TelephonyState.OFFHOOK)!!.callerName)
+        }
+
+        @Test
+        fun `caller-name hints only name the call they describe (android-7)`() {
+            val tracker = tracker()
+            tracker.onTelephonyState(TelephonyState.OFFHOOK)
+            // A WhatsApp call rings during the cellular call.
+            assertNull(tracker.onCallerHint(CallerHint("Bob", null, CallHintType.INCOMING)))
+            assertNull(tracker.currentCall!!.callerName)
+            // Call waiting: the waiting call's incoming-call notification names it …
+            tracker.onTelephonyState(TelephonyState.RINGING, "555")
+            assertEquals(
+                "Bob",
+                tracker.onCallerHint(CallerHint("Bob", "555", CallHintType.INCOMING))!!.callerName,
+            )
+            // … and the dialer re-posting the other line's ongoing-call notification does not rename it.
+            assertNull(tracker.onCallerHint(CallerHint("Alice", null, CallHintType.ONGOING)))
+            assertNull(tracker.onCallerHint(CallerHint("Alice", "111", CallHintType.INCOMING)))
+            assertNull(tracker.onCallerHint(CallerHint("Carol", null, CallHintType.UNKNOWN)))
+            assertEquals("Bob", tracker.currentCall!!.callerName)
+        }
+
+        @Test
+        fun `hints never replace a name from contacts`() {
+            val tracker = tracker()
+            tracker.onTelephonyState(TelephonyState.RINGING, "+49 170 1234567")
+            // The same number written differently still matches.
+            assertEquals(
+                "Dentist",
+                tracker.onCallerHint(CallerHint("Dentist", "0170 1234567", CallHintType.INCOMING))!!.callerName,
+            )
+            assertEquals("Dr. Mabuse", tracker.onCallerIdentified("Dr. Mabuse")!!.callerName)
+            assertNull(tracker.onCallerHint(CallerHint("Dentist", "0170 1234567", CallHintType.INCOMING)))
+            assertNull(tracker.onCallerHint(CallerHint("Spam?", null, CallHintType.INCOMING)))
+            assertEquals("Dr. Mabuse", tracker.currentCall!!.callerName)
+        }
+
+        @Test
+        fun `a hint may correct an earlier hint for the same number`() {
+            val tracker = tracker()
+            tracker.onTelephonyState(TelephonyState.RINGING, "555")
+            tracker.onCallerHint(CallerHint("Unknown caller", null, CallHintType.INCOMING))
+            assertNull(tracker.onCallerHint(CallerHint("Bob", null, CallHintType.INCOMING)))
+            assertEquals("Bob", tracker.onCallerHint(CallerHint("Bob", "555", CallHintType.INCOMING))!!.callerName)
         }
 
         @Test

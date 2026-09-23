@@ -28,6 +28,12 @@ export const HAZARD_TTL_MS = 120_000;
 export const HAZARD_PASSED_DROP_M = 50;
 /** Phone-sourced route data (nav, road, hazards …) survives a phone disconnect this long. */
 export const PHONE_DATA_GRACE_MS = 30_000;
+/**
+ * The posted speed limit is dropped when the phone has not refreshed it for this long (it
+ * re-sends the road every 30 s while it has location fixes), so a limit left behind when its
+ * location feed stops never keeps colouring the speed.
+ */
+export const ROAD_TTL_MS = 75_000;
 /** Maintenance status is recomputed on ticks at most this often. */
 export const MAINTENANCE_RECHECK_MS = 60_000;
 /** Speed samples further apart than this are not integrated across (odometer). */
@@ -113,10 +119,15 @@ export function isCallLive(call: CallInfo | null): call is CallInfo {
 
 /**
  * What the driver can do about the current call. `primary` accepts a ringing call; `secondary`
- * declines a ringing call and hangs up one that is dialing or active.
+ * declines a ringing call and hangs up one that is dialing or active. Nothing can be done while
+ * the phone is disconnected: the action would go nowhere, so the buttons dismiss alerts and
+ * toasts as usual instead.
  */
-export function callControls(call: CallInfo | null): { canAccept: boolean; canDecline: boolean } {
-  const state = call?.state;
+export function callControls(
+  call: CallInfo | null,
+  phoneConnected = true,
+): { canAccept: boolean; canDecline: boolean } {
+  const state = phoneConnected ? call?.state : undefined;
   return {
     canAccept: state === 'ringing',
     canDecline: state === 'ringing' || state === 'dialing' || state === 'active',

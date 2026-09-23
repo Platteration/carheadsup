@@ -1,5 +1,6 @@
 import type { ButtonHTMLAttributes, ComponentChildren, Ref } from 'preact';
 import { useEffect, useRef } from 'preact/hooks';
+import { useFocusTrap } from '../../common/focus-trap.ts';
 import { cx } from '../../hud/util.ts';
 
 /** Presentational building blocks shared by the settings sections. */
@@ -163,22 +164,21 @@ export interface DialogProps {
 }
 
 /**
- * Modal dialog (not the native `<dialog>`, whose support in Android WebViews varies): traps
- * initial focus, closes on Escape and on a backdrop tap.
+ * Modal dialog (not the native `<dialog>`, whose support in Android WebViews varies): keeps
+ * keyboard focus inside while open (see `useFocusTrap`), returns it afterwards, and closes on
+ * Escape and on a backdrop tap.
  */
 export function Dialog({ title, onClose, children, actions }: DialogProps) {
   const panel = useRef<HTMLDivElement>(null);
+  useFocusTrap(panel);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    panel.current?.querySelector<HTMLElement>('button, input, [tabindex]')?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') onCloseRef.current();
     };
     document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      previous?.focus?.();
-    };
+    return () => document.removeEventListener('keydown', onKey);
   }, []);
   return (
     <div

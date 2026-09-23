@@ -72,13 +72,16 @@ const ERROR_PATTERNS: readonly LinePattern[] = [
 
 const NO_DATA_RE = /^NO DATA$/;
 const BANNER_RE = /^ELM327/;
+/** Commands whose answer is (or may contain) the identification banner: reset, ATI, ST… */
+const IDENTIFYING_RE = /^(ATZ|ATWS|ATI|AT@\d|ST)/;
 
 export type CommandKind = 'at' | 'obd';
 
 /**
  * Classify cleaned response lines. Returns the data lines ([] for "NO DATA") or throws an
- * {@link ElmError} for adapter error messages. For OBD requests an identification banner in
- * the response means the adapter reset mid-command (all settings lost) → ADAPTER_RESET.
+ * {@link ElmError} for adapter error messages. An identification banner in the response to
+ * anything but a reset or identification command means the adapter reset mid-command (all
+ * settings lost) → ADAPTER_RESET.
  */
 export function classifyResponse(
   lines: readonly string[],
@@ -87,6 +90,7 @@ export function classifyResponse(
 ): string[] {
   const data: string[] = [];
   let sawNoData = false;
+  const bannerMeansReset = kind === 'obd' || !IDENTIFYING_RE.test(normalizeCommand(command));
   for (const line of lines) {
     const upper = line.toUpperCase();
     for (const pattern of ERROR_PATTERNS) {
@@ -101,7 +105,7 @@ export function classifyResponse(
       sawNoData = true;
       continue;
     }
-    if (kind === 'obd' && BANNER_RE.test(upper)) {
+    if (bannerMeansReset && BANNER_RE.test(upper)) {
       throw new ElmError('ADAPTER_RESET', `The adapter reset during ${command} (${line})`, {
         command,
         response: lines,

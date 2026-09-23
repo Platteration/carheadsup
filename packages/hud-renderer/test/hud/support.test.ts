@@ -1,8 +1,18 @@
-import type { HudFrame, WidgetFrame } from '@carheadsup/core';
+import type { AlertFrame, HudFrame, WidgetFrame } from '@carheadsup/core';
 import { describe, expect, it } from 'vitest';
 import { actionForKey } from '../../src/hud/keyboard.ts';
 import { readKioskParams } from '../../src/hud/kiosk.ts';
-import { ZONES, groupByZone, visibleAlerts, zonePosition } from '../../src/hud/layout.ts';
+import {
+  MAX_ALERT_BANNERS,
+  ZONES,
+  alertSeverity,
+  collisionLevel,
+  gridAllowed,
+  groupByZone,
+  planAlerts,
+  visibleAlerts,
+  zonePosition,
+} from '../../src/hud/layout.ts';
 import { SAMPLE_FRAMES } from '../../src/hud/fixtures.ts';
 import {
   MIN_BRIGHTNESS,
@@ -57,6 +67,66 @@ describe('layout', () => {
     expect(visibleAlerts(both)).toHaveLength(2);
     expect(visibleAlerts({ ...both, blanked: true }).map((a) => a.severity)).toEqual(['critical']);
   });
+
+  it('treats a severity from a newer server as critical, also while blanked', () => {
+    const frame = SAMPLE_FRAMES['engine-hot']!;
+    const odd = { ...frame.alerts[0]!, key: 'odd', severity: 'emergency' } as unknown as AlertFrame;
+    expect(alertSeverity(odd)).toBe('critical');
+    expect(alertSeverity({ ...odd, severity: undefined } as unknown as AlertFrame)).toBe(
+      'critical',
+    );
+    expect(alertSeverity({ ...odd, severity: 'info' })).toBe('info');
+    expect(visibleAlerts({ ...frame, blanked: true, alerts: [odd] })).toEqual([odd]);
+  });
+
+  it('draws an unknown collision level as a warning and a missing one as none', () => {
+    expect(collisionLevel('warning')).toBe('warning');
+    expect(collisionLevel('caution')).toBe('caution');
+    expect(collisionLevel('none')).toBe('none');
+    expect(collisionLevel('imminent')).toBe('warning');
+    expect(collisionLevel(undefined)).toBe('none');
+    expect(collisionLevel(null)).toBe('none');
+    expect(collisionLevel('')).toBe('none');
+  });
+
+  it('gives every critical alert a banner and counts the rest instead of dropping them', () => {
+    const alert = (key: string, severity: AlertFrame['severity']): AlertFrame => ({
+      key,
+      kind: 'check-engine',
+      severity,
+      title: key,
+      detail: null,
+      code: null,
+      dismissible: severity !== 'critical',
+    });
+    expect(MAX_ALERT_BANNERS).toBe(3);
+    const two = [alert('a', 'critical'), alert('b', 'caution')];
+    expect(planAlerts(two)).toEqual({ shown: two, more: 0 });
+    const five = [
+      alert('c1', 'critical'),
+      alert('c2', 'critical'),
+      alert('w1', 'warning'),
+      alert('w2', 'warning'),
+      alert('i1', 'info'),
+    ];
+    expect(planAlerts(five).shown.map((a) => a.key)).toEqual(['c1', 'c2', 'w1']);
+    expect(planAlerts(five).more).toBe(2);
+    const criticals = ['1', '2', '3', '4'].map((k) => alert(k, 'critical'));
+    expect(planAlerts([...criticals, alert('w', 'warning')])).toEqual({
+      shown: criticals,
+      more: 1,
+    });
+    expect(planAlerts([])).toEqual({ shown: [], more: 0 });
+  });
+
+  it('allows the calibration grid only while standing still or before any frame', () => {
+    expect(gridAllowed('parked')).toBe(true);
+    expect(gridAllowed('stopped')).toBe(true);
+    expect(gridAllowed(null)).toBe(true);
+    expect(gridAllowed('city')).toBe(false);
+    expect(gridAllowed('highway')).toBe(false);
+    expect(gridAllowed('cruising' as HudFrame['context'])).toBe(false);
+  });
 });
 
 describe('util', () => {
@@ -88,13 +158,15 @@ describe('util', () => {
     expect(economyUnitLabel('km/L')).toBe('km/L');
     expect(economyUnitLabel('mpg-us')).toBe('mpg');
     expect(economyUnitLabel('mpg-uk')).toBe('mpg');
+    expect(economyUnitLabel('mi/kWh' as 'km/L')).toBe('mi/kWh');
   });
 
   it('maps gauge statuses to tones', () => {
-    expect(['ok', 'warn', 'crit', 'unknown'].map((s) => gaugeTone(s as 'ok'))).toEqual([
+    expect(['ok', 'warn', 'crit', 'unknown', 'fault'].map((s) => gaugeTone(s as 'ok'))).toEqual([
       'neutral',
       'caution',
       'critical',
+      'unknown',
       'unknown',
     ]);
   });

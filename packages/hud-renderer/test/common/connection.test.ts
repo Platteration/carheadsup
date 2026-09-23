@@ -6,6 +6,7 @@ import {
   openHudConnection,
   parseServerMessage,
   reconnectDelayMs,
+  withToken,
 } from '../../src/common/connection.ts';
 import { SAMPLE_FRAMES } from '../../src/hud/fixtures.ts';
 import { FakeSocket } from './fake-socket.ts';
@@ -35,6 +36,17 @@ describe('hudSocketUrl', () => {
     );
     expect(hudSocketUrl({ protocol: 'https:', host: 'hud.local' })).toBe('wss://hud.local/ws/hud');
   });
+
+  it('carries the API token as ?token=, encoded, only when there is one', () => {
+    expect(withToken('ws://hud.local:8080/ws/hud', '')).toBe('ws://hud.local:8080/ws/hud');
+    expect(withToken('ws://hud.local:8080/ws/hud', 'abc')).toBe(
+      'ws://hud.local:8080/ws/hud?token=abc',
+    );
+    expect(withToken('ws://hud/ws/hud?x=1', 'a&b=c d')).toBe(
+      'ws://hud/ws/hud?x=1&token=a%26b%3Dc+d',
+    );
+    expect(withToken('', 'abc')).toBe('');
+  });
 });
 
 describe('reconnectDelayMs', () => {
@@ -63,8 +75,31 @@ describe('parseServerMessage', () => {
       frame: FRAME,
     });
     expect(
+      parseServerMessage(
+        JSON.stringify({
+          t: 'display',
+          projection: PROJECTION,
+          simulated: true,
+          hardwareBrightness: true,
+        }),
+      ),
+    ).toEqual({ t: 'display', projection: PROJECTION, simulated: true, hardwareBrightness: true });
+  });
+
+  it('reads a display message without hardwareBrightness (older server) as dimming in CSS', () => {
+    expect(
       parseServerMessage(JSON.stringify({ t: 'display', projection: PROJECTION, simulated: true })),
-    ).toEqual({ t: 'display', projection: PROJECTION, simulated: true });
+    ).toEqual({ t: 'display', projection: PROJECTION, simulated: true, hardwareBrightness: false });
+    expect(
+      parseServerMessage(
+        JSON.stringify({
+          t: 'display',
+          projection: PROJECTION,
+          simulated: false,
+          hardwareBrightness: 'yes',
+        }),
+      ),
+    ).toMatchObject({ hardwareBrightness: false });
   });
 
   it('round-trips every fixture', () => {

@@ -1,6 +1,7 @@
 import type { HudConfig } from '@carheadsup/core';
 import type { Scope } from '../model/scope.ts';
 import { plainUnit } from '../model/units.ts';
+import { tokenProblem, trimToken } from '../model/validation.ts';
 import { Card, Notice, Section } from '../ui/common.tsx';
 import { FieldGrid, NumberField, TextField, ToggleField } from '../ui/fields.tsx';
 import { SecretActions } from './phone.tsx';
@@ -45,6 +46,8 @@ export function ServerSection({ root }: { root: Scope<HudConfig> }) {
           k="apiToken"
           label="API token"
           monospace
+          transform={trimToken}
+          validate={tokenProblem}
           placeholder="None — any device on the Wi-Fi can change settings"
           hint="Devices other than the HUD itself must present this token to use the settings and API."
           actions={

@@ -150,15 +150,52 @@ export const INPUT_BUTTONS: ReadonlyArray<{
   { action: 'brightness-up', label: 'Brighter', title: 'Trim brightness up', keys: '+' },
 ];
 
-/** Keyboard events from these elements belong to the element, not to the HUD shortcuts. */
-export function isEditableTarget(target: EventTarget | null): boolean {
+/** Keys that press a focused button, link, checkbox or tab. */
+const ACTIVATION_KEYS: ReadonlySet<string> = new Set(['Enter', ' ', 'Spacebar']);
+/** Keys a slider or radio group moves with. */
+const MOVE_KEYS: ReadonlySet<string> = new Set([
+  'ArrowLeft',
+  'ArrowRight',
+  'ArrowUp',
+  'ArrowDown',
+  'Home',
+  'End',
+  'PageUp',
+  'PageDown',
+]);
+/** Inputs that are pressed rather than typed into. */
+const PRESSED_INPUTS: ReadonlySet<string> = new Set([
+  'button',
+  'submit',
+  'reset',
+  'checkbox',
+  'color',
+  'file',
+  'image',
+]);
+
+/**
+ * Whether the focused element uses `key` itself, so the HUD shortcut must not fire: text fields
+ * take every key, sliders and radio groups their arrow keys, and buttons, links, checkboxes and
+ * tabs only Enter and Space. Everything else is a shortcut even while a button has focus — a
+ * clicked button keeps focus, and the shortcuts must keep working after it.
+ */
+export function ownsKey(target: EventTarget | null, key: string): boolean {
   if (typeof Element === 'undefined' || !(target instanceof Element)) return false;
-  if (
-    target.closest(
-      'input, textarea, select, button, [contenteditable=""], [contenteditable="true"]',
-    )
-  )
+  if (target.closest('textarea, select, [contenteditable=""], [contenteditable="true"]')) {
     return true;
+  }
+  const input = target.closest('input');
+  if (input) {
+    const type = input.type.toLowerCase();
+    if (type === 'range') return MOVE_KEYS.has(key);
+    if (type === 'radio') return MOVE_KEYS.has(key) || ACTIVATION_KEYS.has(key);
+    if (PRESSED_INPUTS.has(type)) return ACTIVATION_KEYS.has(key);
+    return true;
+  }
+  if (target.closest('button, a[href], summary, [role="button"], [role="tab"], [role="switch"]')) {
+    return ACTIVATION_KEYS.has(key);
+  }
   return false;
 }
 

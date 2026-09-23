@@ -4,7 +4,7 @@ import { describeError } from '../common/api.ts';
 import type { HudApi } from '../common/api.ts';
 import { actionForKey } from '../hud/keyboard.ts';
 import { cx } from '../hud/util.ts';
-import { INPUT_BUTTONS, isEditableTarget } from './sim-model.ts';
+import { INPUT_BUTTONS, ownsKey } from './sim-model.ts';
 
 /** How long a pressed button stays highlighted after its input was sent. */
 const FLASH_MS = 250;
@@ -12,7 +12,8 @@ const FLASH_MS = 250;
 /**
  * Driver inputs (steering-wheel buttons / gestures) sent to `POST /api/input`, with the same
  * keyboard shortcuts as the kiosk: Enter/Space accept, Esc dismiss, ←/→ pages, B blank, +/− brightness.
- * Shortcuts are ignored while typing in a field or when a button has focus.
+ * A key the focused element uses itself is left to it (see `ownsKey`): typing in a field, arrows
+ * on a slider, Enter/Space on a button.
  */
 export function InputPad({ api }: { api: HudApi }) {
   const [flash, setFlash] = useState<InputAction | null>(null);
@@ -35,7 +36,7 @@ export function InputPad({ api }: { api: HudApi }) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || isEditableTarget(event.target)) return;
+      if (event.defaultPrevented || ownsKey(event.target, event.key)) return;
       const action = actionForKey(event);
       if (action === null) return;
       event.preventDefault();

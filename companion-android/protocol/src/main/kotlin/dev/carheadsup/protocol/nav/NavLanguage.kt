@@ -1,6 +1,7 @@
 package dev.carheadsup.protocol.nav
 
 import dev.carheadsup.protocol.ManeuverType
+import java.util.Locale
 
 /** Left or right, as named in an instruction. */
 public enum class Side { LEFT, RIGHT }
@@ -64,6 +65,15 @@ public enum class ManeuverKind {
 /** An instruction pattern (matched against lower-cased text) and the maneuver family it signals. */
 public class ManeuverRule(public val pattern: Regex, public val kind: ManeuverKind)
 
+/** A maneuver found in an instruction: its family and the side named inside the matching words. */
+public data class ManeuverMatch(val kind: ManeuverKind, val side: Side?)
+
+/**
+ * An instruction without its leading lane guidance ("Use the right lane to turn left" → "turn
+ * left"), and the side of the lanes (a hint for maneuvers that name no side themselves).
+ */
+public data class LaneGuidance(val instruction: String, val laneSide: Side?)
+
 /**
  * Extracts the street a maneuver leads onto: group 1 of [pattern], matched on the original text
  * (case-insensitively). For "continue"/"head" maneuvers it is also the current street.
@@ -121,10 +131,50 @@ public class NavLanguage(
     public val distanceUnits: Map<String, Double>,
     /** Words that may precede a distance in the title ("In 300 m"). */
     public val distancePrefix: Regex,
+    /**
+     * Leading lane guidance, matched on the original text: "Use the right lane to ", "Rechte Spur
+     * benutzen, um ". Group 1 describes the lanes ("the right", "rechte"). The lanes' side is not
+     * the maneuver's side: "Use the right lane to turn left" is a left turn.
+     */
+    public val laneGuidance: Regex? = null,
+    /**
+     * Separator of an inline follow-up maneuver, matched on the original text: ", then " in
+     * "Turn left, then keep right". The text after it is the next maneuver.
+     */
+    public val inlineThen: Regex? = null,
+    /**
+     * Text that reads as a sentence rather than a name when it has no known maneuver verb
+     * ("Pass through the toll plaza", "Cross the bridge"); matched on the original text.
+     */
+    public val sentence: Regex? = null,
 ) {
     /** The maneuver family named in [lowerText], or null. */
-    public fun matchManeuver(lowerText: String): ManeuverKind? =
-        maneuverRules.firstOrNull { it.pattern.containsMatchIn(lowerText) }?.kind
+    public fun matchManeuver(lowerText: String): ManeuverKind? = findManeuver(lowerText)?.kind
+
+    /**
+     * The maneuver named in [lowerText] (first matching rule), with the side named within the
+     * matching words ("turn left", "keep right", "halblinks"), if any. The side is taken from the
+     * match itself so that other side words in the instruction — lane guidance, street names, a
+     * follow-up clause — cannot flip it.
+     */
+    public fun findManeuver(lowerText: String): ManeuverMatch? {
+        for (rule in maneuverRules) {
+            val match = rule.pattern.find(lowerText) ?: continue
+            val side = sideWord.findAll(match.value).firstNotNullOfOrNull { wordSide(it.groupValues[1]) }
+            return ManeuverMatch(rule.kind, side)
+        }
+        return null
+    }
+
+    /** [text] without leading lane guidance, and the lanes' side (see [laneGuidance]). */
+    public fun withoutLaneGuidance(text: String): LaneGuidance {
+        val match = laneGuidance?.find(text) ?: return LaneGuidance(text, null)
+        val rest = text.substring(match.range.last + 1).trim()
+        if (rest.isEmpty()) return LaneGuidance(text, null)
+        val lanes = match.groupValues[1].lowercase(Locale.ROOT)
+        val side = sideWord.findAll(lanes).firstNotNullOfOrNull { wordSide(it.groupValues[1]) }
+        return LaneGuidance(rest, side)
+    }
 
     /** The side named in [lowerText]: explicit phrases anywhere, else a side word before the street part. */
     public fun sideOf(lowerText: String): Side? {

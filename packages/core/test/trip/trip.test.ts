@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { TripConfig } from '../../src/types/config.ts';
 import {
   createTripState,
+  restoreActiveTrip,
+  resumeTripState,
   tripId,
   updateTrip,
   type TripInput,
@@ -383,5 +385,73 @@ describe('trip ids and state', () => {
     const mid = feed(createTripState(), inputs.slice(0, 50));
     const revived = JSON.parse(JSON.stringify(mid)) as TripState;
     expect(feed(revived, inputs.slice(50))).toEqual(a);
+  });
+});
+
+describe('trips across a restart', () => {
+  const drive = (): TripState =>
+    feed(createTripState(), [
+      ...seconds(T0, 600, (i) => ({ speedKph: i < 5 ? 0 : 60, fuelRateLph: 4, odometerKm: 900 })),
+      ...parked(T0 + 601_000, 20_000, { linkUp: false }),
+    ]);
+
+  it('round-trips a trip in progress through JSON', () => {
+    const active = drive().active;
+    expect(active).not.toBeNull();
+    const restored = restoreActiveTrip(JSON.parse(JSON.stringify(active)), T0 + 3_600_000);
+    expect(restored).toEqual(active);
+    expect(restored).not.toBe(active);
+  });
+
+  it('completes the resumed trip on the first update after a long power-down', () => {
+    const before = drive();
+    const active = restoreActiveTrip(JSON.parse(JSON.stringify(before.active)), T0 + 7_200_000);
+    if (active === null) throw new Error('not restored');
+    const resumed = resumeTripState(active, PRICING);
+    expect(resumed.current).toEqual(before.current);
+    const after = updateTrip(resumed, input(T0 + 7_200_000, { linkUp: false }), CONFIG, PRICING);
+    expect(after.active).toBeNull();
+    expect(after.completedCount).toBe(1);
+    expect(after.lastCompleted).toMatchObject({
+      id: tripId(T0),
+      endedAt: T0 + 600_000,
+      distanceKm: expect.closeTo(9.93, 2) as unknown,
+    });
+  });
+
+  it('continues the same trip after a short power blip', () => {
+    const before = drive();
+    const active = restoreActiveTrip(before.active, T0 + 700_000);
+    if (active === null) throw new Error('not restored');
+    const after = feed(resumeTripState(active, PRICING), [
+      ...seconds(T0 + 700_000, 60, () => ({ speedKph: 60, odometerKm: 910 })),
+      ...parked(T0 + 761_000, 400_000),
+    ]);
+    expect(after.completedCount).toBe(1);
+    expect(after.lastCompleted?.id).toBe(tripId(T0));
+    expect(after.lastCompleted?.distanceKm).toBeGreaterThan(10.9);
+  });
+
+  it.each<[string, unknown]>([
+    ['null', null],
+    ['a string', 'trip'],
+    ['an empty object', {}],
+    ['a negative distance', { distanceKm: -1 }],
+    ['a NaN duration', { movingMs: Number.NaN }],
+    ['activity before the start', { lastActivityAt: T0 - 1 }],
+    ['a sample after start-up', { last: { at: T0 + 10_000_000 } }],
+    ['a broken odometer', { odometer: { firstKm: 1 } }],
+    ['a non-boolean flag', { fuelKnown: 'yes' }],
+  ])('rejects %s', (_, patch) => {
+    const active = drive().active;
+    const value =
+      patch === null || typeof patch !== 'object' || Object.keys(patch).length === 0
+        ? patch
+        : {
+            ...active,
+            ...patch,
+            last: { ...active?.last, ...(patch as { last?: object }).last },
+          };
+    expect(restoreActiveTrip(value, T0 + 3_600_000)).toBeNull();
   });
 });

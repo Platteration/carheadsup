@@ -2,7 +2,7 @@ import type { CustomPidConfig, HudEvent } from '@carheadsup/core';
 import { describe, expect, it } from 'vitest';
 import { ElmError } from '../src/errors.ts';
 import { ObdPoller, type PollerOptions } from '../src/poller.ts';
-import { FakeClock, FakeDriver } from './helpers.ts';
+import { FakeClock, FakeDriver, flush } from './helpers.ts';
 
 /** Engine ECU answers (data bytes per PID). */
 const ENGINE: Record<number, number[]> = {
@@ -191,22 +191,28 @@ describe('ObdPoller scheduling', () => {
     }
   });
 
-  it('emits one obd/samples event per cycle with a single timestamp', async () => {
+  it('emits the values of each request as one obd/samples event as soon as it completes', async () => {
     const ctx = make();
     await runFor(ctx, 1000);
     const samples = ofType(ctx.events, 'obd/samples');
-    expect(samples.length).toBeGreaterThanOrEqual(10);
-    expect(new Set(samples.map((e) => e.at)).size).toBe(samples.length);
-    const first = samples[0];
-    expect(first?.samples).toEqual(
+    const cycle = samples.filter((e) => e.at === START);
+    // The fast batch (speed and rpm together), the extra batches and AT RV, each on its own.
+    expect(cycle[0]?.samples).toEqual(
       expect.arrayContaining([
         { signal: 'speed', value: 50 },
         { signal: 'rpm', value: 1726 },
+      ]),
+    );
+    expect(cycle.flatMap((e) => e.samples)).toEqual(
+      expect.arrayContaining([
         { signal: 'batteryVoltage', value: 12.6 },
         { signal: 'transmissionGear', value: 3 },
       ]),
     );
-    expect(ctx.poller.latest('speed')).toEqual({ value: 50, at: samples.at(-1)?.at });
+    const speeds = samples.filter((e) => e.samples.some((x) => x.signal === 'speed'));
+    expect(speeds.length).toBeGreaterThanOrEqual(10);
+    expect(new Set(speeds.map((e) => e.at)).size).toBe(speeds.length);
+    expect(ctx.poller.latest('speed')).toEqual({ value: 50, at: speeds.at(-1)?.at });
   });
 });
 
@@ -490,5 +496,100 @@ describe('ObdPoller failures', () => {
     ctx.poller.stop();
     await ctx.clock.advance(0);
     await running;
+  });
+});
+
+describe('ObdPoller regressions', () => {
+  /** Make a driver call take `ms` on the fake clock (a timeout plus resync, a slow module …). */
+  const slow =
+    <A extends unknown[], R>(clock: FakeClock, ms: number, fn: (...args: A) => Promise<R>) =>
+    async (...args: A): Promise<R> => {
+      await new Promise<void>((resolve) => clock.setTimeout(resolve, ms));
+      return fn(...args);
+    };
+
+  it('stamps samples when their request completed, not when the cycle ends (obd-2)', async () => {
+    const custom: CustomPidConfig = {
+      signal: 'tirePressureFL',
+      mode: '22',
+      pid: '4001',
+      header: '7C6',
+      formula: '((A*256)+B)/10',
+      intervalMs: 10_000,
+    };
+    const ctx = make({ customPids: [custom] });
+    ctx.driver.raws.set('7C6:224001', [0x08, 0xfc]);
+    await ctx.poller.discover();
+    ctx.driver.raw = slow(ctx.clock, 2450, ctx.driver.raw.bind(ctx.driver));
+    await runFor(ctx, 2500);
+    const samples = ofType(ctx.events, 'obd/samples');
+    const firstWith = (signal: string) =>
+      samples.find((e) => e.samples.some((x) => x.signal === signal));
+    expect(firstWith('speed')?.at).toBe(START);
+    expect(firstWith('tirePressureFL')?.at).toBe(START + 2450);
+  });
+
+  it('polls the standard PID again when the custom PID replacing it is invalid (obd-4)', async () => {
+    const speed: CustomPidConfig = {
+      signal: 'speed',
+      mode: '22',
+      pid: 'F40D',
+      header: '7E0',
+      formula: 'A',
+      intervalMs: 1000,
+    };
+    const tpms: CustomPidConfig = { ...speed, signal: 'tirePressureFL', pid: '4001' };
+    // Both are planned, and found invalid, in the same cycle.
+    const ctx = make({ customPids: [speed, tpms], tuning: { customRequestsPerCycle: 2 } });
+    // E.g. an 11-bit header on a 29-bit CAN car, which the config cannot know about.
+    ctx.driver.raw = async () => {
+      throw new RangeError('Header 7E0 is not a 29-bit CAN id');
+    };
+    await runFor(ctx, 10_000);
+    expect(ctx.driver.pollsOf(0x0d).length).toBeGreaterThan(50);
+    expect(ctx.poller.latest('speed')?.value).toBe(50);
+    const supported = ofType(ctx.events, 'obd/supported').at(-1)?.signals;
+    expect(supported).toContain('speed');
+    expect(supported).not.toContain('tirePressureFL'); // nothing provides it any more
+  });
+
+  it('gives up when vehicle requests keep failing, although AT RV still answers (obd-8)', async () => {
+    const ctx = make();
+    await ctx.poller.discover();
+    const timeout = async (): Promise<never> => {
+      throw new ElmError('TIMEOUT', 'No response within 1000 ms');
+    };
+    // Each failed request costs its timeout plus a resynchronisation.
+    ctx.driver.queryMode01 = slow(ctx.clock, 1500, timeout);
+    ctx.driver.readDtcs = slow(ctx.clock, 1500, timeout);
+    ctx.driver.readVin = slow(ctx.clock, 1500, timeout);
+    const caught = ctx.poller.run().catch((err: unknown) => err);
+    await ctx.clock.advance(60_000);
+    const outcome = await Promise.race([caught, flush().then(() => 'still polling')]);
+    expect(outcome).toMatchObject({ code: 'DESYNC' });
+  });
+
+  it('keeps the fast tier going with many custom PIDs behind headers (obd-9)', async () => {
+    const signals = ['tirePressureFL', 'tirePressureFR', 'tirePressureRL', 'tirePressureRR'];
+    const customs: CustomPidConfig[] = Array.from({ length: 8 }, (_, i) => ({
+      signal: signals[i % 4] as CustomPidConfig['signal'],
+      mode: '22',
+      pid: `400${i}`,
+      header: '7B0',
+      formula: 'A',
+      intervalMs: 1000,
+    }));
+    const ctx = make({ customPids: customs });
+    await ctx.poller.discover();
+    // AT SH + AT CRA + request + AT SH + AT CRA at ~60 ms each over Bluetooth.
+    ctx.driver.raw = slow(ctx.clock, 300, async () => [{ ecu: '7B8', data: Uint8Array.of(0x20) }]);
+    const before = ctx.clock.now();
+    const running = ctx.poller.run();
+    await ctx.clock.advance(20_000);
+    ctx.poller.stop();
+    await ctx.clock.advance(5000); // let the requests in flight finish
+    await running;
+    const fast = ctx.driver.pollsOf(0x0d).filter((c) => c.at >= before);
+    expect(Math.max(...intervals(fast.map((c) => c.at)))).toBeLessThanOrEqual(1000);
   });
 });

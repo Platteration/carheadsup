@@ -1,3 +1,5 @@
+import type { ActiveTrip } from '../trip/trip.ts';
+
 /** A completed trip, persisted on the HUD and synced to the phone. */
 export interface TripRecord {
   id: string;
@@ -65,4 +67,11 @@ export interface PersistedState {
   /** Long-run average consumption, seeds range estimation on startup. */
   avgLPer100km: number | null;
   maintenanceRecords: MaintenanceRecord[];
+  /**
+   * The trip in progress when this was written (null: none). The HUD is powered down seconds
+   * after the ignition, long before a trip ends by itself; on the next start the reducer
+   * completes it (or, after a short power blip, continues it). Absent in files written before
+   * it existed.
+   */
+  activeTrip?: ActiveTrip | null;
 }

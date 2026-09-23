@@ -59,6 +59,11 @@ export interface ClearDtcsOutcome {
 export const MAX_RECONNECT_DELAY_MS = 30_000;
 /** Samples older than this are not trusted for the clear-codes safety check. */
 const SAFETY_SAMPLE_MAX_AGE_MS = 5000;
+/**
+ * Longest wait for a link to finish closing before the next session opens the device anyway
+ * (closing a Linux tty waits up to 30 s for unsent output to drain).
+ */
+const CLOSE_WAIT_MS = 30_000;
 
 const CONNECTION_KEYS = [
   'transport',
@@ -90,6 +95,8 @@ export class ObdService {
   private transport: Transport | null = null;
   private driver: Elm327 | null = null;
   private poller: ObdPoller | null = null;
+  /** Settles once every link closed so far has finished closing. */
+  private closing: Promise<void> = Promise.resolve();
   private _status: ObdLinkStatus;
 
   constructor(config: ObdConfig, deps: ObdServiceDeps = {}) {
@@ -192,8 +199,9 @@ export class ObdService {
 
   /**
    * Clear trouble codes (service 04). Refused unless connected, and — as a second line of
-   * defence behind the server's parked check — while recent samples show the vehicle moving
-   * or the engine running.
+   * defence behind the server's parked check — unless recent samples show the vehicle
+   * standing still with the engine off. Missing or stale speed or rpm refuses too: without
+   * recent evidence the car may be moving.
    */
   async clearDtcs(): Promise<ClearDtcsOutcome> {
     const driver = this.driver;
@@ -206,10 +214,18 @@ export class ObdService {
       const sample = poller.latest(signal);
       return sample && now - sample.at <= SAFETY_SAMPLE_MAX_AGE_MS ? sample.value : null;
     };
-    if ((fresh('speed') ?? 0) > 0) {
+    const speed = fresh('speed');
+    const rpm = fresh('rpm');
+    if (speed === null || rpm === null) {
+      return {
+        ok: false,
+        message: 'Vehicle data unavailable: cannot confirm the car is parked with the engine off',
+      };
+    }
+    if (speed > 0) {
       return { ok: false, message: 'Trouble codes can only be cleared while parked' };
     }
-    if ((fresh('rpm') ?? 0) > 0) {
+    if (rpm > 0) {
       return {
         ok: false,
         message: 'Switch the engine off (ignition on) before clearing trouble codes',
@@ -330,7 +346,13 @@ export class ObdService {
     return (this.deps.createTransport ?? createTransport)(config);
   }
 
-  private async teardownSession(): Promise<void> {
+  /**
+   * Stop the session and close its link. Resolves once every link closed so far has finished
+   * closing — also one whose close an earlier call started (e.g. {@link updateConfig}) — so the
+   * next session never opens the device while the old handle is still open (a serial port is
+   * opened with an exclusive lock).
+   */
+  private teardownSession(): Promise<void> {
     const poller = this.poller;
     const driver = this.driver;
     const transport = this.transport;
@@ -338,12 +360,29 @@ export class ObdService {
     this.driver = null;
     this.transport = null;
     poller?.stop();
-    try {
-      if (driver) await driver.close();
-      else if (transport) await transport.close();
-    } catch (err) {
-      this.logger.debug(`OBD: error while closing the link: ${errorMessage(err)}`);
-    }
+    const closing =
+      driver || transport
+        ? new Promise<void>((resolve) => {
+            const timer = this.timers.setTimeout(() => {
+              this.logger.warn('OBD: the link is slow to close; carrying on');
+              resolve();
+            }, CLOSE_WAIT_MS);
+            void (async () => {
+              try {
+                if (driver) await driver.close();
+                else if (transport) await transport.close();
+              } catch (err) {
+                this.logger.debug(`OBD: error while closing the link: ${errorMessage(err)}`);
+              } finally {
+                this.timers.clearTimeout(timer);
+                resolve();
+              }
+            })();
+          })
+        : Promise.resolve();
+    const previous = this.closing;
+    this.closing = Promise.all([previous, closing]).then(() => undefined);
+    return this.closing;
   }
 
   // -------------------------------------------------------------------------------------------

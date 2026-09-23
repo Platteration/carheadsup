@@ -9,7 +9,8 @@ import { useRef, useState } from 'preact/hooks';
 import { describeError } from '../../common/api.ts';
 import type { HudApi } from '../../common/api.ts';
 import { cx } from '../../hud/util.ts';
-import { signalRows } from '../model/records.ts';
+import { signalRows, watchSignals } from '../model/records.ts';
+import type { SignalWatch } from '../model/records.ts';
 import { Badge, Button, Card, Dialog, Notice, Section, Stat, StatusDot } from '../ui/common.tsx';
 import type { Tone } from '../ui/common.tsx';
 import { useOnScreen, usePageVisible, useResource } from '../ui/hooks.ts';
@@ -215,6 +216,27 @@ function DtcList({ diagnostics }: { diagnostics: ApiDiagnostics }) {
   );
 }
 
+/**
+ * Each signal's sample time across polls (see `watchSignals`), advanced once per response; a new
+ * response arrives every poll, so ageing values are re-judged without a timer.
+ */
+function useSignalAging(diagnostics: ApiDiagnostics) {
+  const state = useRef<{ from: ApiDiagnostics | null; watch: SignalWatch; now: number }>({
+    from: null,
+    watch: new Map(),
+    now: 0,
+  });
+  if (state.current.from !== diagnostics) {
+    const now = performance.now();
+    state.current = {
+      from: diagnostics,
+      watch: watchSignals(state.current.watch, diagnostics, now),
+      now,
+    };
+  }
+  return { watch: state.current.watch, now: state.current.now, poll: DIAGNOSTICS_POLL_MS };
+}
+
 function SignalTable({
   diagnostics,
   units,
@@ -224,7 +246,8 @@ function SignalTable({
   units: UnitsConfig;
   paused: boolean;
 }) {
-  const rows = signalRows(diagnostics, units);
+  const aging = useSignalAging(diagnostics);
+  const rows = signalRows(diagnostics, units, aging);
   return (
     <Card>
       <div class="card__head">

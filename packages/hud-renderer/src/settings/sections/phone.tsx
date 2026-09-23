@@ -1,6 +1,7 @@
 import type { HudConfig } from '@carheadsup/core';
 import { useState } from 'preact/hooks';
 import type { Scope } from '../model/scope.ts';
+import { tokenProblem, trimToken } from '../model/validation.ts';
 import { Button, Card, Section } from '../ui/common.tsx';
 import { FieldGroup, TextField, ToggleField } from '../ui/fields.tsx';
 import { copyText, generateToken } from '../ui/hooks.ts';
@@ -56,6 +57,8 @@ export function PhoneSection({ root }: { root: Scope<HudConfig> }) {
             k="pairingToken"
             label="Pairing code"
             monospace
+            transform={trimToken}
+            validate={tokenProblem}
             placeholder="No code — any phone can connect"
             hint="Enter the same code in the companion app. Leave empty to allow any phone on the car’s Wi-Fi."
             actions={

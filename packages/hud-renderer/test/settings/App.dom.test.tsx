@@ -3,7 +3,8 @@ import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHudApi, memoryTokenStore } from '../../src/common/api.ts';
 import type { HudApi } from '../../src/common/api.ts';
-import { SettingsApp } from '../../src/settings/App.tsx';
+import { HudApiError } from '../../src/common/api.ts';
+import { SettingsApp, connectionOf } from '../../src/settings/App.tsx';
 import {
   byText,
   button,
@@ -11,6 +12,7 @@ import {
   click,
   field,
   mount,
+  press,
   section,
   settle,
   text,
@@ -357,6 +359,63 @@ describe('settings app', () => {
     expect(root.querySelector('[role=dialog]')).toBeNull();
   });
 
+  it('keeps keyboard focus inside the clear-codes dialog', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    await waitFor(() => text(section(root, 'diagnostics')).includes('P0420'));
+    const opener = button(section(root, 'diagnostics'), 'Clear trouble codes…');
+    opener.focus();
+    await click(opener);
+    const dialog = root.querySelector<HTMLElement>('[role=dialog]')!;
+    const buttons = [...dialog.querySelectorAll<HTMLButtonElement>('button')];
+    const first = buttons[0]!;
+    const last = buttons[buttons.length - 1]!;
+    expect(document.activeElement).toBe(first);
+    const tab = async (shift: boolean) =>
+      act(async () => {
+        document.activeElement!.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Tab',
+            shiftKey: shift,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+    last.focus();
+    await tab(false);
+    expect(document.activeElement).toBe(first);
+    await tab(true);
+    expect(document.activeElement).toBe(last);
+    // Focus pushed to the page behind comes straight back.
+    opener.focus();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    await press(document.activeElement!, 'Escape');
+    expect(root.querySelector('[role=dialog]')).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it('does not pretend to download the trips CSV inside the companion app', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP2A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.0.0 Mobile Safari/537.36',
+    );
+    const copied: string[] = [];
+    vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(async (value: string) => {
+      copied.push(value);
+    });
+    const blobs = vi.spyOn(URL, 'createObjectURL');
+    const root = start(new MockHud());
+    await ready(root);
+    const trips = () => section(root, 'trips');
+    await waitFor(() => !button(trips(), 'Download CSV').disabled);
+    await click(button(trips(), 'Download CSV'));
+    await waitFor(() => text(trips()).includes('copied to the clipboard'));
+    expect(copied).toHaveLength(1);
+    expect(copied[0]).toContain('trip-5');
+    expect(blobs).not.toHaveBeenCalled();
+  });
+
   it('deletes a trip after confirmation', async () => {
     const hud = new MockHud();
     const root = start(hud);
@@ -414,6 +473,157 @@ describe('settings app', () => {
     await click(button(section(root, 'status'), 'Use'));
     await ready(root);
     expect(tokens.get()).toBe('let-me-in');
+  });
+
+  it('never blocks saving because of a stored token the HUD accepts', async () => {
+    const hud = new MockHud();
+    hud.config.server.apiToken = 'old secret'; // inner spaces: accepted by the HUD
+    hud.config.phone.pairingToken = 'schlüssel'; // travels inside JSON: any text works
+    const root = start(hud);
+    await ready(root);
+    expect(field(section(root, 'server'), 'API token').querySelector('.field__error')).toBeNull();
+    expect(field(section(root, 'phone'), 'Pairing code').querySelector('.field__error')).toBeNull();
+    const name = field(section(root, 'vehicle'), 'Name').querySelector('input')!;
+    await type(name, 'Golf');
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => hud.config.vehicle.name === 'Golf');
+    expect(hud.config.server.apiToken).toBe('old secret');
+    expect(hud.config.phone.pairingToken).toBe('schlüssel');
+  });
+
+  it('refuses an API token that no device could ever present', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    const tokenField = () => field(section(root, 'server'), 'API token');
+    const input = tokenField().querySelector('input')!;
+    await type(input, 'correct horse battery');
+    expect(text(tokenField().querySelector('.field__error'))).toBe(
+      'No spaces: a token is one word of letters, digits and symbols',
+    );
+    expect(byText(saveBar(root)!, 'button', 'Save')).toBeNull();
+    await type(input, 'geheim€');
+    expect(text(tokenField().querySelector('.field__error'))).toContain('Only plain letters');
+    // A pasted token with a stray space or line break is simply trimmed.
+    await type(input, '  s3cret\n');
+    expect(input.value).toBe('s3cret');
+    expect(tokenField().querySelector('.field__error')).toBeNull();
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => hud.config.server.apiToken === 's3cret');
+    // The same rules apply to the phone's pairing code.
+    const pairing = field(section(root, 'phone'), 'Pairing code');
+    await type(pairing.querySelector('input')!, 'my code');
+    expect(text(pairing.querySelector('.field__error'))).toContain('No spaces');
+  });
+
+  it('keeps a live change reverted while its PATCH was in flight', async () => {
+    const hud = new MockHud();
+    let release: () => void = () => undefined;
+    let held = 0;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      if (init?.method === 'PATCH' && held++ === 0) {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return hud.fetch(input, init);
+    };
+    const root = start(hud, createHudApi({ fetch, tokens: memoryTokenStore() }));
+    await ready(root);
+    const grid = () =>
+      field(section(root, 'projection'), 'calibration grid').querySelector<HTMLInputElement>(
+        'input[type=checkbox]',
+      )!;
+    await check(grid(), true);
+    await waitFor(() => held === 1);
+    // Switched off again before the HUD answered the "on".
+    await check(grid(), false);
+    release();
+    await waitFor(() => patches(hud).length === 2);
+    expect(patches(hud)).toEqual([
+      { display: { projection: { showGrid: true } } },
+      { display: { projection: { showGrid: false } } },
+    ]);
+    await waitFor(() => !hud.config.display.projection.showGrid);
+    expect(grid().checked).toBe(false);
+  });
+
+  it('keeps unsaved edits when a new access token is entered', async () => {
+    const hud = new MockHud({ token: 'old-token' });
+    const api = createHudApi({ fetch: hud.fetch, tokens: memoryTokenStore('old-token') });
+    const root = start(hud, api);
+    await ready(root);
+    const vehicle = section(root, 'vehicle');
+    await type(field(vehicle, 'Name').querySelector('input')!, 'Weekend car');
+    await type(field(vehicle, 'Redline').querySelector('input')!, '7200');
+    expect(text(saveBar(root))).toContain('2 unsaved changes');
+    // The token was rotated from another device: the save is refused.
+    hud.options.token = 'new-token';
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => text(saveBar(root)).includes('valid access token'));
+    await type(section(root, 'status').querySelector<HTMLInputElement>('#api-token')!, 'new-token');
+    await click(button(section(root, 'status'), 'Use'));
+    await waitFor(() => hud.requests.filter((r) => r.path === '/api/config').length >= 2);
+    await settle(50);
+    expect(field(section(root, 'vehicle'), 'Name').querySelector('input')!.value).toBe(
+      'Weekend car',
+    );
+    expect(field(section(root, 'vehicle'), 'Redline').querySelector('input')!.value).toBe('7200');
+    expect(text(saveBar(root))).toContain('2 unsaved changes');
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => hud.config.vehicle.name === 'Weekend car');
+    expect(hud.config.vehicle.redlineRpm).toBe(7200);
+  });
+
+  it('converts entered gear ratios when the unit system changes', async () => {
+    const root = start(new MockHud());
+    await ready(root);
+    const vehicle = () => section(root, 'vehicle');
+    await click(byText(vehicle(), '.segmented__item', 'Enter ratios')!.querySelector('input')!);
+    const gears = () =>
+      [...vehicle().querySelectorAll<HTMLInputElement>('.gear-grid input')].map((i) => i.value);
+    const metric = gears();
+    expect(metric[0]).toBe('120');
+    const units = section(root, 'units');
+    await click(byText(units, '.segmented__item', 'mph · miles')!.querySelector('input')!);
+    expect(text(vehicle().querySelector('.gear-ratios'))).toContain('rpm per mph');
+    // 120 rpm per km/h is 193.1 rpm per mph.
+    expect(gears()[0]).toBe('193.1');
+    expect(gears()).not.toEqual(metric);
+  });
+
+  it('does not pass an armed "Remove" on to the next custom PID', async () => {
+    const root = start(new MockHud());
+    await ready(root);
+    const vehicle = () => section(root, 'vehicle');
+    await click(button(vehicle(), 'Add PID'));
+    await click(button(vehicle(), 'Add PID'));
+    const rows = () => [...vehicle().querySelectorAll<HTMLElement>('.pid-list > .pid')];
+    expect(rows()).toHaveLength(2);
+    const second = rows()[1]!.querySelector<HTMLSelectElement>('select')!.value;
+    await click(button(rows()[0]!, 'Remove…'));
+    await click(byText(rows()[0]!, 'button', 'Remove')!);
+    expect(rows()).toHaveLength(1);
+    // The PID that moved up is the second one, and it is not armed for removal.
+    expect(rows()[0]!.querySelector<HTMLSelectElement>('select')!.value).toBe(second);
+    expect(byText(rows()[0]!, 'button', 'Keep')).toBeNull();
+    expect(button(rows()[0]!, 'Remove…')).toBeTruthy();
+  });
+
+  it('shows the pill from the latest status poll, not the last good one', () => {
+    const info = { data: { name: 'carheadsup' } };
+    expect(connectionOf({ data: null, error: null })).toBe('connecting');
+    expect(connectionOf({ ...info, error: null })).toBe('online');
+    const offline = new HudApiError({ kind: 'network', message: 'x', method: 'GET', path: '/' });
+    expect(connectionOf({ ...info, error: offline })).toBe('offline');
+    expect(connectionOf({ data: null, error: offline })).toBe('offline');
+    const locked = new HudApiError({
+      kind: 'unauthorized',
+      message: 'x',
+      method: 'GET',
+      path: '/',
+    });
+    expect(connectionOf({ ...info, error: locked })).toBe('locked');
   });
 
   it('keeps access after changing the API token', async () => {

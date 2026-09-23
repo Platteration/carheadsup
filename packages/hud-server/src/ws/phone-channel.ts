@@ -22,7 +22,7 @@ import { closeAll, closeSocket, rawDataToString, sendJson } from './sockets.ts';
  * the accompanying `error` message; the codes make logs and tests unambiguous.
  */
 export const PHONE_CLOSE = {
-  /** A newer session from a phone replaced this one. */
+  /** A newer session from the same phone replaced this one. */
   replaced: 4000,
   /** Wrong pairing token (also when the token is changed while connected). */
   badToken: 4001,
@@ -32,7 +32,12 @@ export const PHONE_CLOSE = {
   helloRequired: 4003,
   /** Too many invalid messages in a row. */
   tooManyErrors: 4004,
-  /** Too many connections waiting for their `hello`. */
+  /** The phone does not read what the HUD sends (its unsent backlog passed the limit). */
+  backlog: 1008,
+  /**
+   * Try again later: evicted while waiting for its `hello` (too many connections waiting), or
+   * another phone is connected.
+   */
   busy: 1013,
 } as const;
 
@@ -44,8 +49,14 @@ export const PHONE_RATE_PER_S = 50;
 export const PHONE_RATE_BURST = 100;
 /** Most trips returned for one `trips-request` (newest first; older ones via GET /api/trips). */
 export const MAX_TRIPS_PER_REQUEST = 1000;
-/** Connections allowed to wait for their `hello` at the same time. */
+/** Connections allowed to wait for their `hello` at the same time, in total and per address. */
 export const MAX_PENDING_SESSIONS = 8;
+export const MAX_PENDING_PER_ADDRESS = 2;
+/** A session whose unsent messages pass this is closed: the phone is not reading. */
+export const MAX_PHONE_BACKLOG_BYTES = 1024 * 1024;
+/** `trips-request`s answered per session: sustained rate and burst (each can be ~300 kB). */
+export const TRIPS_REQUEST_PER_S = 0.2;
+export const TRIPS_REQUEST_BURST = 3;
 
 export interface PhoneChannelOptions {
   /** Feed events into the engine. */
@@ -56,6 +67,11 @@ export interface PhoneChannelOptions {
   tripsEndedAfter(since: number, limit: number): TripRecord[];
   /** Maintenance items currently due, pushed right after `welcome`. */
   dueMaintenance(): HudMaintenanceDue | null;
+  /**
+   * A phone became connected (true) or the connected phone went away (false); not called when
+   * the same phone replaces its own session. `--sim` uses it to pause the simulated phone.
+   */
+  onPhoneChange?(connected: boolean): void;
   /** HUD software version for `welcome`. */
   version: string;
   now: Clock;
@@ -74,6 +90,7 @@ interface Session {
   phase: 'hello' | 'active' | 'closed';
   helloTimer: unknown;
   readonly bucket: TokenBucket;
+  readonly tripsBucket: TokenBucket;
   /** Currently dropping messages over the rate limit (notified once per episode). */
   throttled: boolean;
   invalidStreak: number;
@@ -88,13 +105,21 @@ interface Session {
  *    `phone.pairingToken` is set, compared in constant time) gets `error bad-token` and close
  *    4001. Otherwise the HUD answers `welcome`, the phone counts as connected (`phone/link`) and
  *    due maintenance items are pushed.
- *  - There is one active phone: a newer successful hello replaces the older session (close
- *    4000 "replaced") without a disconnect in between.
+ *  - There is one active phone. A newer session from the same phone (same `device` and `app`)
+ *    replaces the older one (close 4000 "replaced") without a disconnect in between; another
+ *    phone is refused (close 1013) while one is connected, so two paired phones never take the
+ *    HUD from each other in turns.
+ *  - At most {@link MAX_PENDING_SESSIONS} connections wait for their hello, at most
+ *    {@link MAX_PENDING_PER_ADDRESS} per address; beyond that the oldest waiting one is closed
+ *    (1013), so idle connections cannot lock the paired phone out.
  *  - Messages are validated (`parsePhoneMessage`) and translated (`phoneMessageToEvents`);
- *    `ping` → `pong`, `trips-request` → `trips`. An invalid message gets `error bad-message`
- *    but the session survives, until {@link MAX_CONSECUTIVE_INVALID} in a row.
+ *    `ping` → `pong`, `trips-request` → `trips` (at most {@link TRIPS_REQUEST_BURST} in a row,
+ *    then one per 5 s). An invalid message gets `error bad-message` but the session survives,
+ *    until {@link MAX_CONSECUTIVE_INVALID} in a row.
  *  - Each session is rate limited (token bucket, 50 msg/s, burst 100); excess messages are
  *    dropped with one `bad-message` notice per episode.
+ *  - A session that stops reading (more than {@link MAX_PHONE_BACKLOG_BYTES} unsent) is closed
+ *    (1008) instead of buffering without limit.
  */
 export class PhoneChannel {
   private readonly options: PhoneChannelOptions;
@@ -117,15 +142,12 @@ export class PhoneChannel {
       closeSocket(ws, 1001, 'HUD shutting down');
       return;
     }
-    const pending = [...this.sessions].filter((s) => s.phase === 'hello').length;
-    if (pending >= MAX_PENDING_SESSIONS) {
-      closeSocket(ws, PHONE_CLOSE.busy, 'too many pending connections');
-      return;
-    }
+    const address = remoteAddress ?? '?';
+    this.makeRoomForPending(address);
     const session: Session = {
       id: this.nextId++,
       ws,
-      remoteAddress: remoteAddress ?? '?',
+      remoteAddress: address,
       phase: 'hello',
       helloTimer: null,
       bucket: new TokenBucket(
@@ -133,6 +155,7 @@ export class PhoneChannel {
         this.options.rateBurst ?? PHONE_RATE_BURST,
         this.options.now,
       ),
+      tripsBucket: new TokenBucket(TRIPS_REQUEST_PER_S, TRIPS_REQUEST_BURST, this.options.now),
       throttled: false,
       invalidStreak: 0,
       hello: null,
@@ -152,7 +175,7 @@ export class PhoneChannel {
   /** Send a message to the active phone. False when no phone is connected. */
   send(message: HudToPhone): boolean {
     const session = this.active;
-    return session !== null && sendJson(session.ws, message);
+    return session !== null && this.sendTo(session, message);
   }
 
   /** Disconnect the active phone if its pairing token no longer matches. */
@@ -177,6 +200,41 @@ export class PhoneChannel {
   }
 
   // -------------------------------------------------------------------------------------------
+
+  /**
+   * Keep the waiting (pre-hello) connections within the limits before accepting another one:
+   * the oldest from the same address beyond {@link MAX_PENDING_PER_ADDRESS}, then the oldest
+   * overall beyond {@link MAX_PENDING_SESSIONS}. The newcomer is always accepted: a phone says
+   * hello at once, so it gets through while idle squatters only evict each other.
+   */
+  private makeRoomForPending(address: string): void {
+    const pending = [...this.sessions].filter((s) => s.phase === 'hello');
+    const sameAddress = pending.filter((s) => s.remoteAddress === address);
+    let victim: Session | undefined;
+    if (sameAddress.length >= MAX_PENDING_PER_ADDRESS) victim = sameAddress[0];
+    else if (pending.length >= MAX_PENDING_SESSIONS) victim = pending[0];
+    if (victim === undefined) return;
+    this.options.logger.debug(
+      `Phone: closing waiting session ${victim.id} from ${victim.remoteAddress} (too many waiting)`,
+    );
+    this.closeSession(victim, PHONE_CLOSE.busy, 'too many pending connections');
+  }
+
+  /**
+   * Send to one session unless it has stopped reading: then it is closed rather than letting
+   * its unsent messages pile up in memory.
+   */
+  private sendTo(session: Session, message: unknown): boolean {
+    if (session.phase === 'closed') return false;
+    if (session.ws.bufferedAmount > MAX_PHONE_BACKLOG_BYTES) {
+      this.options.logger.warn(
+        `Phone: session ${session.id} is not reading its messages; closing it`,
+      );
+      this.closeSession(session, PHONE_CLOSE.backlog, 'not reading');
+      return false;
+    }
+    return sendJson(session.ws, message);
+  }
 
   private onMessage(session: Session, data: RawData, isBinary: boolean): void {
     if (session.phase === 'closed') return;
@@ -252,6 +310,15 @@ export class PhoneChannel {
     }
 
     const previous = this.active;
+    if (previous?.hello && !samePhone(previous.hello, hello)) {
+      // One phone at a time: the connected one keeps the HUD until it goes away (a vanished
+      // phone is dropped by the heartbeat), instead of two phones taking it in turns.
+      this.options.logger.info(
+        `Phone: ${hello.device || 'a phone'} from ${session.remoteAddress} refused: ${previous.hello.device || 'another phone'} is connected`,
+      );
+      this.closeSession(session, PHONE_CLOSE.busy, 'another phone is connected');
+      return;
+    }
     session.phase = 'active';
     session.hello = hello;
     this.active = session;
@@ -267,10 +334,11 @@ export class PhoneChannel {
       hudVersion: this.options.version,
       readMessagesAloud: config.phone.readMessagesAloud,
     };
-    sendJson(session.ws, welcome);
+    this.sendTo(session, welcome);
     this.options.logger.info(
       `Phone: ${hello.device || 'phone'} connected from ${session.remoteAddress} (${hello.app} ${hello.appVersion})`,
     );
+    if (previous === null) this.notifyPhoneChange(true);
     this.options.dispatch({
       type: 'phone/link',
       connected: true,
@@ -279,7 +347,7 @@ export class PhoneChannel {
       at: this.options.now(),
     });
     const due = this.options.dueMaintenance();
-    if (due !== null) sendJson(session.ws, due);
+    if (due !== null) this.sendTo(session, due);
   }
 
   private onSessionMessage(session: Session, message: PhoneToHud): void {
@@ -288,13 +356,21 @@ export class PhoneChannel {
         // Already greeted: a repeated hello changes nothing.
         return;
       case 'ping':
-        sendJson(
-          session.ws,
+        this.sendTo(
+          session,
           message.id === undefined ? { t: 'pong' } : { t: 'pong', id: message.id },
         );
         return;
       case 'trips-request':
-        sendJson(session.ws, {
+        if (!session.tripsBucket.take()) {
+          this.sendError(
+            session,
+            'bad-message',
+            'Too many trip requests: try again in a few seconds',
+          );
+          return;
+        }
+        this.sendTo(session, {
           t: 'trips',
           trips: this.options.tripsEndedAfter(message.since, MAX_TRIPS_PER_REQUEST),
         });
@@ -314,6 +390,17 @@ export class PhoneChannel {
     this.active = null;
     this.options.logger.info(`Phone: ${session.hello?.device || 'phone'} disconnected`);
     this.options.dispatch({ type: 'phone/link', connected: false, at: this.options.now() });
+    this.notifyPhoneChange(false);
+  }
+
+  private notifyPhoneChange(connected: boolean): void {
+    try {
+      this.options.onPhoneChange?.(connected);
+    } catch (err) {
+      this.options.logger.warn(
+        `Phone: change handler failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private tokenAccepted(token: string, config: HudConfig): boolean {
@@ -323,7 +410,7 @@ export class PhoneChannel {
 
   private sendError(session: Session, code: HudError['code'], message: string): void {
     const error: HudError = { t: 'error', code, message };
-    sendJson(session.ws, error);
+    this.sendTo(session, error);
   }
 
   /** Send an error and close the session (it never becomes/stays the active phone). */
@@ -339,12 +426,13 @@ export class PhoneChannel {
 
   private closeSession(session: Session, code: number, reason: string): void {
     this.clearHelloTimer(session);
+    session.phase = 'closed';
     if (this.active === session) {
       // Report the disconnect now; the socket's close event may come much later.
       this.active = null;
       this.options.dispatch({ type: 'phone/link', connected: false, at: this.options.now() });
+      this.notifyPhoneChange(false);
     }
-    session.phase = 'closed';
     closeSocket(session.ws, code, reason);
   }
 
@@ -352,4 +440,9 @@ export class PhoneChannel {
     if (session.helloTimer !== null) this.options.timers.clearTimeout(session.helloTimer);
     session.helloTimer = null;
   }
+}
+
+/** Whether two hellos come from the same phone (same device and app). */
+function samePhone(a: PhoneHello, b: PhoneHello): boolean {
+  return a.device === b.device && a.app === b.app;
 }

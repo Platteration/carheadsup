@@ -1,5 +1,6 @@
 package dev.carheadsup.protocol
 
+import dev.carheadsup.protocol.link.PhoneCloseCode
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.descriptors.elementNames
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -98,6 +99,18 @@ class ContractSyncTest {
     private fun literalUnionOfTypes(ts: String, name: String): List<String> {
         val body = Regex("export type $name =(.*?);", RegexOption.DOT_MATCHES_ALL).find(ts)!!.groupValues[1]
         return body.split('|').map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    @Test
+    fun `close codes match the HUD's phone channel`() {
+        val channel = source("packages/hud-server/src/ws/phone-channel.ts")
+        fun code(key: String): Int =
+            Regex("\\b$key: (\\d+),").find(channel.substringAfter("export const PHONE_CLOSE"))!!.groupValues[1].toInt()
+        assertEquals(code("replaced"), PhoneCloseCode.REPLACED)
+        assertEquals(code("badToken"), PhoneCloseCode.BAD_TOKEN)
+        assertEquals(code("unsupportedVersion"), PhoneCloseCode.UNSUPPORTED_VERSION)
+        assertEquals(code("busy"), PhoneCloseCode.BUSY)
+        assertEquals(code("backlog"), PhoneCloseCode.NOT_READING)
     }
 
     @Test

@@ -28,7 +28,9 @@ export const clamp = (v: number, lo: number, hi: number): number => Math.min(hi,
 /** Round to a number of decimals without floating-point noise like 0.30000000000000004. */
 export function roundTo(value: number, decimals: number): number {
   const f = 10 ** decimals;
-  return Math.round(value * f) / f;
+  // `+ 0` turns -0 (e.g. -0.3 °C rounded) into 0: JSON would turn it into 0 anyway, and some
+  // number formatting shows "-0".
+  return Math.round(value * f) / f + 0;
 }
 
 /** Round to the nearest multiple of `step`. */
@@ -50,7 +52,7 @@ export function temperatureUnitLabel(unit: TemperatureUnit): TemperatureUnitLabe
 }
 
 export function displayTemperature(c: number, unit: TemperatureUnit): number {
-  return Math.round(unit === 'F' ? cToF(c) : c);
+  return roundTo(unit === 'F' ? cToF(c) : c, 0);
 }
 
 export function pressureUnitLabel(unit: PressureUnit): PressureUnitLabel {

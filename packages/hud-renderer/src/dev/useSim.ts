@@ -34,6 +34,13 @@ export function useSim(api: HudApi): SimHandle {
   const [error, setError] = useState<unknown>(null);
   const [nonce, setNonce] = useState(0);
   const mounted = useRef(true);
+  /**
+   * Bumped when a command is sent and when its reply arrives. A poll reply is applied only if
+   * no command started or finished while the poll was in flight: the HUD may have answered the
+   * poll before applying the command, and that older status must not undo the newer one (the
+   * DTC chips build the next list from it).
+   */
+  const commandEpoch = useRef(0);
   useEffect(
     () => () => {
       mounted.current = false;
@@ -47,18 +54,21 @@ export function useSim(api: HudApi): SimHandle {
     let active = true;
     const poll = async () => {
       let next: SimAvailability = 'checking';
+      const epoch = commandEpoch.current;
       try {
         const result = await api.getSim({ signal: controller.signal });
         if (!active) return;
         next = result === null ? 'real-vehicle' : 'available';
-        setStatus(result);
-        setError(null);
+        if (commandEpoch.current === epoch) {
+          setStatus(result);
+          setError(null);
+        }
       } catch (err) {
         if (!active || isAbortError(err)) return;
         next = 'unreachable';
-        setError(err);
+        if (commandEpoch.current === epoch) setError(err);
       }
-      setAvailability(next);
+      if (commandEpoch.current === epoch) setAvailability(next);
       timer = setTimeout(() => void poll(), SIM_POLL_MS[next]);
     };
     void poll();
@@ -71,14 +81,17 @@ export function useSim(api: HudApi): SimHandle {
 
   const send = useCallback(
     async (control: SimControl): Promise<boolean> => {
+      commandEpoch.current += 1;
       try {
         const next = await api.controlSim(control);
+        commandEpoch.current += 1;
         if (!mounted.current) return true;
         setStatus(next);
         setAvailability('available');
         setError(null);
         return true;
       } catch (err) {
+        commandEpoch.current += 1;
         if (!mounted.current) return false;
         if (isHudApiError(err) && err.kind === 'not-found') {
           setAvailability('real-vehicle');

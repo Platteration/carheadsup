@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { copyFile, link, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -16,8 +16,8 @@ export interface AtomicWriteOptions {
   /** File mode for newly created files. Default {@link PRIVATE_FILE_MODE}. */
   mode?: number;
   /**
-   * Keep the file being replaced as this path (it is renamed, so the backup is always a complete
-   * earlier version). Missing originals are fine.
+   * Keep the file being replaced as this path (a hard link or a copy, put in place atomically, so
+   * the backup is always a complete earlier version). Missing originals are fine.
    */
   backupPath?: string;
 }
@@ -50,10 +50,53 @@ async function syncDirectory(dir: string): Promise<void> {
   }
 }
 
+/** A unique temporary name next to `path`. */
+function tempPath(path: string): string {
+  return join(
+    dirname(path),
+    `.${basename(path)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`,
+  );
+}
+
+/**
+ * Make `backupPath` an exact earlier version of `path` while `path` itself stays in place (so a
+ * power cut at any moment leaves the file there): a hard link, or a copy where links are not
+ * possible, renamed over the old backup. Only if neither works is the file moved to the backup
+ * path (it is then missing until the new version is renamed in, and readers use the backup).
+ */
+async function backUp(path: string, backupPath: string): Promise<void> {
+  const tmp = tempPath(backupPath);
+  try {
+    try {
+      await link(path, tmp);
+    } catch (err) {
+      if (isNotFound(err)) return;
+      // No hard links here (FAT, protected_hardlinks for a file of another user…): copy.
+      await copyFile(path, tmp);
+      const handle = await open(tmp, 'r');
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    }
+    await rename(tmp, backupPath);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    if (isNotFound(err)) return;
+    try {
+      await rename(path, backupPath);
+    } catch (moveErr) {
+      if (!isNotFound(moveErr)) throw moveErr;
+    }
+  }
+}
+
 /**
  * Atomically replace `path` with `data`: write a temporary file in the same directory, fsync it,
- * rename it over the target (optionally moving the old file to `backupPath` first) and fsync the
- * directory. On failure the temporary file is removed and the original is left untouched.
+ * rename it over the target (optionally keeping the old file as `backupPath` first) and fsync
+ * the directory. At every moment `path` holds either the old or the new content. On failure the
+ * temporary file is removed and the original is left untouched.
  */
 export async function writeFileAtomic(
   path: string,
@@ -61,7 +104,7 @@ export async function writeFileAtomic(
   options: AtomicWriteOptions = {},
 ): Promise<void> {
   const dir = dirname(path);
-  const tmp = join(dir, `.${basename(path)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+  const tmp = tempPath(path);
   let handle;
   try {
     handle = await open(tmp, 'wx', options.mode ?? PRIVATE_FILE_MODE);
@@ -69,13 +112,7 @@ export async function writeFileAtomic(
     await handle.sync();
     await handle.close();
     handle = undefined;
-    if (options.backupPath !== undefined) {
-      try {
-        await rename(path, options.backupPath);
-      } catch (err) {
-        if (!isNotFound(err)) throw err;
-      }
-    }
+    if (options.backupPath !== undefined) await backUp(path, options.backupPath);
     await rename(tmp, path);
   } catch (err) {
     await handle?.close().catch(() => {});

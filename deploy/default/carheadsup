@@ -10,6 +10,13 @@
 #CARHEADSUP_BACKLIGHT=auto
 
 # Override server.port / server.host without touching the config file. If you change the port,
-# point the kiosk at it too (CARHEADSUP_KIOSK_URL, see carheadsup-kiosk.service).
+# point the kiosk at it too (CARHEADSUP_KIOSK_URL, see carheadsup-kiosk.service; until then the
+# kiosk stays black), and re-run deploy/install.sh if it installed the static Avahi file.
+# Ports below 1024 do not work: the service has no privileges.
 #CARHEADSUP_PORT=8080
 #CARHEADSUP_HOST=0.0.0.0
+
+# Extra host names (comma-separated) under which browsers may reach the HUD. IP addresses,
+# localhost, the Pi's host name and <hostname>.local always work; any other name is refused
+# (protection against DNS rebinding).
+#CARHEADSUP_ALLOWED_HOSTS=hud.example.lan

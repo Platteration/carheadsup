@@ -76,6 +76,7 @@ async function main(): Promise<void> {
           JSON.stringify({
             t: 'display',
             simulated: true,
+            hardwareBrightness: false,
             projection: {
               mirrorX: true,
               mirrorY: false,

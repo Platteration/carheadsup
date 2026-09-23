@@ -8,9 +8,13 @@ do, and the legal questions you have to answer for your own car and country.
 
 **Glanceable content.** The speed is the largest element, in the centre, where the eye rests.
 Everything else is short: alert titles have at most 24 characters, trouble-code labels at most
-32, hazard labels at most 24. The navigation app's full instruction text and hazard descriptions
-are withheld while the car moves. The image is light on black — black is transparent on the
-glass — without large bright areas, dims with the ambient light and switches to a night palette.
+32, hazard labels at most 24. The navigation app's full instruction text is withheld while the
+car moves. Hazards are labelled by the HUD itself ("Speed camera", "Accident" …); the phone's
+description of a hazard of type `other` becomes its label, cut to 24 characters, only while the
+car is stopped or parked — while it moves the label is just "Hazard". The image is light on black — black is transparent on
+the glass — without large bright areas, dims with the ambient light and switches to a night
+palette. While the HUD page is not loaded (the server starting or down), the kiosk keeps the
+screen black instead of showing the browser's error page.
 
 **Adaptive clutter.** What is shown depends on the driving context
 ([details](architecture.md#driving-contexts-and-adaptive-clutter)): the highway view shows the
@@ -28,7 +32,7 @@ The sender toast can be switched off (`phone.showMessageSender`).
 **Alert discipline.**
 
 - Four severities: info, caution, warning, critical. At most two banners at a time
-  (`display.maxAlerts`), most severe first.
+  (`display.maxAlerts`), most severe first — except that every critical alert gets its banner.
 - While moving, service reminders, the OBD-link notice and minor check-engine codes wait until
   you stop.
 - Faults must persist before they are raised (a charging fault for a minute, other voltage
@@ -76,8 +80,10 @@ that apply to you before installing or using the HUD.
 - **Speed-camera warnings.** Using devices or apps that warn of speed cameras while driving is
   **illegal in some countries — for example Germany and Switzerland** — and restricted in others
   (France, for example, only permits generic "danger zone" warnings). The companion app sends
-  cameras from OpenStreetMap by default. To turn them off: in the companion app, *Setup → Speed
-  camera warnings* off. To remove every hazard from the HUD regardless of the phone, use a custom
+  cameras from OpenStreetMap only after the driver turns on *Setup → Speed camera warnings* — do
+  that only where it is legal. (An install that saved its settings before this default changed
+  may still have them on; check the switch.) To remove every hazard from the HUD regardless of
+  the phone, use a custom
   layout without the `hazard` widget ([configuration](configuration.md#custom-layouts)). Radar
   detectors are a separate matter; carheadsup is not one.
 - **Phones.** Laws on handling a phone while driving apply unchanged. Set up the companion before

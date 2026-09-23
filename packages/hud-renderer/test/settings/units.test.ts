@@ -37,6 +37,18 @@ describe('parseNumberText', () => {
     expect(parseNumberText('–2,5')).toEqual({ ok: true, value: -2.5 });
   });
 
+  it('refuses thousands separators instead of reading them as a decimal comma', () => {
+    const error = 'Leave out the thousands separator (decimals: 1.5 or 1,5)';
+    for (const text of ['48,210', '10,000', '1,500', '-1,500', '1,234,567', '12,345.6']) {
+      expect(parseNumberText(text), text).toEqual({ ok: false, error });
+    }
+    // Still a decimal comma: not three digits after it, or a leading zero.
+    expect(parseNumberText('1,5')).toEqual({ ok: true, value: 1.5 });
+    expect(parseNumberText('12,50')).toEqual({ ok: true, value: 12.5 });
+    expect(parseNumberText('0,125')).toEqual({ ok: true, value: 0.125 });
+    expect(parseNumberText('1,5000')).toEqual({ ok: true, value: 1.5 });
+  });
+
   it('rejects everything else', () => {
     for (const text of [
       'abc',

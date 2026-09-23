@@ -114,7 +114,7 @@ describe('DEFAULT_CONFIG', () => {
       highwayDwellMs: 10000,
       stationaryKph: 2,
       parkedAfterMs: 120000,
-      engineOffParkedAfterMs: 30000,
+      engineOffParkedAfterMs: 180000,
     });
     expect(c.display).toMatchObject({
       speedLimitSign: 'vienna',
@@ -394,11 +394,29 @@ describe('parseConfig', () => {
         'obd.customPids[0].header: expected a 3-, 6- or 8-digit hex header such as "7E0"',
       ],
       [{ formula: '' }, 'obd.customPids[0].formula: must not be empty'],
+      [
+        { formula: 'A+' },
+        'obd.customPids[0].formula: invalid formula "A+" at position 3: expected a number, byte or function but found the end of the formula',
+      ],
+      [
+        { formula: '  ' },
+        'obd.customPids[0].formula: invalid formula "  " at position 1: formula is empty',
+      ],
       [{ intervalMs: 10 }, 'obd.customPids[0].intervalMs: expected number >= 100'],
     ])('rejects %j', (override, error) => {
       const { config, errors } = parseConfig({ obd: { customPids: [{ ...pid, ...override }] } });
       expect(errors).toEqual([error]);
       expect(config.obd.customPids).toEqual([]);
+    });
+
+    it('rejects a formula that does not compile through PATCH too (regression: core-13)', () => {
+      const { config, errors } = mergeConfig(DEFAULT_CONFIG, {
+        obd: { customPids: [{ ...pid, signal: 'oilTemp', formula: 'A+' }] },
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatch(/^obd\.customPids\[0\]\.formula: invalid formula "A\+"/);
+      expect(config.obd.customPids).toEqual([]);
+      expect(hudConfigSchema.safeParse({ ...DEFAULT_CONFIG, obd: config.obd }).success).toBe(true);
     });
 
     it('rejects two PIDs feeding the same signal', () => {
@@ -793,6 +811,21 @@ describe('mergeConfig', () => {
     expect(errors).toEqual(['display.maxAlerts: expected number <= 5']);
     expect(config.display.maxAlerts).toBe(3);
     expect(config.display.mediaToastMs).toBe(4000);
+  });
+
+  it('refuses an API token no client could send, keeping the current one', () => {
+    const base = mergeConfig(DEFAULT_CONFIG, { server: { apiToken: 'old secret' } }).config;
+    expect(base.server.apiToken).toBe('old secret'); // inner spaces travel fine
+    for (const token of ['pässwort', 'line\nbreak', '   ', 'tab\there']) {
+      const { config, errors } = mergeConfig(base, { server: { apiToken: token } });
+      expect(config.server.apiToken, JSON.stringify(token)).toBe('old secret');
+      expect(errors, JSON.stringify(token)).toHaveLength(1);
+      expect(errors[0]).toMatch(/^server\.apiToken: /);
+    }
+    expect(mergeConfig(base, { server: { apiToken: '' } }).config.server.apiToken).toBe('');
+    expect(mergeConfig(base, { server: { apiToken: 'K7f!Q2~z' } }).errors).toEqual([]);
+    // The phone's pairing token travels inside JSON: any text works.
+    expect(mergeConfig(base, { phone: { pairingToken: 'schlüssel' } }).errors).toEqual([]);
   });
 
   it('applies cross-field rules against the merged result', () => {

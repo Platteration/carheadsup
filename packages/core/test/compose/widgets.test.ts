@@ -239,24 +239,62 @@ describe('engine widgets', () => {
     expect(widget(h.frame(), 'coolant')).toMatchObject({ status: 'critical' });
   });
 
-  it('shows voltage only outside the alert thresholds', () => {
+  it('keeps the coolant widget steady on a reading straddling the threshold (regression: core-10)', () => {
+    const h = cityDrive(makeConfig(), { coolantTemp: 109 });
+    const shown: boolean[] = [];
+    for (let i = 0; i < 20; i++) {
+      h.samples(h.now + 500, { coolantTemp: i % 2 === 0 ? 110 : 109, speed: 60, rpm: 2400 });
+      shown.push(widget(h.frame(), 'coolant') !== undefined);
+    }
+    expect(new Set(shown)).toEqual(new Set([true]));
+    // Hidden again with the alert, below the threshold minus its hysteresis.
+    h.samples(h.now + 500, { coolantTemp: 107, speed: 60, rpm: 2400 });
+    expect(widget(h.frame(), 'coolant')).toBeDefined();
+    h.samples(h.now + 500, { coolantTemp: 106, speed: 60, rpm: 2400 });
+    expect(widget(h.frame(), 'coolant')).toBeUndefined();
+  });
+
+  it('shows voltage while a voltage alert is up, after its persistence time', () => {
     const h = cityDrive(makeConfig(), { batteryVoltage: 13.9 });
     expect(widget(h.frame(), 'voltage')).toBeUndefined();
-    h.samples(h.now + 100, { batteryVoltage: 12.14, speed: 50, rpm: 2400 });
+    const low = { batteryVoltage: 12.14, speed: 50, rpm: 2400 };
+    const firstLow = h.now + 1000;
+    h.run(firstLow + 59_000, low, 1000);
+    expect(widget(h.frame(), 'voltage')).toBeUndefined(); // charging faults need a minute
+    h.run(firstLow + 60_000, low, 1000);
     expect(widget(h.frame(), 'voltage')).toEqual({
       id: 'voltage',
       zone: 'bottom-left',
       value: 12.1,
       status: 'low',
     });
-    h.samples(h.now + 100, { batteryVoltage: 15.6, speed: 50, rpm: 2400 });
+    h.run(h.now + 11_000, { batteryVoltage: 15.6, speed: 50, rpm: 2400 }, 1000);
     expect(widget(h.frame(), 'voltage')).toMatchObject({ status: 'high' });
     // Engine off: 12.1 V is a normal resting voltage.
     const parked = new Harness();
     parked.samples(T0 + 100, { batteryVoltage: 12.1 });
     expect(widget(parked.frame(), 'voltage')).toBeUndefined();
     parked.samples(T0 + 200, { batteryVoltage: 11.8 });
+    parked.samples(T0 + 10_200, { batteryVoltage: 11.8 });
     expect(widget(parked.frame(), 'voltage')).toMatchObject({ status: 'low' });
+  });
+
+  it('ignores cranking dips and voltage straddling a threshold (regression: core-10)', () => {
+    const h = cityDrive(makeConfig(), { batteryVoltage: 14.1 });
+    // A start-stop restart: 10.4 V while cranking, then charging again.
+    h.samples(h.now + 200, { batteryVoltage: 10.4, speed: 5, rpm: 250 });
+    expect(widget(h.frame(), 'voltage')).toBeUndefined();
+    h.run(h.now + 2000, { batteryVoltage: 14.0, speed: 8, rpm: 1200 });
+    expect(widget(h.frame(), 'voltage')).toBeUndefined();
+    // 12.2 / 12.3 V alternating while running: hidden during the dwell, then shown steadily.
+    const shown: boolean[] = [];
+    for (let i = 0; i < 100; i++) {
+      h.samples(h.now + 1000, { batteryVoltage: i % 2 === 0 ? 12.2 : 12.3, speed: 60, rpm: 2400 });
+      shown.push(widget(h.frame(), 'voltage') !== undefined);
+    }
+    const firstShown = shown.indexOf(true);
+    expect(firstShown).toBeGreaterThan(50);
+    expect(new Set(shown.slice(firstShown))).toEqual(new Set([true]));
   });
 });
 
@@ -472,6 +510,16 @@ describe('navigation widgets', () => {
     ).toBe('Stalled vehicle on the…');
     expect(hazardLabel(hazard({ type: 'other', description: '  ' }))).toBe('Hazard');
   });
+
+  it("never shows the phone's hazard text to a moving driver", () => {
+    const other = hazard({ type: 'other', description: 'Cows on the road', distanceM: 400 });
+    expect(hazardLabel(other, true)).toBe('Hazard');
+    expect(hazardLabel(other, false)).toBe('Cows on the road');
+    const h = cityDrive(makeConfig());
+    h.send({ type: 'hazards/update', hazards: [other], at: h.now });
+    expect(h.frame().context).toBe('city');
+    expect(widget(h.frame(), 'hazard')).toMatchObject({ type: 'other', label: 'Hazard' });
+  });
 });
 
 describe('fuel, tyres and comfort', () => {
@@ -551,6 +599,23 @@ describe('fuel, tyres and comfort', () => {
     });
   });
 
+  it('keeps a tyre flagged low with the alert’s hysteresis (regression: core-10)', () => {
+    const config = makeConfig({ vehicle: { hasTpms: true } });
+    const tyres = {
+      tirePressureFL: 230,
+      tirePressureFR: 230,
+      tirePressureRL: 230,
+      tirePressureRR: 230,
+    };
+    const h = cityDrive(config, tyres);
+    const flags: boolean[] = [];
+    for (let i = 0; i < 10; i++) {
+      h.samples(h.now + 500, { ...tyres, tirePressureRL: 179 + (i % 2) * 2, speed: 50 });
+      flags.push(widget(h.frame(), 'tpms')?.rl.low ?? false);
+    }
+    expect(new Set(flags)).toEqual(new Set([true]));
+  });
+
   it('never shows tyres for a vehicle without TPMS', () => {
     const h = new Harness();
     h.samples(T0 + 100, { tirePressureFL: 100 });
@@ -579,6 +644,13 @@ describe('fuel, tyres and comfort', () => {
     });
     h.idle(T0 + 100 + 121_000, 121_000);
     expect(widget(h.frame(), 'outsideTemp')).toBeUndefined();
+  });
+
+  it('never shows a negative zero (-0.3 °C reads 0, which survives JSON unchanged)', () => {
+    const h = new Harness();
+    h.samples(T0 + 100, { ambientTemp: -0.3 });
+    const value = widget(h.frame(), 'outsideTemp')?.value;
+    expect(Object.is(value, 0)).toBe(true);
   });
 
   it('shows what is playing while the phone is connected', () => {

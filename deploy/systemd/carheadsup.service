@@ -10,6 +10,12 @@ Description=carheadsup HUD server
 Documentation=file:///opt/carheadsup/docs/install-raspberry-pi.md
 # Start without waiting for any network: the HUD must come up in a car with no Wi-Fi at all.
 After=network.target avahi-daemon.service bluetooth.service
+# Never start on an empty mount point: when the data or config directory is a separate file
+# system (the read-only-root recipe in the install guide mounts one with `nofail`, which does
+# not delay boot), wait for that mount, and do not start at all if it fails. Otherwise the server
+# would create default settings there (no tokens) and later write them over the real state.
+# Without a separate mount this changes nothing.
+RequiresMountsFor=/var/lib/carheadsup /etc/carheadsup
 # Keep restarting however often it fails; a dead HUD helps nobody.
 StartLimitIntervalSec=0
 

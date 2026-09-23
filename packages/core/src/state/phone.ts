@@ -13,6 +13,18 @@ type EventOf<T extends HudEvent['type']> = Extract<HudEvent, { type: T }>;
  */
 export const TRACK_NOT_ANNOUNCED = Number.MIN_SAFE_INTEGER;
 
+/**
+ * Phone link state; `since` moves only when it changes. A call that is still ringing or dialing
+ * when the phone disconnects is dropped at once: what happens to it can no longer be known and
+ * it can no longer be answered. An answered call keeps its card (without controls) through the
+ * grace period, like the rest of the phone's data.
+ *
+ * A *different* phone coming up (another `deviceName`, e.g. the simulated phone handing over to
+ * a real one) first drops what the previous phone provided — route, road, hazards, media, call —
+ * as the grace period would have: otherwise the old route and call would stay on the HUD,
+ * dead-reckoned and looking live, until the new phone happened to replace them. A phone that
+ * reconnects (same name, or no name given) keeps its data; it replays its state anyway.
+ */
 export function applyPhoneLink(state: HudState, event: EventOf<'phone/link'>): HudState {
   const prev = state.phone;
   const phone: PhoneLinkStatus = {
@@ -21,7 +33,26 @@ export function applyPhoneLink(state: HudState, event: EventOf<'phone/link'>): H
     appVersion: event.appVersion !== undefined ? event.appVersion : prev.appVersion,
     since: event.connected !== prev.connected ? state.now : prev.since,
   };
-  return { ...state, phone };
+  if (event.connected) {
+    const otherPhone = event.deviceName !== undefined && event.deviceName !== prev.deviceName;
+    return otherPhone ? { ...dropPhoneData(state), phone } : { ...state, phone };
+  }
+  const unanswered = state.call?.state === 'ringing' || state.call?.state === 'dialing';
+  return unanswered ? { ...state, phone, call: null } : { ...state, phone };
+}
+
+/** `state` without anything a phone provided: route, road, hazards, media and call. */
+export function dropPhoneData(state: HudState): HudState {
+  if (
+    state.nav === null &&
+    state.road === null &&
+    state.hazards.length === 0 &&
+    state.media === null &&
+    state.call === null
+  ) {
+    return state;
+  }
+  return { ...state, nav: null, road: null, hazards: [], media: null, call: null };
 }
 
 /** New guidance; remembers the integrated distance so the maneuver distance can be dead-reckoned. */

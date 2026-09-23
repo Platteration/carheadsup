@@ -44,24 +44,75 @@ export function applySamples(
   }
   if (signals === null) return state;
 
+  const lastPid = state.vehicle.signals.odometer;
+  const previousPid =
+    lastPid !== undefined && freshSignal(state, 'odometer') !== null
+      ? { km: lastPid.value, at: lastPid.at }
+      : null;
   let next: HudState = { ...state, vehicle: { ...state.vehicle, signals } };
-  next = { ...next, odometer: integrateOdometer(next, speed, odometer) };
+  next = { ...next, odometer: integrateOdometer(next, speed, odometer, previousPid) };
   if (drivetrain) next = { ...next, gear: advanceGear(next, config) };
   next = { ...next, fuel: advanceFuel(next, config) };
   next = { ...next, context: advanceContext(next, config) };
   return { ...next, trip: advanceTrip(next, config) };
 }
 
+/** Largest odometer reading accepted from PID 0xA6; anything beyond is a garbled answer. */
+export const ODOMETER_PID_MAX_KM = 10_000_000;
+/**
+ * A PID 0xA6 reading continues the best-known odometer when it is at most this far below it
+ * (odometers never go backwards; this absorbs the PID's 0.1 km resolution and rounding) …
+ */
+export const ODOMETER_PID_BEHIND_KM = 1;
+/** … and at most this far ahead of it (the known value is extrapolated with integrated distance). */
+export const ODOMETER_PID_AHEAD_KM = 2;
+/** Fastest plausible travel between two confirming PID readings, km/h. */
+const ODOMETER_MAX_KPH = 300;
+/** Slack for two consecutive readings to confirm each other (0.1 km resolution). */
+const ODOMETER_CONFIRM_SLACK_KM = 0.2;
+
+/**
+ * Whether a PID 0xA6 reading can be trusted. ECUs that list the PID but answer 0, garbled
+ * multi-ECU answers and bit errors must not overwrite (and get persisted as) the odometer, so a
+ * reading is taken at once only when it continues the best-known odometer. One that disagrees —
+ * or the first one when nothing is known — is taken only once the previous (still fresh) reading
+ * confirms it: two consecutive readings consistent with each other and with the time between
+ * them. So a correct PID still replaces a drifted estimate or a mistyped manual setting.
+ */
+function trustOdometerReading(
+  reading: number,
+  knownKm: number | null,
+  previous: { km: number; at: number } | null,
+  now: number,
+): boolean {
+  if (!(reading > 0) || reading > ODOMETER_PID_MAX_KM) return false;
+  if (
+    knownKm !== null &&
+    reading >= knownKm - ODOMETER_PID_BEHIND_KM &&
+    reading <= knownKm + ODOMETER_PID_AHEAD_KM
+  ) {
+    return true;
+  }
+  if (previous === null || !(previous.km > 0) || previous.km > ODOMETER_PID_MAX_KM) return false;
+  const maxAdvanceKm =
+    (Math.max(0, now - previous.at) * ODOMETER_MAX_KPH) / 3_600_000 + ODOMETER_CONFIRM_SLACK_KM;
+  const advance = reading - previous.km;
+  return advance >= -ODOMETER_CONFIRM_SLACK_KM && advance <= maxAdvanceKm;
+}
+
 /**
  * Integrate distance trapezoidally between consecutive speed samples (gaps over 5 s are not
- * bridged). The odometer snaps to PID 0xA6 readings and is extrapolated with integrated distance
- * in between; it is 'pid'-sourced while that PID is fresh, otherwise an estimate from the last
- * known reading (the persisted baseline, a manual setting or an older PID value).
+ * bridged). The odometer snaps to trusted PID 0xA6 readings (see `trustOdometerReading`;
+ * `previousPid` is the last fresh reading before this batch) and is extrapolated with integrated
+ * distance in between; it is 'pid'-sourced while that PID is fresh and trusted, otherwise an
+ * estimate from the last known reading (the persisted baseline, a manual setting or an older
+ * PID value).
  */
 export function integrateOdometer(
   state: HudState,
   speedSample: number | null,
   odometerSample: number | null,
+  previousPid: { km: number; at: number } | null = null,
 ): OdometerState {
   const odo = state.odometer;
   const { now } = state;
@@ -78,13 +129,18 @@ export function integrateOdometer(
   }
 
   let { km, source } = odo;
-  if (odometerSample !== null && odometerSample >= 0) {
+  const extrapolated = km === null ? null : km + (integratedKm - odo.integratedKm);
+  if (
+    odometerSample !== null &&
+    trustOdometerReading(odometerSample, extrapolated, previousPid, now)
+  ) {
     km = odometerSample;
     source = 'pid';
-  } else if (km !== null) {
-    km += integratedKm - odo.integratedKm;
+  } else if (extrapolated !== null) {
+    km = extrapolated;
     const pid = freshSignal(state, 'odometer');
-    source = pid !== null && pid >= 0 && source === 'pid' ? 'pid' : 'estimated';
+    // An untrusted reading leaves an estimate; so does a PID that has gone stale.
+    source = odometerSample === null && pid !== null && source === 'pid' ? 'pid' : 'estimated';
   }
 
   if (

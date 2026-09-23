@@ -24,6 +24,7 @@ import {
   MemoryLogger,
   TestSocket,
   makeTempDir,
+  sleep,
   startTestServer,
   waitFor,
 } from '../helpers.ts';
@@ -363,6 +364,34 @@ describe('config API', () => {
     expect(final.vehicle.name).toBe('A');
     expect(final.units.currency).toBe('EUR');
     expect(final.vehicle.tankCapacityL).toBe(60);
+  });
+
+  it('switches the calibration grid off once the car moves, and saves that', async () => {
+    const t = await start();
+    const on = await call(t, 'PATCH', '/api/config', {
+      display: { projection: { showGrid: true } },
+    });
+    expect(on.status).toBe(200);
+    t.obd.emit({ type: 'obd/link', state: 'connected', at: 0 });
+    for (let i = 0; i < 10; i += 1) {
+      t.obd.emit({
+        type: 'obd/samples',
+        samples: [
+          { signal: 'speed', value: 40 },
+          { signal: 'rpm', value: 1800 },
+        ],
+        at: 0,
+      });
+      await sleep(60);
+    }
+    await waitFor(
+      () => t.server.engine.config.display.projection.showGrid === false,
+      2000,
+      'grid switched off',
+    );
+    const saved = (await call(t, 'GET', '/api/config')).body as HudConfig;
+    expect(saved.display.projection.showGrid).toBe(false);
+    expect(t.logger.text('info')).toMatch(/switching the calibration grid off/);
   });
 });
 
@@ -749,6 +778,123 @@ describe('server lifecycle', () => {
     expect((obd as FakeObdService | null)?.started ?? 0).toBe(0);
     await second.stop();
     await temp.cleanup();
+  });
+
+  it('keeps running when the trip log cannot be read, without touching it', async () => {
+    // trips.jsonl is unreadable (here: a directory, EISDIR; on a car: EACCES or EIO).
+    const t = await start({ directories: ['trips.jsonl/keep'] });
+    expect((await call(t, 'GET', '/api/info')).status).toBe(200);
+    expect((await call(t, 'GET', '/api/trips')).body).toEqual([]);
+    const deleted = await call(t, 'DELETE', '/api/trips/trip-1');
+    expect(deleted.status).toBe(503);
+    expect(String((deleted.body as { error: string }).error)).toMatch(/could not be read/);
+    expect(t.logger.text('error')).toMatch(/Trips: cannot read/);
+  });
+
+  it('keeps running with defaults when config.json cannot be read, and never overwrites it', async () => {
+    const t = await start({ directories: ['config.json/keep'] });
+    expect((await call(t, 'GET', '/api/info')).status).toBe(200);
+    expect(t.server.engine.config.vehicle.name).toBe(DEFAULT_CONFIG.vehicle.name);
+    const patched = await call(t, 'PATCH', '/api/config', { vehicle: { name: 'Golf' } });
+    expect(patched.status).toBe(503);
+    expect(String((patched.body as { error: string }).error)).toMatch(/could not be loaded/);
+    expect(t.server.engine.config.vehicle.name).toBe(DEFAULT_CONFIG.vehicle.name);
+    expect(t.logger.text('error')).toMatch(/Config: cannot read/);
+  });
+
+  it('applies config changes to a source one at a time, and stops it after the last', async () => {
+    class SlowSource extends FakeSource {
+      active = 0;
+      maxActive = 0;
+      readonly applied: string[] = [];
+      stoppedDuringUpdate = false;
+
+      override async updateConfig(config: HudConfig): Promise<void> {
+        this.active += 1;
+        this.maxActive = Math.max(this.maxActive, this.active);
+        // Like LightSensorSource: stop the old runner, then launch a new one.
+        await new Promise((r) => setTimeout(r, 30));
+        this.applied.push(config.vehicle.name);
+        this.active -= 1;
+      }
+
+      override async stop(): Promise<void> {
+        if (this.active > 0) this.stoppedDuringUpdate = true;
+        await super.stop();
+      }
+    }
+    const source = new SlowSource('light');
+    const t = await start({ createSensorSources: () => [source] });
+    await Promise.all(
+      ['A', 'B', 'C'].map((name) => call(t, 'PATCH', '/api/config', { vehicle: { name } })),
+    );
+    await waitFor(() => source.applied.at(-1) === 'C', 2000, 'last config applied');
+    expect(source.maxActive).toBe(1);
+    await call(t, 'PATCH', '/api/config', { vehicle: { name: 'D' } });
+    await t.server.stop();
+    expect(source.stoppedDuringUpdate).toBe(false);
+    expect(source.stopped).toBe(1);
+  });
+
+  it('keeps the trip in progress across a shutdown and completes it on the next start', async () => {
+    const t1 = await start({ config: { trip: { minDistanceKm: 0.2 } } });
+    t1.obd.emit({ type: 'obd/link', state: 'connected', at: 0 });
+    for (let i = 0; i < 30; i += 1) {
+      t1.obd.emit({
+        type: 'obd/samples',
+        samples: [
+          { signal: 'speed', value: 100 },
+          { signal: 'rpm', value: 2500 },
+        ],
+        at: 0,
+      });
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(t1.server.engine.state.trip.active).not.toBeNull();
+    // SIGTERM from the ignition controller: the trip is still in progress.
+    await t1.server.stop();
+    const saved = JSON.parse(await readFile(join(t1.dataDir, 'state.json'), 'utf8')) as {
+      activeTrip: { startedAt: number; lastActivityAt: number; last: { at: number } } | null;
+    };
+    expect(saved.activeTrip).not.toBeNull();
+    await t1.stop();
+    current = null;
+
+    // Next boot, an hour later (as seen from the saved trip): it is completed and stored.
+    const trip = saved.activeTrip!;
+    const hour = 3_600_000;
+    const earlier = {
+      ...saved,
+      activeTrip: {
+        ...trip,
+        startedAt: trip.startedAt - hour,
+        lastActivityAt: trip.lastActivityAt - hour,
+        distanceKm: 8.3,
+        last: { ...trip.last, at: trip.last.at - hour },
+      },
+    };
+    const t2 = await start({ files: { 'state.json': JSON.stringify(earlier) } });
+    await waitFor(() => t2.server.engine.state.trip.lastCompleted !== null, 2000, 'trip completed');
+    const trips = (await call(t2, 'GET', '/api/trips')).body as TripRecord[];
+    expect(trips).toHaveLength(1);
+    expect(trips[0]).toMatchObject({ startedAt: trip.startedAt - hour, distanceKm: 8.3 });
+    expect(t2.server.engine.state.trip.active).toBeNull();
+  });
+
+  it('saves the persisted state before stopping slow hardware', async () => {
+    let t: TestServer | null = null;
+    let seen: string | null = null;
+    class SlowHardware extends FakeSource {
+      override async stop(): Promise<void> {
+        if (t !== null) seen = await readFile(join(t.dataDir, 'state.json'), 'utf8');
+        await super.stop();
+      }
+    }
+    t = await start({ createSensorSources: () => [new SlowHardware('gpio')] });
+    t.server.engine.dispatch({ type: 'odometer/set', odometerKm: 12_345, at: 0 });
+    await t.server.stop();
+    expect(seen).not.toBeNull();
+    expect((JSON.parse(seen ?? '{}') as PersistedState).odometerKm).toBe(12_345);
   });
 
   it('survives failing optional modules', async () => {

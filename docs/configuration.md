@@ -19,12 +19,15 @@ the allowed ranges are in [`schema.ts`](../packages/core/src/config/schema.ts).
 
 ## Changing settings
 
-- **Settings app** (`/settings`, also opened by the companion app): every option below, with
-  validation as you type. Changes apply to the running HUD immediately.
-- **REST API**: `PATCH /api/config` with a partial config (deep-merged) or `PUT /api/config` with
-  a complete one; see [protocol.md](protocol.md#config).
-- **By hand**: stop the service, edit the file, start it again (the server rewrites the file when
-  the settings app saves).
+- **Settings app** (`/settings`, also opened by the companion app): every option below except
+  the brightness curve (`display.brightness.curve`, by hand or through the API), with validation
+  as you type. Changes apply to the running HUD immediately.
+- **REST API**: `PATCH /api/config` with a partial config (deep-merged), or `PUT /api/config`
+  with a whole one — a lenient replace, not a reset: fields missing from the body keep their
+  current values. See [protocol.md](protocol.md#config).
+- **By hand**: stop the service, edit the file, **check that it is still valid JSON**, start it
+  again (the server rewrites the file when the settings app saves). On the Pi:
+  `sudo python3 -m json.tool /etc/carheadsup/config.json >/dev/null && echo "valid JSON"`.
 
 Validation is **lenient and per field**. A value that is missing takes its default; a value of
 the wrong type or out of range keeps its previous (or default) value and is reported, e.g.
@@ -33,6 +36,20 @@ the API response (`422` with an `errors` list) when saving. Unknown keys are ign
 had to be corrected on load is saved in normalised form, with your original kept as
 `config.json.bak`. A broken config never stops the HUD from starting. Arrays (curves, layouts,
 custom PIDs, maintenance items) are validated and replaced as a whole.
+
+**A syntax error is not per field.** A file that is not valid JSON at all — a missing comma or
+quote, a trailing comma, a comment — cannot be read, so the HUD runs with *every* setting at its
+default (projection, vehicle, layout …), except that it **fails closed**: the API token and the
+pairing code become random values nobody knows, so other devices and the phone are locked out
+(the HUD's own display keeps working) rather than let in without a token. The file is left
+exactly as it is, and saving settings is refused (`503`) until it is fixed. The server logs
+`… is not valid JSON (<where>) … Fix it and restart the HUD`. To recover: stop the service, fix
+`config.json`, check it and start the service. The same holds for a file that cannot be read
+at all (wrong owner or permissions, a disk error).
+
+A token field that is invalid on its own (an API token with characters no client can send, or
+one longer than 256 characters) also becomes a random token instead of none, logged as an
+error; set a new one in the settings app on the HUD itself or in the file.
 
 Cross-field rules are enforced too: `minLevel ≤ maxLevel`, `nightEnterLux < nightExitLux`,
 `highwayExitKph < highwayEnterKph`, `stationaryKph < highwayExitKph`, `startRpm < shiftRpm ≤
@@ -76,7 +93,12 @@ How values are **displayed**; nothing else depends on them.
 
 Gear display: when the car reports its gear (PID `A4`) that is shown; otherwise the gear is
 inferred from the rpm/speed ratio against the configured or learned ratios, and marked as
-inferred. Learning needs a few minutes of steady driving in each gear.
+inferred. Learning needs a few minutes of steady driving in each gear, and learned gears are
+numbered only once there is an anchor: a launch from standstill (1st) on a manual, and on an
+automatic — which may never hold 1st long enough to learn it — the gear after the first upshift
+following a launch (2nd), seen twice. Until then, and for any gear above a gap in the learned
+ladder (a gear never driven steadily), the gear shows as unknown rather than as a wrong number.
+Changing `vehicle.transmission` forgets the learned ratios.
 
 ### obd
 
@@ -89,7 +111,7 @@ inferred. Learning needs a few minutes of steady driving in each gear.
 | `obd.tcpPort` | `35000` | 1–65535 | Wi-Fi adapters. |
 | `obd.protocol` | `"0"` | `"0"`–`"C"`, `"A1"`–`"AC"` | ELM327 `AT SP` value. `0` searches automatically (slow on the first connect); `6` = CAN 11-bit 500 kbit/s, the protocol of most cars since 2008. `A6` = try 6 first, then search. |
 | `obd.timeoutMs` | `1000` | 50–30000 | Per-command answer timeout. Raise it for slow clones. |
-| `obd.reconnectDelayMs` | `3000` | 100–600000 | Delay before reconnecting after a failure; doubles after each consecutive failure, never more than 30 s. |
+| `obd.reconnectDelayMs` | `3000` | 100–600000 | Delay before reconnecting after a failure; doubles after each consecutive failure, never more than 30 s — so values above `30000` act as `30000`. |
 | `obd.dtcIntervalMs` | `30000` | 1000–3600000 | How often trouble codes are read (also right after connecting). |
 | `obd.customPids` | `[]` | up to 64 | Manufacturer-specific PIDs, see [below](#custom-pids-and-tpms). |
 
@@ -110,7 +132,7 @@ calibration grid on.
 | `display.projection.offsetX` | `0` | −0.5–0.5 | Horizontal shift, as a fraction of the image width. |
 | `display.projection.offsetY` | `0` | −0.5–0.5 | Vertical shift, as a fraction of the image height. |
 | `display.projection.corners` | identity | each 0–1 | Keystone: where the content's corners `tl`, `tr`, `br`, `bl` land, as `[x, y]` fractions of the screen. Identity is `tl [0,0]`, `tr [1,0]`, `br [1,1]`, `bl [0,1]`. Must stay a convex quadrilateral in that order. |
-| `display.projection.showGrid` | `false` | | Draw a calibration grid instead of the HUD. |
+| `display.projection.showGrid` | `false` | | Draw a calibration grid instead of the HUD — only while the car stands still, with blind-spot bars, collision cues and alerts still drawn on top. The HUD switches it off (and saves that) as soon as the car moves. |
 
 Projection changes reach the HUD page at once (the `display` message), without reloading.
 
@@ -122,7 +144,7 @@ Projection changes reach the HUD page at once (the `display` message), without r
 | `display.brightness.manualLevel` | `0.8` | 0–1 | Level in `manual` mode. |
 | `display.brightness.minLevel` | `0.08` | 0–1 | Floor of the automatic level. |
 | `display.brightness.maxLevel` | `1` | 0–1 | Ceiling of the automatic level. |
-| `display.brightness.curve` | see below | 1–32 points | `[lux, level]` pairs with strictly increasing lux; interpolated on log₁₀(lux). |
+| `display.brightness.curve` | see below | 1–32 points | `[lux, level]` pairs with strictly increasing lux; interpolated on log₁₀(lux). Not in the settings app: edit it by hand or with `PATCH /api/config`. |
 | `display.brightness.riseTimeMs` | `3000` | 0–600000 | Smoothing time constant when getting brighter (slow: no flicker under trees). |
 | `display.brightness.fallTimeMs` | `400` | 0–600000 | Time constant when getting darker (fast: tunnels). |
 | `display.brightness.nightMode` | `"sensor"` | `sensor`, `sun`, `always`, `never` | Source of the night palette. `sensor` falls back to the sun when there is no light reading. |
@@ -141,8 +163,9 @@ In `auto` mode the level follows the light sensor through the curve, clamped to
 80 % of `maxLevel`, night: twice `minLevel`), using the phone's last GPS position or
 `sensors.fallbackLocation`; with neither it keeps the last level. The driver's
 brightness-up/down input trims the result by ±0.1 per step (at most ±0.5), and the final value
-never drops below 0.05. It is applied as a CSS brightness on the page and, when the display has a
-Linux backlight device, to the backlight.
+never drops below 0.05. It is applied to the display's Linux backlight device when it has one
+(through a 2.2 gamma; the page is then drawn at full brightness, so the content is not dimmed
+twice), and otherwise as a CSS brightness on the page.
 
 ### display.layout
 
@@ -164,7 +187,7 @@ The thresholds of the [driving contexts](architecture.md#driving-contexts-and-ad
 | `display.context.highwayExitKph` | `65` | 10–250 | Leave `highway` below this. |
 | `display.context.stationaryKph` | `2` | 0.5–20 | Below this the car counts as stopped. |
 | `display.context.parkedAfterMs` | `120000` | 0–86400000 | Standing completely still with the engine running this long ⇒ `parked`. |
-| `display.context.engineOffParkedAfterMs` | `30000` | 0–86400000 | Standing still with the engine off this long ⇒ `parked`. Not immediate, so automatic start-stop does not open the dashboard at red lights. An ECU that stops answering (ignition off) parks at once. |
+| `display.context.engineOffParkedAfterMs` | `180000` | 0–86400000 | Standing completely still with the engine off this long ⇒ `parked`. Long enough that automatic start-stop does not open the dashboard at red lights (they often last 45–120 s); switching the ignition off is caught much sooner, because the ECU stops answering (`parked` 10 s after the last speed reading). The trade-off: with the ignition still on and the engine off (accessory mode), the dashboard — and clearing trouble codes, which needs `parked` — waits this long. Creeping along with the engine off (a hybrid in a jam) restarts the timer. |
 
 ### display (other)
 
@@ -176,7 +199,7 @@ The thresholds of the [driving contexts](architecture.md#driving-contexts-and-ad
 | `display.highwayNavRevealM` | `2000` | 0–50000 | On the highway, navigation appears only this close to the next maneuver. |
 | `display.laneRevealM` | `800` | 0–10000 | Lane guidance appears this close to the maneuver. |
 | `display.hazardRevealM` | `1000` | 0–50000 | Hazards appear this close. |
-| `display.maxAlerts` | `2` | 1–5 | Most alert banners on screen at once. |
+| `display.maxAlerts` | `2` | 1–5 | Most alert banners on screen at once. Critical alerts are always shown, however many there are; the others fill the room left. |
 
 ### shiftLight
 
@@ -193,17 +216,17 @@ A bar along the top that fills from `startRpm` to `shiftRpm` and flashes from `f
 
 | Option | Default | Range | Notes |
 | --- | --- | --- | --- |
-| `alerts.coolantHighC` | `110` | 60–150 | "ENGINE HOT" warning (and the coolant readout) from here. Normal operating temperature is about 85–105 °C. |
+| `alerts.coolantHighC` | `110` | 60–150 | "ENGINE HOT" warning from here. Normal operating temperature is about 85–105 °C. The coolant readout follows the alert (its hysteresis included), so it does not flicker at the threshold. |
 | `alerts.coolantCriticalC` | `118` | 60–160 | "OVERHEATING – STOP", critical, cannot be dismissed. |
 | `alerts.coolantHysteresisC` | `3` | 0–20 | Clears this far below the threshold. |
 | `alerts.voltageLowRunningV` | `12.2` | 6–32 | Engine running at or below this for 60 s ⇒ "CHARGING FAULT" (a healthy alternator gives 13.5–14.7 V). |
 | `alerts.voltageLowOffV` | `11.9` | 6–32 | Engine off at or below this for 10 s ⇒ "BATTERY LOW". |
-| `alerts.voltageHighV` | `15.3` | 6–32 | At or above this for 10 s ⇒ "OVERVOLTAGE". |
+| `alerts.voltageHighV` | `15.3` | 6–32 | At or above this for 10 s ⇒ "OVERVOLTAGE". The voltage readout shows only while one of these alerts is up, so cranking dips never show. |
 | `alerts.voltageHysteresisV` | `0.3` | 0–3 | |
 | `alerts.overspeedToleranceKph` | `3` | 0–50 | The speed turns red above limit + max(this, limit × pct/100)… |
 | `alerts.overspeedTolerancePct` | `5` | 0–50 | …e.g. 50 km/h → red above 53, 120 km/h → above 126. |
-| `alerts.fuelLowPct` | `12` | 0–100 | "FUEL LOW" at or below this tank level. |
-| `alerts.tpmsLowKpa` | `180` | 0–1000 | Tyre (gauge) pressure below which "TYRE PRESSURE LOW" warns. |
+| `alerts.fuelLowPct` | `12` | 0–100 | "FUEL LOW" (caution) at or below this tank level; clears 2 points above. At half this level, or 30 km of range left, it escalates to "FUEL VERY LOW" (warning), which comes back even if the driver dismissed the caution. |
+| `alerts.tpmsLowKpa` | `180` | 0–1000 | Tyre (gauge) pressure below which "TYRE PRESSURE LOW" warns (it clears 7 kPa above; the tyre readout uses the same limit). Below 75 % of this — a puncture — it turns into "TYRE PRESSURE CRITICAL", critical and not dismissible. A sensor or custom-PID formula that reports 0 when it fails therefore raises the critical alert: fix it or switch `vehicle.hasTpms` off. |
 | `alerts.iceRiskC` | `3` | −30–15 | Outside temperature at or below which "ICE RISK" shows for 10 s. |
 | `alerts.showDtcWhileDriving` | `false` | | Show informational and caution check-engine alerts while moving (warnings and worse always show). |
 
@@ -242,7 +265,7 @@ the phone.
 
 | Option | Default | Range | Notes |
 | --- | --- | --- | --- |
-| `trip.endAfterEngineOffMs` | `300000` | 0–86400000 | A trip ends after the engine has been off (or the OBD link down) this long, so a fuel stop does not split it. |
+| `trip.endAfterEngineOffMs` | `300000` | 0–86400000 | A trip ends after the engine has been off (or the OBD link down) this long, so a fuel stop does not split it. Its end time is the last activity. A HUD that loses power seconds after the ignition (the usual installation) saves the trip in progress and closes it at the next start when it was off longer than this — the trip then appears in the log and on the phone — or continues it after a shorter break. |
 | `trip.minDistanceKm` | `0.2` | 0–100 | Shorter trips are discarded (moving the car in the driveway). |
 
 ### phone
@@ -266,7 +289,7 @@ the phone.
 | `sensors.buttons.secondary` | `null` | | Decline / dismiss button. |
 | `sensors.buttons.next` | `null` | | Next dashboard page button. |
 | `sensors.fallbackLocation` | `null` | `{ "lat": …, "lon": … }` | Location for sun-based brightness and night mode when the phone has not sent one. |
-| `sensors.adasUdpPort` | `null` | 1–65535 | UDP port for an [ADAS module](protocol.md#adas-udp-feed); `null` = off. |
+| `sensors.adasUdpPort` | `null` | 1–65535 | UDP port for an [ADAS module](protocol.md#adas-udp-feed); `null` = off. Accepts datagrams from any device on the car's network — see the [trust note](protocol.md#adas-udp-feed). |
 
 Sensor changes apply without a restart; only the sources whose settings changed are restarted.
 Wiring: [hardware.md](hardware.md#sensors-buttons-and-wiring).
@@ -275,11 +298,11 @@ Wiring: [hardware.md](hardware.md#sensors-buttons-and-wiring).
 
 | Option | Default | Range | Notes |
 | --- | --- | --- | --- |
-| `server.port` | `8080` | 1–65535 | HTTP and WebSocket port. Takes effect after a restart; move the kiosk URL with it. |
-| `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. |
-| `server.apiToken` | `""` | ≤ 256 chars | Bearer token required from every client except the Pi itself. Empty = open to the car's network. |
+| `server.port` | `8080` | 1–65535 | HTTP and WebSocket port. Takes effect after a restart. On the Pi, move the kiosk with it (`CARHEADSUP_KIOSK_URL`, [install guide](install-raspberry-pi.md#the-units)) — the kiosk stays black until then — and use 1024 or above: the service has no privilege to listen below that, so it would fail to start. |
+| `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. An address the kiosk cannot reach leaves it black. |
+| `server.apiToken` | `""` | ≤ 256 printable ASCII chars | Bearer token required from every client except the Pi itself. Empty = open to the car's network. Letters, digits, symbols and spaces only (not spaces alone): it travels in HTTP headers and `?token=` addresses, which carry nothing else. |
 | `server.mdns` | `true` | | Advertise `_carheadsup._tcp` so the companion finds the HUD. |
-| `server.frameRate` | `15` | 1–60 | Frames per second pushed to the HUD page. Keep it at 2 or more: the page blanks after 1 s without a frame. Lower (10) on a Pi Zero 2 W. |
+| `server.frameRate` | `15` | 1–60 | Frames per second pushed to the HUD page. Keep it at 2 or more: at 2 fps and above the page blanks after 1 s without a frame, and slower rates make the HUD slow to notice a stalled server. Lower (10) on a Pi Zero 2 W. |
 
 ## Layouts
 
@@ -450,7 +473,8 @@ polled less and less often (back-off up to a minute).
 | `--port <n>` | `CARHEADSUP_PORT` | `server.port` | Override the port (`0` = any free port). Not saved. |
 | `--host <addr>` | `CARHEADSUP_HOST` | `server.host` | Override the bind address. Not saved. |
 | `--renderer-dir <dir>` | `CARHEADSUP_RENDERER_DIR` | `packages/hud-renderer/dist` | Built web pages to serve. |
-| `--backlight <dir\|auto\|off>` | `CARHEADSUP_BACKLIGHT` | `auto` | Backlight device (e.g. `/sys/class/backlight/rpi_backlight`), `auto` = the first writable device, `off` = never touch it. |
+| `--backlight <dir\|auto\|off>` | `CARHEADSUP_BACKLIGHT` | `auto` | Backlight device (e.g. `/sys/class/backlight/rpi_backlight`), `auto` = the first writable device, `off` = never touch it (the page is dimmed instead). A device that is missing or not writable at start-up is looked for again every 10 s. |
+| `--allowed-hosts <names>` | `CARHEADSUP_ALLOWED_HOSTS` | none | Extra host names (comma-separated) under which browsers may reach the HUD. IP addresses, `localhost`, the machine's host name and `<hostname>.local` always work; requests for any other name get `403` ([DNS-rebinding protection](architecture.md#security-model)). |
 | `--log-level <level>` | `CARHEADSUP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `-h`, `--help` | | | Usage. |
 | `-v`, `--version` | | | Version. |
@@ -460,7 +484,8 @@ Flags win over environment variables, which win over the defaults. `CARHEADSUP_S
 `SIGTERM`), 1 on a fatal error, 2 on invalid arguments. On the Pi the systemd unit passes
 `--config`, `--data-dir` and `--renderer-dir`; set the others in `/etc/default/carheadsup`.
 
-The kiosk launcher reads `CARHEADSUP_KIOSK_URL`, `CARHEADSUP_KIOSK_WAIT_S`,
+The kiosk launcher reads `CARHEADSUP_KIOSK_URL`, `CARHEADSUP_KIOSK_WAIT_S` (how often it logs a
+warning while it waits for the page; it never starts the browser on a page that does not load),
 `CARHEADSUP_KIOSK_SCALE` and `CARHEADSUP_KIOSK_FLAGS`
 ([install guide](install-raspberry-pi.md#the-units)); the renderer's development server reads
 `HUD_SERVER` (where to proxy `/api` and `/ws`, default `http://localhost:8080`).

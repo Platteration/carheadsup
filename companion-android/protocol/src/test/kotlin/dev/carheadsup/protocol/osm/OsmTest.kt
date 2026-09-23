@@ -338,10 +338,47 @@ class OsmTest {
                 )
             val north = matcher.match(listOf(twoWay), LatLon(48.005, 11.0), bearingDeg = 0.0, speedMps = 20.0)!!
             val south = matcher.match(listOf(twoWay), LatLon(48.005, 11.0), bearingDeg = 180.0, speedMps = 20.0)!!
-            assertTrue(north.forward)
-            assertFalse(south.forward)
+            assertEquals(true, north.forward)
+            assertEquals(false, south.forward)
             assertEquals(SpeedLimit.Limited(60.0), north.speedLimit)
             assertEquals(SpeedLimit.Limited(80.0), south.speedLimit)
+        }
+
+        @Test
+        fun `slow traffic keeps the direction of travel instead of guessing forward (android-9)`() {
+            val twoWay =
+                OsmWay(
+                    4,
+                    mapOf("highway" to "primary", "maxspeed:forward" to "50", "maxspeed:backward" to "70"),
+                    listOf(LatLon(48.0, 11.0), LatLon(48.01, 11.0)),
+                )
+            val here = LatLon(48.005, 11.0)
+            val southbound = matcher.match(listOf(twoWay), here, bearingDeg = 180.0, speedMps = 15.0)!!
+            assertEquals(SpeedLimit.Limited(70.0), southbound.speedLimit)
+            // Stopped at a light on the same way: the bearing is noise, the direction is kept.
+            val stopped =
+                matcher.match(
+                    listOf(twoWay),
+                    here,
+                    bearingDeg = 10.0,
+                    speedMps = 1.0,
+                    previousWayId = 4,
+                    previousForward = southbound.forward,
+                )!!
+            assertEquals(false, stopped.forward)
+            assertEquals(SpeedLimit.Limited(70.0), stopped.speedLimit)
+            // No known direction (or one from another way): a limit that depends on it is unknown.
+            val guess = matcher.match(listOf(twoWay), here, speedMps = 1.0)!!
+            assertNull(guess.forward)
+            assertNull(guess.speedLimit)
+            assertNull(guess.toPhoneRoad().speedLimitKph)
+            assertNull(matcher.match(listOf(twoWay), here, previousWayId = 9, previousForward = false)!!.forward)
+            // Without directional limits the direction does not matter …
+            val plain = OsmWay(5, mapOf("highway" to "primary", "maxspeed" to "50"), twoWay.points)
+            assertEquals(SpeedLimit.Limited(50.0), matcher.match(listOf(plain), here)!!.speedLimit)
+            // … and a one-way road has one.
+            val oneway = OsmWay(6, twoWay.tags + ("oneway" to "yes"), twoWay.points)
+            assertEquals(SpeedLimit.Limited(50.0), matcher.match(listOf(oneway), here)!!.speedLimit)
         }
 
         @Test
@@ -403,6 +440,36 @@ class OsmTest {
                     it.id
                 }.toSet(),
             )
+        }
+
+        @Test
+        fun `a car that stops keeps looking ahead (android-20)`() {
+            val memory = HeadingMemory()
+            // Parked since the app started: no direction known yet.
+            assertNull(memory.update(here, bearingDeg = 250.0, speedMps = 0.5, nowMs = 0))
+            // Driving north, then stopping at a light 50 m on.
+            assertEquals(0.0, memory.update(here, bearingDeg = 0.0, speedMps = 14.0, nowMs = 1_000))
+            val light = Geo.destination(here, 0.0, 50.0)
+            assertEquals(0.0, memory.update(light, bearingDeg = 190.0, speedMps = 0.3, nowMs = 5_000))
+            val heading = memory.update(light, bearingDeg = null, speedMps = null, nowMs = 90_000)
+            assertEquals(0.0, heading)
+            // The camera 1 km behind the car is not reported as ahead; the one ahead still is.
+            val behindCar = OsmCamera("x", HazardType.SPEED_CAMERA, Geo.destination(light, 180.0, 1_000.0), null)
+            val aheadOfCar = OsmCamera("y", HazardType.SPEED_CAMERA, Geo.destination(light, 0.0, 600.0), null)
+            assertEquals(listOf("y"), finder.ahead(listOf(behindCar, aheadOfCar), light, heading).map { it.id })
+        }
+
+        @Test
+        fun `a remembered heading expires after creeping far or waiting long`() {
+            val memory = HeadingMemory(maxTravelM = 300.0, maxAgeMs = 60_000)
+            memory.update(here, bearingDeg = 90.0, speedMps = 10.0, nowMs = 0)
+            assertEquals(90.0, memory.update(Geo.destination(here, 90.0, 250.0), null, 1.0, nowMs = 30_000))
+            assertNull(memory.update(Geo.destination(here, 90.0, 350.0), null, 1.0, nowMs = 31_000))
+            memory.update(here, bearingDeg = 90.0, speedMps = 10.0, nowMs = 100_000)
+            assertNull(memory.update(here, null, 0.0, nowMs = 170_000))
+            // A clock that went backwards does not keep it either.
+            memory.update(here, bearingDeg = 90.0, speedMps = 10.0, nowMs = 200_000)
+            assertNull(memory.update(here, null, 0.0, nowMs = 100_000))
         }
 
         @Test

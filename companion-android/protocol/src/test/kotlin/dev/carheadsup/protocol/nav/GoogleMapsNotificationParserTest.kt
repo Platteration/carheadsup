@@ -40,7 +40,9 @@ import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
 import java.time.Clock
 import java.time.Instant
+import java.time.LocalDateTime
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.util.Locale
 
@@ -95,12 +97,12 @@ class GoogleMapsNotificationParserTest {
         @Test
         fun `bare street with direction keeps the street and leaves the maneuver to the icon`() {
             // Gadgetbridge-documented UK format: title "100 yd", text "High St towards Blah".
-            val nav = parse("100 yd", "High St towards Abingdon", "13 min · 4.6 mi · 11:55 ETA", category = null)!!
+            val nav = parse("100 yd", "High St towards Abingdon", "13 min · 4.6 mi · 10:13 ETA", category = null)!!
             assertEquals(UNKNOWN, nav.maneuver!!.type)
             assertEquals(91.44, nav.distanceM!!, 1e-9)
             assertEquals("High St", nav.street)
             assertEquals(780.0, nav.remainingSeconds)
-            assertEquals(epoch(losAngeles, 23, 11, 55), nav.etaEpochMs)
+            assertEquals(epoch(losAngeles, 23, 10, 13), nav.etaEpochMs)
         }
 
         @Test
@@ -230,6 +232,25 @@ class GoogleMapsNotificationParserTest {
             Arguments.of("Arrive at destination", ARRIVE, null, null),
             Arguments.of("Take the ferry", FERRY, null, null),
             Arguments.of("Join the M25", MERGE_LEFT, null, "M25"),
+            // Lane guidance names a lane, not the maneuver's side (android-2).
+            Arguments.of("Use the right lane to turn left onto Main St", LEFT, null, "Main St"),
+            Arguments.of("Use the left 2 lanes to turn slightly right onto I-5 N", SLIGHT_RIGHT, null, "I-5 N"),
+            Arguments.of("Use any lane to turn left onto Oak St", LEFT, null, "Oak St"),
+            Arguments.of("Use the left lane to turn left", LEFT, null, null),
+            Arguments.of("Use the right 2 lanes to take exit 12 toward Downtown", EXIT_RIGHT, null, "Downtown"),
+            // … but it still hints at the side of an exit that names none.
+            Arguments.of("Use the left 2 lanes to take exit 43B toward Airport", EXIT_LEFT, null, "Airport"),
+            Arguments.of("Take exit 5 on the left toward Oxford", EXIT_LEFT, null, "Oxford"),
+            // Unrecognised instructions are not streets (android-5).
+            Arguments.of("Pass through the toll plaza", UNKNOWN, null, null),
+            Arguments.of("Go through the tunnel", UNKNOWN, null, null),
+            Arguments.of("Cross the bridge", UNKNOWN, null, null),
+            Arguments.of("Drive through 2 roundabouts", STRAIGHT, null, null),
+            Arguments.of("Enter the tunnel on I-90 E", UNKNOWN, null, "I-90 E"),
+            Arguments.of("Proceed to the route", STRAIGHT, null, null),
+            Arguments.of("Cross St toward Downtown", UNKNOWN, null, "Cross St"),
+            Arguments.of("Rue de la Paix", UNKNOWN, null, "Rue de la Paix"),
+            Arguments.of("Avenue of the Americas", UNKNOWN, null, "Avenue of the Americas"),
         )
 
         /** German instruction → maneuver, exit, street (right-hand traffic). */
@@ -260,6 +281,15 @@ class GoogleMapsNotificationParserTest {
             Arguments.of("Das Ziel befindet sich auf der rechten Seite", ARRIVE_RIGHT, null, null),
             Arguments.of("Ziel erreicht", ARRIVE, null, null),
             Arguments.of("Fähre nehmen", FERRY, null, null),
+            // Lane guidance and the "um … zu" forms (android-2, android-5).
+            Arguments.of("Rechte Spur benutzen, um links abzubiegen auf Hauptstraße", LEFT, null, "Hauptstraße"),
+            Arguments.of("Die linken 2 Spuren benutzen, um rechts abzubiegen", RIGHT, null, null),
+            Arguments.of("Rechts halten, um die A8 zu nehmen", KEEP_RIGHT, null, "A8"),
+            Arguments.of("Mautstelle passieren", UNKNOWN, null, null),
+            Arguments.of("Durch den Tunnel fahren", UNKNOWN, null, null),
+            Arguments.of("Rechts halten, um auf die A8 zu fahren", KEEP_RIGHT, null, "A8"),
+            Arguments.of("Links abbiegen auf Bahnhofstraße, dann rechts abbiegen", LEFT, null, "Bahnhofstraße"),
+            Arguments.of("Unter den Linden", UNKNOWN, null, "Unter den Linden"),
         )
     }
 
@@ -330,6 +360,38 @@ class GoogleMapsNotificationParserTest {
     }
 
     @Nested
+    inner class FollowUps {
+        @Test
+        fun `an inline then-clause is the next maneuver, not this one (android-2)`() {
+            val nav = parse("200 m", "Turn left, then keep right", "5 min · 2.0 km · 10:05 ETA")!!
+            assertEquals(LEFT, nav.maneuver!!.type)
+            assertEquals("Turn left", nav.maneuver.instruction)
+            assertEquals(KEEP_RIGHT, nav.then!!.type)
+            assertEquals("keep right", nav.then.instruction)
+        }
+
+        @Test
+        fun `the street of an inline then-clause belongs to the next maneuver`() {
+            val nav = parse("200 m", "Turn left, then turn right onto Main St", "5 min · 2.0 km · 10:05 ETA")!!
+            assertEquals(LEFT, nav.maneuver!!.type)
+            assertNull(nav.street)
+            assertEquals(RIGHT, nav.then!!.type)
+        }
+
+        @Test
+        fun `German inline follow-up`() {
+            val nav = parse(
+                "200 m",
+                "Links abbiegen, dann rechts halten",
+                "5 Min. · 2,0 km · Ankunft 10:05",
+                clock = clockAt(berlin),
+            )!!
+            assertEquals(LEFT, nav.maneuver!!.type)
+            assertEquals(KEEP_RIGHT, nav.then!!.type)
+        }
+    }
+
+    @Nested
     inner class LeftHandTraffic {
         private val uk = GoogleMapsNotificationParser(drivingSide = DrivingSide.LEFT)
 
@@ -368,6 +430,28 @@ class GoogleMapsNotificationParserTest {
             assertEquals(
                 MERGE_RIGHT,
                 parse("0.5 mi", "Join the M4", "9 min · 8 mi · 10:09 ETA", parser = uk)!!.maneuver!!.type,
+            )
+        }
+
+        @Test
+        fun `the driving side is decided per notification (android-11)`() {
+            // One long-lived parser: the phone crossed from France into the UK.
+            val content =
+                NavNotificationContent(
+                    maps,
+                    "100 yd",
+                    "At the roundabout, take the 1st exit",
+                    "2 min · 0.5 mi · 10:02 ETA",
+                    category = "navigation",
+                )
+            assertEquals(ROUNDABOUT_CCW, parser.parse(content, clockAt(losAngeles))!!.maneuver!!.type)
+            assertEquals(
+                ROUNDABOUT_CW,
+                parser.parse(content, clockAt(losAngeles), DrivingSide.LEFT)!!.maneuver!!.type,
+            )
+            assertEquals(
+                ROUNDABOUT_CCW,
+                uk.parse(content, clockAt(losAngeles), DrivingSide.RIGHT)!!.maneuver!!.type,
             )
         }
 
@@ -479,6 +563,34 @@ class GoogleMapsNotificationParserTest {
             val clock = Clock.fixed(Instant.parse("2026-09-23T17:00:00Z"), losAngeles)
             val nav = parse("5 mi", "Continue", "30 min · 20 mi · 10:30 AM ETA", clock = clock)!!
             assertEquals(Instant.parse("2026-09-23T17:30:00Z").toEpochMilli(), nav.etaEpochMs)
+        }
+
+        @Test
+        fun `ETA on the night the clocks go back (android-15)`() {
+            // Europe/Berlin, 2026-10-25: 03:00 CEST becomes 02:00 CET. It is 02:40 CEST with
+            // 40 minutes to go, so Maps shows an arrival at 2:20 (CET, the second 2:20 that night).
+            val now = ZonedDateTime.ofLocal(LocalDateTime.of(2026, 10, 25, 2, 40), berlin, ZoneOffset.ofHours(2))
+            val clock = Clock.fixed(now.toInstant(), berlin)
+            val arrival = now.toInstant().plusSeconds(2_400).toEpochMilli()
+            assertEquals(arrival, EtaResolver.resolve(2, 20, clock, 2_400.0))
+            // Without the remaining time the next 2:20 is still the later one, not tomorrow's.
+            assertEquals(arrival, EtaResolver.resolve(2, 20, clock))
+            val nav = parse("5 km", "Continue on A7", "40 min · 40 km · 2:20 ETA", clock = clock)!!
+            assertEquals(arrival, nav.etaEpochMs)
+        }
+
+        @Test
+        fun `a clock time that disagrees with the remaining time yields to it (android-15)`() {
+            // 2 h 30 min to go at 10:00, but the text says 11:30 (e.g. the destination's zone).
+            val clock = clockAt(losAngeles)
+            val nav = parse("5 mi", "Continue on I-10 E", "2 hr 30 min · 150 mi · 11:30 AM ETA", clock = clock)!!
+            assertEquals(epoch(losAngeles, 23, 12, 30), nav.etaEpochMs)
+            assertEquals(9_000.0, nav.remainingSeconds)
+            // Rounding differences are fine: 12:31 stays 12:31.
+            assertEquals(
+                epoch(losAngeles, 23, 12, 31),
+                EtaResolver.resolve(12, 31, clock, 9_000.0),
+            )
         }
 
         @Test

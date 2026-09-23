@@ -19,6 +19,13 @@ public data class HudEndpoint(val host: String, val port: Int = DEFAULT_PORT) {
     public val httpBaseUrl: String get() = "http://$authority"
     public val settingsUrl: String get() = "$httpBaseUrl/settings"
 
+    /**
+     * The settings app's address, handing it the HUD's API token when one is set (see
+     * [withApiToken]): the page makes its own API calls, and a WebView cannot add the
+     * `Authorization` header to them.
+     */
+    public fun settingsUrl(apiToken: String): String = withApiToken(settingsUrl, apiToken)
+
     /** Absolute URL of an API path such as "/api/trips". */
     public fun apiUrl(path: String): String = httpBaseUrl + if (path.startsWith('/')) path else "/$path"
 
@@ -26,6 +33,37 @@ public data class HudEndpoint(val host: String, val port: Int = DEFAULT_PORT) {
     public fun display(): String = authority
 
     public companion object {
+        /**
+         * `url` with the API token as its `token` query parameter, which the HUD's pages adopt
+         * (stored on the device, then removed from the address bar). Surrounding whitespace is
+         * not part of a token; an empty token leaves `url` unchanged.
+         */
+        public fun withApiToken(url: String, apiToken: String): String {
+            val token = apiToken.trim()
+            if (token.isEmpty()) return url
+            val fragment = url.indexOf('#')
+            val base = if (fragment < 0) url else url.substring(0, fragment)
+            val hash = if (fragment < 0) "" else url.substring(fragment)
+            val separator = if ('?' in base) '&' else '?'
+            return "$base${separator}token=${percentEncode(token)}$hash"
+        }
+
+        /** RFC 3986 percent-encoding of everything but the unreserved characters (UTF-8). */
+        private fun percentEncode(text: String): String =
+            buildString {
+                for (byte in text.toByteArray(Charsets.UTF_8)) {
+                    val c = byte.toInt() and 0xff
+                    val ch = c.toChar()
+                    if (ch in 'A'..'Z' || ch in 'a'..'z' || ch in '0'..'9' || ch in "-._~") {
+                        append(ch)
+                    } else {
+                        append('%').append(HEX[c shr 4]).append(HEX[c and 0x0f])
+                    }
+                }
+            }
+
+        private const val HEX = "0123456789ABCDEF"
+
         public const val DEFAULT_PORT: Int = 8080
         public const val PHONE_SOCKET_PATH: String = "/ws/phone"
 

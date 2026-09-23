@@ -1,3 +1,4 @@
+import type { RoadInfo } from '../../src/types/nav.ts';
 import type { Harness, SignalValues } from '../state/fixtures.ts';
 
 /**
@@ -8,6 +9,8 @@ import type { Harness, SignalValues } from '../state/fixtures.ts';
  */
 export const SCENARIO_RATIOS = [120, 70, 48, 36, 29, 24];
 export const STEP_MS = 200;
+/** The companion app re-sends the current road this often while it has location fixes. */
+export const ROAD_REFRESH_MS = 30_000;
 
 export type EngineState = 'off' | 'cranking' | 'running' | 'stopped';
 
@@ -19,9 +22,24 @@ export class DriveScript {
   voltage = 12.6;
   fuelLevelPct = 55;
   ambientC = 2;
+  /** The road the phone reports, re-sent every {@link ROAD_REFRESH_MS} like the companion. */
+  private road: RoadInfo | null = null;
+  private roadSentAt = 0;
 
   constructor(harness: Harness) {
     this.h = harness;
+  }
+
+  /** The phone reports a new road (speed limit) now and keeps refreshing it. */
+  setRoad(road: RoadInfo): void {
+    this.road = road;
+    this.sendRoad();
+  }
+
+  private sendRoad(): void {
+    if (this.road === null) return;
+    this.h.send({ type: 'road/update', road: this.road, at: this.now });
+    this.roadSentAt = this.now;
   }
 
   get now(): number {
@@ -51,6 +69,7 @@ export class DriveScript {
           : Math.max(targetKph, this.speedKph - dv);
       this.h.samples(at, this.signals());
       this.h.tick(at);
+      if (this.road !== null && at - this.roadSentAt >= ROAD_REFRESH_MS) this.sendRoad();
       each?.(at);
     }
   }

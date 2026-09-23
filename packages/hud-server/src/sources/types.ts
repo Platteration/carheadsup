@@ -31,7 +31,11 @@ export interface EventSource {
   readonly name: string;
   start(ctx: SourceContext): Promise<void>;
   stop(): Promise<void>;
-  /** Called after the config changes; a source may reconfigure or restart itself. */
+  /**
+   * Called after the config changes; a source may reconfigure or restart itself. Calls are
+   * never concurrent (the next waits for the returned promise), and `stop()` is called only
+   * after the one in progress has settled.
+   */
   updateConfig?(config: HudConfig): void | Promise<void>;
 }
 
@@ -40,6 +44,14 @@ export interface FrameSink {
   readonly name: string;
   onFrame(frame: HudFrame): void;
   stop(): Promise<void>;
+  /**
+   * For a sink that applies `theme.brightness` to the display hardware: whether it does so right
+   * now. The renderer is told (`RendererDisplayMessage.hardwareBrightness`) and then does not dim
+   * the content as well.
+   */
+  readonly drivesBrightness?: boolean;
+  /** Subscribe to changes of `drivesBrightness`; returns an unsubscribe function. */
+  onDrivesBrightnessChange?(listener: (drives: boolean) => void): () => void;
 }
 
 /** A long-running side service with no event output (e.g. mDNS advertisement). */
@@ -65,6 +77,12 @@ export interface Simulation {
   status(): SimStatus;
   /** Messages the HUD sends to "the phone" (e.g. call-action accept) reach the simulated phone. */
   deliverToPhone(message: HudToPhone): void;
+  /**
+   * A real phone connected to `/ws/phone` (true) or went away (false). The simulated phone
+   * steps aside meanwhile — no messages, no link changes — so the two never fight over the
+   * phone state, and takes over again afterwards.
+   */
+  setRealPhoneConnected(connected: boolean): void;
   start(): void;
   stop(): Promise<void>;
 }

@@ -175,7 +175,7 @@ export function DisplaySection({ root }: { root: Scope<HudConfig> }) {
             k="maxAlerts"
             label="Alerts shown at once"
             options={MAX_ALERTS}
-            hint="Critical alerts always show; extra lower-priority ones wait their turn."
+            hint="Critical alerts always show; extra lower-priority ones wait their turn. Beyond three, they are summed up as “+N more”."
           />
         </FieldGroup>
         <FieldGroup

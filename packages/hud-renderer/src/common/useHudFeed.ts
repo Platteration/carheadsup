@@ -1,19 +1,34 @@
 import type { HudFrame, ProjectionConfig, RendererToServer } from '@carheadsup/core';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
-import { hudSocketUrl, openHudConnection } from './connection.ts';
+import { hudSocketUrl, openHudConnection, withToken } from './connection.ts';
 import type { HudConnection, SocketFactory } from './connection.ts';
-import { FEED_STALE_MS, isFeedLive, msUntilStale } from './staleness.ts';
+import {
+  FEED_STALE_MS,
+  NO_PROGRESS,
+  feedStaleLimitMs,
+  isFeedLive,
+  msUntilStale,
+  trackFrame,
+  typicalInterval,
+} from './staleness.ts';
+import type { FeedProgress } from './staleness.ts';
 
 export interface HudFeed {
   /**
    * The latest frame, or null when there is nothing safe to show: not connected, no frame yet,
-   * or the last frame is older than the staleness limit. Never a frozen frame.
+   * or the server's frame time has not moved forward within the staleness limit (see
+   * `trackFrame`). Never a frozen frame.
    */
   frame: HudFrame | null;
   /** Projection from the server's `display` message; null until the first one arrives. */
   projection: ProjectionConfig | null;
   /** The server runs the simulator. */
   simulated: boolean;
+  /**
+   * The server applies the frames' brightness to the display's backlight, so the kiosk must not
+   * dim the content as well (see `RendererDisplayMessage.hardwareBrightness`).
+   */
+  hardwareBrightness: boolean;
   connected: boolean;
   /** Wall-clock epoch ms when the latest frame arrived (for diagnostics), or null. */
   lastFrameAt: number | null;
@@ -26,7 +41,15 @@ export interface HudFeedOptions {
   enabled?: boolean;
   /** Defaults to `/ws/hud` on the page's own host. */
   url?: string;
-  /** Default `FEED_STALE_MS` (1 s). */
+  /**
+   * API token, sent as `?token=` (browsers cannot set headers on a WebSocket). Needed by pages
+   * on other devices once `server.apiToken` is set; the HUD's own kiosk (loopback) needs none.
+   */
+  token?: string;
+  /**
+   * Base staleness limit, default `FEED_STALE_MS` (1 s). It stretches to two frame intervals
+   * when the server sends fewer than two frames a second (see `feedStaleLimitMs`).
+   */
   staleAfterMs?: number;
   /** Test seam: socket constructor. */
   createSocket?: SocketFactory;
@@ -36,20 +59,22 @@ export interface HudFeedOptions {
 
 interface FeedState {
   frame: HudFrame | null;
-  /** Monotonic receipt time of `frame`. */
-  receivedAt: number | null;
+  /** Progress of the server's frame time on this connection (liveness runs on it). */
+  progress: FeedProgress;
   lastFrameAt: number | null;
   projection: ProjectionConfig | null;
   simulated: boolean;
+  hardwareBrightness: boolean;
   connected: boolean;
 }
 
 const INITIAL: FeedState = {
   frame: null,
-  receivedAt: null,
+  progress: NO_PROGRESS,
   lastFrameAt: null,
   projection: null,
   simulated: false,
+  hardwareBrightness: false,
   connected: false,
 };
 
@@ -66,8 +91,8 @@ function defaultUrl(): string {
  */
 export function useHudFeed(options: HudFeedOptions = {}): HudFeed {
   const enabled = options.enabled ?? true;
-  const staleAfterMs = options.staleAfterMs ?? FEED_STALE_MS;
-  const url = options.url ?? defaultUrl();
+  const baseStaleMs = options.staleAfterMs ?? FEED_STALE_MS;
+  const url = withToken(options.url ?? defaultUrl(), options.token ?? '');
 
   // Seams are read through refs so passing new function identities never reconnects.
   const nowRef = useRef(options.now ?? monotonicNow);
@@ -89,16 +114,34 @@ export function useHudFeed(options: HudFeedOptions = {}): HudFeed {
         if (message.t === 'frame') {
           const receivedAt = nowRef.current();
           const lastFrameAt = Date.now();
-          setState((s) => ({ ...s, frame: message.frame, receivedAt, lastFrameAt }));
+          const { frame } = message;
+          setState((s) => ({
+            ...s,
+            frame,
+            progress: trackFrame(s.progress, frame.at, receivedAt),
+            lastFrameAt,
+          }));
         } else {
-          setState((s) => ({ ...s, projection: message.projection, simulated: message.simulated }));
+          setState((s) => ({
+            ...s,
+            projection: message.projection,
+            simulated: message.simulated,
+            hardwareBrightness: message.hardwareBrightness,
+          }));
         }
       },
       onConnectionChange: (connected) => {
-        // Drop the frame on disconnect so a quick reconnect cannot resurrect old values.
-        setState((s) =>
-          connected ? { ...s, connected } : { ...s, connected, frame: null, receivedAt: null },
-        );
+        // Every connection starts from scratch: a quick reconnect cannot resurrect old values,
+        // and a new connection is live only once the server's frame time moves on it. The
+        // server may have changed (e.g. restarted without its backlight), so the renderer dims
+        // by itself until the new connection's `display` message says otherwise.
+        setState((s) => ({
+          ...s,
+          connected,
+          frame: null,
+          progress: NO_PROGRESS,
+          hardwareBrightness: false,
+        }));
       },
     });
     connectionRef.current = connection;
@@ -109,13 +152,16 @@ export function useHudFeed(options: HudFeedOptions = {}): HudFeed {
     };
   }, [enabled, url]);
 
-  // One timer per frame, firing just after the frame expires, so the HUD blanks on time.
+  const staleAfterMs = feedStaleLimitMs(typicalInterval(state.progress.intervals), baseStaleMs);
+  const progressAt = state.progress.progressAt;
+
+  // One timer per step of progress, firing just after it expires, so the HUD blanks on time.
   useEffect(() => {
-    if (!state.connected || state.receivedAt === null) return undefined;
-    const delay = msUntilStale(state.receivedAt, nowRef.current(), staleAfterMs);
+    if (!state.connected || progressAt === null) return undefined;
+    const delay = msUntilStale(progressAt, nowRef.current(), staleAfterMs);
     const timer = setTimeout(() => setTick((n) => n + 1), delay + 1);
     return () => clearTimeout(timer);
-  }, [state.connected, state.receivedAt, staleAfterMs]);
+  }, [state.connected, progressAt, staleAfterMs]);
 
   const send = useCallback(
     (message: RendererToServer): boolean => connectionRef.current?.send(message) ?? false,
@@ -123,7 +169,7 @@ export function useHudFeed(options: HudFeedOptions = {}): HudFeed {
   );
 
   const live = isFeedLive(
-    { connected: state.connected, lastFrameAt: state.receivedAt },
+    { connected: state.connected, lastFrameAt: progressAt },
     nowRef.current(),
     staleAfterMs,
   );
@@ -132,6 +178,7 @@ export function useHudFeed(options: HudFeedOptions = {}): HudFeed {
     frame: live ? state.frame : null,
     projection: state.projection,
     simulated: state.simulated,
+    hardwareBrightness: state.hardwareBrightness,
     connected: state.connected,
     lastFrameAt: state.lastFrameAt,
     send,

@@ -1,6 +1,7 @@
 import { networkInterfaces } from 'node:os';
 import { DEFAULT_CONFIG } from '@carheadsup/core';
 import type { HudFrame, RendererDisplayMessage } from '@carheadsup/core';
+import type { FrameSink } from '../../src/sources/types.ts';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FakeSimulation, TestSocket, startTestServer, waitFor } from '../helpers.ts';
 import type { TestServer, TestServerOptions } from '../helpers.ts';
@@ -58,6 +59,7 @@ describe('/ws/hud', () => {
       t: 'display',
       projection: DEFAULT_CONFIG.display.projection,
       simulated: false,
+      hardwareBrightness: false,
     });
     const first = await socket.next();
     expect(first['t']).toBe('frame');
@@ -68,6 +70,38 @@ describe('/ws/hud', () => {
     const started = Date.now();
     for (let i = 0; i < 5; i += 1) await socket.nextOfType('frame', 1000);
     expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it('tells the renderer while a sink drives the backlight, and again when that changes', async () => {
+    const listeners = new Set<(drives: boolean) => void>();
+    const backlight: FrameSink & { drivesBrightness: boolean } = {
+      name: 'fake-backlight',
+      drivesBrightness: true,
+      onFrame: () => undefined,
+      stop: async () => undefined,
+      onDrivesBrightnessChange: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const set = (drives: boolean) => {
+      backlight.drivesBrightness = drives;
+      for (const listener of listeners) listener(drives);
+    };
+    const t = await start({ createFrameSinks: () => [backlight] });
+    const socket = connect(`${t.wsBase}/ws/hud`);
+    expect(await socket.nextOfType('display')).toMatchObject({ hardwareBrightness: true });
+    set(false); // e.g. the device failed: the kiosk dims in CSS again
+    expect(await socket.nextOfType('display')).toMatchObject({ hardwareBrightness: false });
+    set(false); // no change, no message
+    set(true);
+    expect(await socket.nextOfType('display')).toMatchObject({
+      hardwareBrightness: true,
+      projection: DEFAULT_CONFIG.display.projection,
+    });
+    await t.stop();
+    current = null;
+    expect(listeners.size).toBe(0);
   });
 
   it('reports simulation in the display message', async () => {

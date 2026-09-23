@@ -26,6 +26,59 @@ function describe(err: unknown): string {
   return err instanceof Error ? (err.stack ?? err.message) : String(err);
 }
 
+interface SystemErrorInfo {
+  code: string;
+  syscall?: unknown;
+  address?: unknown;
+  port?: unknown;
+}
+
+/** The system error (EADDRINUSE, EACCES, ENOTDIR…) behind `err` or one of its causes, if any. */
+function systemError(err: unknown): SystemErrorInfo | null {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    const info = current as Partial<SystemErrorInfo>;
+    if (typeof info.code === 'string' && /^E[A-Z0-9]+$/.test(info.code)) {
+      return info as SystemErrorInfo;
+    }
+    current = current.cause;
+  }
+  return null;
+}
+
+/** What to do about a start-up failure with a well-known cause, or null. */
+function startupHint(info: SystemErrorInfo): string | null {
+  const port = typeof info.port === 'number' ? `port ${info.port}` : 'the port';
+  const listening = info.syscall === 'listen' || info.syscall === 'bind';
+  switch (info.code) {
+    case 'EADDRINUSE':
+      return `${port} is already in use (another carheadsup or another service); stop it or choose another port with server.port or --port`;
+    case 'EACCES':
+      return listening
+        ? `${port} needs extra privileges; use a port above 1023 (server.port or --port)`
+        : 'the HUD runs as a user that may not access that path; check its owner and permissions';
+    case 'EADDRNOTAVAIL':
+      return `${typeof info.address === 'string' ? info.address : 'the bind address'} is not an address of this machine; check server.host or --host`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The log line for a failed start. Expected, operational failures (a system error such as a busy
+ * port or a permission problem) are one concise line with a hint; anything else is unexpected
+ * and keeps its stack trace.
+ */
+function describeStartupFailure(err: unknown): { message: string; stack: string | null } {
+  const info = systemError(err);
+  if (info === null || !(err instanceof Error)) return { message: describe(err), stack: null };
+  const hint = startupHint(info);
+  return {
+    message: hint === null ? err.message : `${err.message} — ${hint}`,
+    stack: describe(err),
+  };
+}
+
 async function main(): Promise<void> {
   const parsed = parseCli(process.argv.slice(2), process.env, homedir());
   if (parsed.kind === 'help') {
@@ -87,6 +140,7 @@ async function main(): Promise<void> {
     dataDir: options.dataDir,
     sim: options.sim,
     backlight: options.backlight,
+    allowedHosts: options.allowedHosts,
     logger,
     ...(options.configPath !== undefined ? { configPath: options.configPath } : {}),
     ...(options.port !== undefined ? { port: options.port } : {}),
@@ -100,7 +154,9 @@ async function main(): Promise<void> {
       logger.info(`HUD: ${url}/   settings: ${url}/settings   dev console: ${url}/dev`);
     }
   } catch (err) {
-    logger.error(`Fatal: ${describe(err)}`);
+    const failure = describeStartupFailure(err);
+    logger.error(`Fatal: ${failure.message}`);
+    if (failure.stack !== null) logger.debug(`Start-up failure: ${failure.stack}`);
     exiting = true;
     process.exit(1);
   }

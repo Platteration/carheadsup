@@ -10,13 +10,25 @@ public data class WayMatch(
     val way: OsmWay,
     /** Distance from the position to the way, metres. */
     val distanceM: Double,
-    /** True when travelling in the way's node order (decides `maxspeed:forward/backward`). */
-    val forward: Boolean,
+    /**
+     * True when travelling in the way's node order (decides `maxspeed:forward/backward`); null
+     * when the direction is not known (two-way road, no usable heading, no earlier direction).
+     */
+    val forward: Boolean?,
     /** Difference between the vehicle's bearing and the travel direction, or null if unknown. */
     val headingDiffDeg: Double?,
 ) {
-    /** The limit for this direction of travel. */
-    val speedLimit: SpeedLimit? get() = OsmSpeedLimit.forWay(way.tags, forward)
+    /**
+     * The limit for this direction of travel. With the direction unknown it is the limit that
+     * applies both ways, or null (unknown) when the two directions differ — a guess could show
+     * the other direction's limit.
+     */
+    val speedLimit: SpeedLimit?
+        get() {
+            forward?.let { return OsmSpeedLimit.forWay(way.tags, it) }
+            val ahead = OsmSpeedLimit.forWay(way.tags, true)
+            return ahead.takeIf { it == OsmSpeedLimit.forWay(way.tags, false) }
+        }
 
     /** As a HUD `road` message. */
     public fun toPhoneRoad(): PhoneRoad {
@@ -36,7 +48,9 @@ public data class WayMatch(
  * direction agrees with the vehicle's bearing (so the motorway is preferred over the parallel
  * frontage road only if the heading fits, and a crossing street at an intersection loses), with
  * wrong-way travel on one-way roads ruled out. The previous match gets a small bonus so the
- * result does not flicker between two close roads.
+ * result does not flicker between two close roads. Below [minSpeedForHeadingMps] the bearing is
+ * ignored; the direction of travel on a two-way road is then the previous match's on the same
+ * way, or unknown.
  */
 public class WayMatcher(
     /** Positions farther than this from every way (after accuracy allowance) match nothing. */
@@ -59,6 +73,8 @@ public class WayMatcher(
         speedMps: Double? = null,
         accuracyM: Double? = null,
         previousWayId: Long? = null,
+        /** The previous match's [WayMatch.forward], kept on the same way while the heading is unusable. */
+        previousForward: Boolean? = null,
     ): WayMatch? {
         val useHeading = bearingDeg != null && bearingDeg.isFinite() && (speedMps ?: 0.0) >= minSpeedForHeadingMps
         val limit = maxDistanceM + min(accuracyM?.takeIf { it.isFinite() && it > 0 } ?: 0.0, maxAccuracyAllowanceM)
@@ -71,7 +87,12 @@ public class WayMatcher(
                 val b = way.points[i + 1]
                 val projection = Geo.projectOntoSegment(position, a, b)
                 if (projection.distanceM > limit) continue
-                var forward = oneway != Oneway.BACKWARD
+                var forward: Boolean? =
+                    when (oneway) {
+                        Oneway.FORWARD -> true
+                        Oneway.BACKWARD -> false
+                        Oneway.BOTH -> previousForward.takeIf { previousWayId != null && way.id == previousWayId }
+                    }
                 var headingDiff: Double? = null
                 var score = projection.distanceM
                 if (useHeading) {
@@ -144,4 +165,39 @@ public class SpeedCameraFinder(
             )
         }
         .toList()
+}
+
+/**
+ * The direction the vehicle is heading, kept while it is too slow for the GPS bearing to mean
+ * anything (at a red light, in a queue): the last reliable bearing, until the vehicle has moved
+ * [maxTravelM] from where it was measured or [maxAgeMs] have passed. Null when unknown — e.g.
+ * parked since the start — so callers do not treat every direction as "ahead".
+ */
+public class HeadingMemory(
+    private val minSpeedMps: Double = 2.5,
+    private val maxTravelM: Double = 300.0,
+    private val maxAgeMs: Long = 30 * 60_000L,
+) {
+    private var bearingDeg: Double? = null
+    private var measuredAt: LatLon? = null
+    private var measuredAtMs = 0L
+
+    /** The heading to use at [position] given this fix's bearing and speed. */
+    public fun update(position: LatLon, bearingDeg: Double?, speedMps: Double?, nowMs: Long): Double? {
+        if (bearingDeg != null && bearingDeg.isFinite() && (speedMps ?: 0.0) >= minSpeedMps) {
+            this.bearingDeg = bearingDeg
+            measuredAt = position
+            measuredAtMs = nowMs
+            return bearingDeg
+        }
+        val remembered = this.bearingDeg ?: return null
+        val where = measuredAt ?: return null
+        val age = nowMs - measuredAtMs
+        if (age < 0 || age > maxAgeMs || Geo.distanceM(where, position) > maxTravelM) {
+            this.bearingDeg = null
+            measuredAt = null
+            return null
+        }
+        return remembered
+    }
 }

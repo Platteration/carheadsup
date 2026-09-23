@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   bearerToken,
+  hudHostNames,
+  isAllowedHost,
   isAuthorized,
   isCrossSiteRequest,
   isLoopbackAddress,
@@ -44,10 +46,16 @@ describe('bearerToken', () => {
     expect(bearerToken('BEARER x.y-z')).toBe('x.y-z');
   });
 
+  it('takes everything after the scheme, so tokens may contain spaces', () => {
+    expect(bearerToken('Bearer my car key')).toBe('my car key');
+    expect(bearerToken('Bearer  a  b  ')).toBe('a  b');
+  });
+
   it('rejects other schemes and malformed headers', () => {
     expect(bearerToken('Basic abc')).toBeNull();
     expect(bearerToken('Bearer')).toBeNull();
-    expect(bearerToken('Bearer a b')).toBeNull();
+    expect(bearerToken('Bearer   ')).toBeNull();
+    expect(bearerToken('Bearerabc')).toBeNull();
     expect(bearerToken(undefined)).toBeNull();
     expect(bearerToken(['Bearer a'])).toBeNull();
   });
@@ -102,6 +110,31 @@ describe('isAuthorized', () => {
     ).toBe(true);
   });
 
+  it('accepts every token the settings app can save and send', () => {
+    // Inner spaces are part of the token; surrounding whitespace never survives an HTTP header
+    // (and the settings app trims the token it keeps), so it is not part of the comparison.
+    expect(
+      isAuthorized({
+        remoteAddress: remote,
+        authorization: 'Bearer my car key',
+        apiToken: 'my car key',
+      }),
+    ).toBe(true);
+    expect(
+      isAuthorized({ remoteAddress: remote, authorization: 'Bearer key', apiToken: ' key ' }),
+    ).toBe(true);
+    expect(isAuthorized({ remoteAddress: remote, token: ' key', apiToken: 'key' })).toBe(true);
+    expect(
+      isAuthorized({
+        remoteAddress: remote,
+        authorization: 'Bearer my car',
+        apiToken: 'my car key',
+      }),
+    ).toBe(false);
+    // A token of nothing but whitespace can never be presented; it still is not "no token".
+    expect(isAuthorized({ remoteAddress: remote, token: ' ', apiToken: '  ' })).toBe(false);
+  });
+
   it('refuses clients whose address is unknown when a token is required', () => {
     expect(isAuthorized({ remoteAddress: undefined, apiToken: 'secret' })).toBe(false);
   });
@@ -125,5 +158,54 @@ describe('isCrossSiteRequest', () => {
     expect(isCrossSiteRequest({ origin: '::garbage', host: 'hud:8080' })).toBe(true);
     expect(isCrossSiteRequest({ origin: 'http://hud:8080' })).toBe(true);
     expect(isCrossSiteRequest({ 'sec-fetch-site': 'cross-site', host: 'hud:8080' })).toBe(true);
+  });
+});
+
+describe('hudHostNames / isAllowedHost', () => {
+  const names = hudHostNames('CarHUD.example.lan.', ['Pi.Fritz.Box']);
+
+  it('knows the machine name, its first label, <label>.local and extra names', () => {
+    expect([...names].sort()).toEqual([
+      'carhud',
+      'carhud.example.lan',
+      'carhud.local',
+      'pi.fritz.box',
+    ]);
+  });
+
+  it.each([
+    'carhud.local:8080',
+    'CarHUD.local.',
+    'carhud',
+    'pi.fritz.box:80',
+    '10.42.0.1:8080',
+    '192.168.1.5',
+    '[::1]:8080',
+    '[fe80::1%25wlan0]:8080',
+    'localhost:8080',
+    'hud.localhost',
+  ])('accepts %s', (host) => {
+    expect(isAllowedHost(host, names)).toBe(true);
+  });
+
+  it.each([
+    'evil.example:8080',
+    'carhud.evil.example',
+    'carhud.local.evil.example',
+    'localhost.evil.example',
+    '10.42.0.1.nip.io',
+    'evil.example:80:80',
+    'fe80::1',
+    '[::1',
+    '[evil.example]:80',
+    '[::1]x',
+    ':8080',
+  ])('refuses %s', (host) => {
+    expect(isAllowedHost(host, names)).toBe(false);
+  });
+
+  it('lets requests without a Host header through (not a browser)', () => {
+    expect(isAllowedHost(undefined, names)).toBe(true);
+    expect(isAllowedHost(['a', 'b'], names)).toBe(false);
   });
 });

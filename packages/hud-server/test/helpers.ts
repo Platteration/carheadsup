@@ -115,6 +115,8 @@ export class FakeSimulation implements Simulation {
   readonly sources: EventSource[];
   readonly controls: SimControl[] = [];
   readonly delivered: HudToPhone[] = [];
+  /** Every `setRealPhoneConnected` call. */
+  readonly realPhone: boolean[] = [];
   started = 0;
   stopped = 0;
 
@@ -129,11 +131,19 @@ export class FakeSimulation implements Simulation {
   }
 
   status(): SimStatus {
-    return this.vehicle.status();
+    return {
+      ...this.vehicle.status(),
+      adas: { blindSpotLeft: false, blindSpotRight: false, collision: 'none' },
+      phone: { connected: true, steppedAside: this.realPhone.at(-1) === true },
+    };
   }
 
   deliverToPhone(message: HudToPhone): void {
     this.delivered.push(message);
+  }
+
+  setRealPhoneConnected(connected: boolean): void {
+    this.realPhone.push(connected);
   }
 
   start(): void {
@@ -199,6 +209,8 @@ export interface TestServerOptions extends Partial<HudServerOptions> {
   config?: DeepPartial<HudConfig>;
   /** Files written into the data dir before start. */
   files?: Record<string, string>;
+  /** Directories created in the data dir before start (e.g. to make a file unreadable). */
+  directories?: string[];
   /** Skip creating a fake renderer build. */
   noRenderer?: boolean;
   simulation?: FakeSimulation;
@@ -220,6 +232,9 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
   }
   for (const [name, content] of Object.entries(options.files ?? {})) {
     await writeFile(join(dataDir, name), content);
+  }
+  for (const name of options.directories ?? []) {
+    await mkdir(join(dataDir, name), { recursive: true });
   }
   const logger = new MemoryLogger();
   let obd: FakeObdService | null = null;

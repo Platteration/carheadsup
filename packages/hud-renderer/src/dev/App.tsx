@@ -108,8 +108,15 @@ export function DevApp({ api, feedOptions }: DevAppProps) {
     }
   };
 
-  const feed = useHudFeed(feedOptions);
+  // The API token (when the HUD requires one) also authenticates the live feed, as `?token=`.
+  const [token, setToken] = useState(() => api.tokens.get());
+  const feed = useHudFeed({ ...feedOptions, token });
   const sim = useSim(api);
+  const applyToken = (next: string) => {
+    api.tokens.set(next);
+    setToken(api.tokens.get());
+    sim.refresh();
+  };
   const [log, clearLog] = useFrameLog(feed.frame);
   const fps = useFps(feed.frame);
   const panel = PANEL_SIZES[prefs.panel] ?? PANEL_SIZES[0]!;
@@ -227,7 +234,7 @@ export function DevApp({ api, feedOptions }: DevAppProps) {
                 </span>
               )}
             </header>
-            <SimPanel sim={sim} />
+            <SimPanel sim={sim} onToken={applyToken} />
           </aside>
         </main>
       ) : (
