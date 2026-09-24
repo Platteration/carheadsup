@@ -8,14 +8,17 @@
   replaces the port below with server.port from /etc/carheadsup/config.json.
 
   Installed as /etc/avahi/services/carheadsup.service; avahi-daemon picks it up by itself.
-  TXT records: v = phone protocol version, path = the phone WebSocket endpoint.
+  TXT records: v = phone protocol version, path = the phone WebSocket endpoint. The server's own
+  advertisement also carries id = the HUD's identity (<data dir>/hud-id), which this static file
+  cannot know: the companion then learns the id from the HUD's challenge on first pairing and
+  pins it just the same (the challenge and the HUD's proof decide, not this record).
 -->
 <service-group>
   <name replace-wildcards="yes">%h HUD</name>
   <service>
     <type>_carheadsup._tcp</type>
     <port>8080</port>
-    <txt-record>v=1</txt-record>
+    <txt-record>v=2</txt-record>
     <txt-record>path=/ws/phone</txt-record>
   </service>
 </service-group>

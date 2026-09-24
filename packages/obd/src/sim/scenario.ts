@@ -2,7 +2,6 @@
  * Scripted demo drive for the simulator's 'scenario' mode, plus the speed-tracking "driver"
  * that turns each step's target speed into throttle and brake.
  */
-import { DEFAULT_CONFIG } from '@carheadsup/core';
 import { clamp } from './model.ts';
 
 export interface ScenarioStep {
@@ -18,16 +17,18 @@ export interface ScenarioStep {
   decelMps2?: number;
 }
 
-/** Seconds the demo shows the parked dashboard at the end of each loop (default HUD config). */
-export const DEMO_PARKED_DASHBOARD_S = 15;
+/**
+ * Seconds the demo stands with the engine off at the end of each loop. The simulated phone
+ * opens the diagnostics dashboard with the companion app's remote as the step begins, so it
+ * shows for all of it — the HUD's own parked dashboard would need minutes with the engine off
+ * (`display.context.engineOffParkedAfterMs`, start-stop protection).
+ */
+export const DEMO_PARKED_S = 40;
 
 /**
- * The looping demo: start-up, a city stretch, a red light, an on-ramp, highway cruising,
- * the exit, arriving (~4.3 min of driving per loop) and parking with the engine off.
- *
- * The parked step outlasts the HUD's default `display.context.engineOffParkedAfterMs` (which
- * keeps start-stop from bringing up the dashboard at red lights) by
- * {@link DEMO_PARKED_DASHBOARD_S}, so every loop ends on the parked diagnostics dashboard.
+ * The looping demo, about 5 minutes: start-up, a city stretch, a red light, an on-ramp, highway
+ * cruising, the exit, arriving (~4.3 min of driving) and {@link DEMO_PARKED_S} standing with the
+ * engine off.
  */
 export const DEMO_SCENARIO: readonly ScenarioStep[] = Object.freeze([
   { name: 'warm-up', durationS: 20, engineRunning: true, targetKph: () => 0 },
@@ -60,13 +61,7 @@ export const DEMO_SCENARIO: readonly ScenarioStep[] = Object.freeze([
     engineRunning: true,
     targetKph: (t: number) => (t < 18 ? 30 : 0),
   },
-  {
-    name: 'parked',
-    durationS:
-      DEFAULT_CONFIG.display.context.engineOffParkedAfterMs / 1000 + DEMO_PARKED_DASHBOARD_S,
-    engineRunning: false,
-    targetKph: () => 0,
-  },
+  { name: 'parked', durationS: DEMO_PARKED_S, engineRunning: false, targetKph: () => 0 },
 ]);
 
 export interface DriverCommand {

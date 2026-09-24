@@ -32,6 +32,9 @@ import type { ObdLinkStatus } from './vehicle.ts';
  * `errors` is empty and 422 otherwise — the valid fields have been applied and saved even then.
  * They answer 503 (nothing changed) while the HUD is starting, and when config.json could not
  * be loaded at start-up (unreadable or not JSON): it is never replaced by the defaults.
+ *
+ * Times in responses are wall-clock epoch ms, as the HUD's system clock has them (the HUD's
+ * internal engine time is converted with the latest clock offset).
  */
 
 export interface ApiInfo {
@@ -54,12 +57,17 @@ export interface ApiConfigResult {
 }
 
 export interface ApiDiagnostics {
+  /**
+   * The HUD's wall-clock time when it answered, on the same clock as every `at` here: a
+   * sample's age is `now − at`, whatever the client's own clock says (it may be minutes off).
+   */
+  now: number;
   link: ObdLinkStatus;
   milOn: boolean;
   dtcs: DiagnosticDtc[];
   dtcsCheckedAt: number | null;
   supported: SignalId[] | null;
-  /** Latest canonical values. */
+  /** Latest canonical values and when they were received. */
   signals: Partial<Record<SignalId, { value: number; at: number }>>;
   vin: string | null;
 }

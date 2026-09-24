@@ -128,10 +128,14 @@ describe('createInitialState', () => {
     expect(state.ui).toEqual({
       blanked: false,
       page: 0,
+      dashboardRequested: false,
       brightnessOffset: 0,
       toastDismissedAt: null,
       lastInputAt: null,
     });
+    // Engine time starts at the wall clock until the server says otherwise.
+    expect(state.clock).toEqual({ wallOffsetMs: 0 });
+    expect(state.shiftFlash).toBe(false);
   });
 
   it('ignores an implausible persisted odometer', () => {
@@ -190,6 +194,119 @@ describe('a trip across a power-down', () => {
     expect(after.effects.filter((e) => e.type === 'trip/completed')).toEqual([]);
   });
 
+  it('saves the trip with wall-clock times and resumes it in the next start’s engine time', () => {
+    const before = driveThenPowerDown();
+    const active = before.state.trip.active!;
+    // Network time moved the wall clock 2 hours ahead of engine time during the drive.
+    const offset = 2 * 3_600_000;
+    before.send({ type: 'clock/sync', wallOffsetMs: offset, at: before.now });
+    expect(before.lastEffects).toContainEqual({ type: 'persist' });
+    const file = saved(before);
+    expect(file.activeTrip).toMatchObject({
+      startedAt: active.startedAt + offset,
+      lastActivityAt: active.lastActivityAt + offset,
+    });
+    // The next start's engine time begins at its (right) wall clock, a minute later: resumed.
+    const boot = before.now + offset + 60_000;
+    const after = new Harness(makeConfig(), file, boot);
+    expect(after.state.trip.active?.startedAt).toBe(active.startedAt + offset);
+    after.obdConnected(boot);
+    after.run(boot + 60_000, { speed: 60, rpm: 2000 }, 1000);
+    expect(after.state.trip.current?.startedAt).toBe(T0 + 1000 + offset);
+    expect(after.effects.filter((e) => e.type === 'trip/completed')).toEqual([]);
+  });
+
+  it('converts a saved trip with the offset the new state starts with', () => {
+    const before = driveThenPowerDown();
+    const file = saved(before);
+    // Engine time of the new start runs 10 minutes behind its wall clock.
+    const offset = 600_000;
+    const wallBoot = before.now + 60_000;
+    const state = createInitialState(makeConfig(), file, wallBoot - offset, {
+      wallOffsetMs: offset,
+    });
+    expect(state.clock.wallOffsetMs).toBe(offset);
+    expect(state.trip.active?.startedAt).toBe(T0 + 1000 - offset);
+    expect(state.trip.current?.startedAt).toBe(T0 + 1000);
+    expect(state.trip.endPending).toBe(false);
+  });
+
+  it('splits a resumed trip once network time shows the car was off for long (no real-time clock)', () => {
+    const before = driveThenPowerDown();
+    const lastActivity = before.state.trip.active?.lastActivityAt;
+    // The Pi boots with the time fake-hwclock saved at shutdown: the break looks like a minute,
+    // so the trip is continued …
+    const boot = before.now + 60_000;
+    const after = new Harness(makeConfig(), saved(before), boot);
+    after.obdConnected(boot);
+    after.run(boot + 60_000, { speed: 60, rpm: 2000 }, 1000);
+    expect(after.effects.filter((e) => e.type === 'trip/completed')).toEqual([]);
+    expect(after.state.trip.current?.distanceKm).toBeGreaterThan(20.9);
+    // … until the phone's hotspot comes up and network time says it is a day later.
+    const day = 24 * 3_600_000;
+    after.send({ type: 'clock/sync', wallOffsetMs: day, at: after.now });
+    expect(after.effects.filter((e) => e.type === 'trip/completed')).toEqual([
+      {
+        type: 'trip/completed',
+        trip: expect.objectContaining({
+          id: tripId(T0 + 1000),
+          startedAt: T0 + 1000,
+          endedAt: lastActivity,
+          distanceKm: expect.closeTo(20, 0) as unknown,
+        }) as unknown,
+      },
+    ]);
+    expect(after.lastEffects).toContainEqual({ type: 'persist' });
+    // Today's drive is a trip of its own, on the corrected clock.
+    const active = after.state.trip.active;
+    expect(active?.startedAt).toBeGreaterThanOrEqual(boot);
+    expect(after.state.trip.current?.startedAt).toBe((active?.startedAt ?? 0) + day);
+    expect(after.state.trip.current?.distanceKm).toBeLessThan(1.1);
+    expect(extractActiveTrip(after.state)?.startedAt).toBe((active?.startedAt ?? 0) + day);
+    // A later sync (drift) changes nothing more.
+    after.send({ type: 'clock/sync', wallOffsetMs: day + 3000, at: after.now });
+    expect(after.effects.filter((e) => e.type === 'trip/completed')).toHaveLength(1);
+  });
+
+  it('keeps a resumed trip together when network time shows the break was short after all', () => {
+    const before = driveThenPowerDown();
+    const boot = before.now + 60_000;
+    const after = new Harness(makeConfig(), saved(before), boot);
+    after.obdConnected(boot);
+    after.run(boot + 60_000, { speed: 60, rpm: 2000 }, 1000);
+    // The start-up clock was 2 minutes behind: a 3-minute break, shorter than the 5 it takes.
+    after.send({ type: 'clock/sync', wallOffsetMs: 120_000, at: after.now });
+    after.tick(after.now + 100);
+    expect(after.effects.filter((e) => e.type === 'trip/completed')).toEqual([]);
+    expect(after.state.trip.current?.startedAt).toBe(T0 + 1000 + 120_000);
+    expect(after.state.trip.current?.distanceKm).toBeGreaterThan(20.9);
+  });
+
+  it('completes a trip saved "in the future" of an older boot clock (unclean power cut)', () => {
+    const before = driveThenPowerDown();
+    const lastActivity = before.state.trip.active?.lastActivityAt;
+    // No real-time clock: the Pi boots with the time it saved an hour before the drive.
+    const boot = T0 - 3_600_000;
+    const after = new Harness(makeConfig(), saved(before), boot);
+    expect(after.state.trip.endPending).toBe(true);
+    after.tick(boot + 100);
+    const completed = after.effects.filter((e) => e.type === 'trip/completed');
+    expect(completed).toEqual([
+      {
+        type: 'trip/completed',
+        trip: expect.objectContaining({
+          id: tripId(T0 + 1000),
+          startedAt: T0 + 1000,
+          endedAt: lastActivity,
+        }) as unknown,
+      },
+    ]);
+    expect(after.state.trip.active).toBeNull();
+    // Network time arrives later: nothing of the old trip is left to move.
+    after.send({ type: 'clock/sync', wallOffsetMs: 3 * 3_600_000, at: boot + 5000 });
+    expect(after.state.trip.lastCompleted?.startedAt).toBe(T0 + 1000);
+  });
+
   it('ignores a missing or corrupt saved trip', () => {
     for (const activeTrip of [undefined, null, { distanceKm: 'far' }]) {
       const h = new Harness(makeConfig(), { ...persisted(), activeTrip });
@@ -198,8 +315,221 @@ describe('a trip across a power-down', () => {
         lastCompleted: null,
         completedCount: 0,
         active: null,
+        endPending: false,
+        resumed: null,
       });
     }
+  });
+});
+
+describe('the wall clock (clock/sync)', () => {
+  const HOUR = 3_600_000;
+
+  /** Driving with guidance, a speed limit (just refreshed), a trip in progress. */
+  function drivingWithPhone(config = makeConfig()): Harness {
+    const h = new Harness(config, persisted({ odometerKm: 1000 }));
+    h.obdConnected(T0);
+    h.phoneConnected(T0);
+    h.send({ type: 'nav/update', nav: navInfo(), at: T0 + 100 });
+    h.run(T0 + 60_000, { speed: 50, rpm: 2000 }, 500);
+    h.send({ type: 'road/update', road: roadInfo(50), at: h.now });
+    expect(h.state.context.context).toBe('city');
+    return h;
+  }
+
+  function expectStillLive(h: Harness): void {
+    const frame = h.frame();
+    expect(widget(frame, 'speed')?.value).toBe(50);
+    expect(widget(frame, 'speedLimit')?.value).toBe(50);
+    expect(widget(frame, 'nav')).toBeDefined();
+    expect(h.state.trip.completedCount).toBe(0);
+    expect(h.state.context.context).toBe('city');
+  }
+
+  it.each([
+    ['forward by days (network time on a Pi without a real-time clock)', 3 * 24 * HOUR],
+    ['backward by minutes (a clock that ran fast)', -5 * 60_000],
+  ])('keeps a drive going when the wall clock steps %s', (_, step) => {
+    const h = drivingWithPhone();
+    const tripStart = h.state.trip.active?.startedAt;
+    h.send({ type: 'clock/sync', wallOffsetMs: step, at: h.now });
+    expect(h.state.clock.wallOffsetMs).toBe(step);
+    // Nothing measured in engine time noticed: data stays live, the trip goes on.
+    h.run(h.now + 30_000, { speed: 50, rpm: 2000 }, 500);
+    expectStillLive(h);
+    expect(h.state.trip.active?.startedAt).toBe(tripStart);
+    // Only what shows the absolute time moved.
+    expect(widget(h.frame(), 'clock')?.epochMs).toBe(h.now + step);
+    expect(h.state.trip.current?.startedAt).toBe((tripStart ?? 0) + step);
+    // The trip ends normally, with wall-clock times.
+    h.run(h.now + 5000, { speed: 0, rpm: 0 }, 500);
+    h.send({ type: 'obd/link', state: 'error', at: h.now + 100 });
+    h.idle(h.now + 6 * 60_000, 10_000);
+    const trips = h.effects.filter((e) => e.type === 'trip/completed');
+    expect(trips).toHaveLength(1);
+    expect(trips[0]).toMatchObject({
+      trip: { startedAt: (tripStart ?? 0) + step, id: tripId((tripStart ?? 0) + step) },
+    });
+  });
+
+  it('ignores a non-finite or unchanged offset', () => {
+    const h = new Harness();
+    h.send({ type: 'clock/sync', wallOffsetMs: 5000, at: T0 + 10 });
+    const before = h.state;
+    h.send({ type: 'clock/sync', wallOffsetMs: 5000, at: T0 + 10 });
+    expect(h.state).toBe(before);
+    h.send({ type: 'clock/sync', wallOffsetMs: Number.NaN, at: T0 + 10 });
+    expect(h.state).toBe(before);
+    expect(h.lastEffects).toEqual([]);
+  });
+
+  it('boots with a wrong clock, then follows network time for dates, the sun and the ETA', () => {
+    // The Pi boots a month behind (the time it last saved), at night by its own clock.
+    const behind = 30 * 24 * HOUR + 14 * HOUR;
+    const config = makeConfig({
+      sensors: { fallbackLocation: { lat: 48.2, lon: 16.4 } },
+      display: {
+        layout: {
+          preset: 'custom',
+          widgets: [
+            { id: 'eta', zone: 'top-left', contexts: ['parked'] },
+            { id: 'clock', zone: 'bottom-right', contexts: ['parked'] },
+          ],
+        },
+      },
+    });
+    const h = new Harness(
+      config,
+      persisted({
+        maintenanceRecords: [{ itemId: 'brake-fluid', odometerKm: null, at: T0 - 740 * DAY }],
+      }),
+      T0 - behind,
+    );
+    const brake = () => h.state.maintenance.status.find((s) => s.itemId === 'brake-fluid');
+    expect(brake()?.status).toBe('due-soon'); // 730-day interval: 20 days left by its clock
+    h.tick(T0 - behind + 100);
+    expect(h.state.env.brightness.night).toBe(true);
+    h.phoneConnected(T0 - behind + 200);
+    const eta = T0 + 25 * 60_000; // the phone's ETA is wall-clock time
+    h.send({
+      type: 'nav/update',
+      nav: navInfo({ etaEpochMs: eta, remainingSeconds: null }),
+      at: T0 - behind + 300,
+    });
+
+    // Network time: the wall clock is really a month and 14 hours ahead.
+    h.send({ type: 'clock/sync', wallOffsetMs: behind, at: T0 - behind + 400 });
+    expect(brake()).toMatchObject({ status: 'overdue', remainingDays: -10 });
+    expect(h.lastEffects).toContainEqual({
+      type: 'maintenance/due',
+      items: [expect.objectContaining({ itemId: 'brake-fluid', status: 'overdue' }) as unknown],
+    });
+    expect(h.state.env.brightness.night).toBe(false); // midday in Vienna
+    const frame = h.frame();
+    expect(widget(frame, 'clock')?.epochMs).toBe(T0 + 400);
+    expect(widget(frame, 'eta')?.remainingMinutes).toBe(25);
+    // A service recorded now is dated on the wall clock.
+    h.send({ type: 'maintenance/done', itemId: 'brake-fluid', odometerKm: null, at: h.now + 600 });
+    expect(h.state.maintenance.records).toEqual([
+      { itemId: 'brake-fluid', odometerKm: null, at: T0 + 1000 },
+    ]);
+    expect(brake()?.status).toBe('ok');
+  });
+
+  it('asks for a write when the clock moves while a trip is in progress', () => {
+    const h = new Harness();
+    h.send({ type: 'clock/sync', wallOffsetMs: HOUR, at: T0 + 10 });
+    expect(h.lastEffects).toEqual([]);
+    h.obdConnected(T0 + 20);
+    h.run(T0 + 5000, { speed: 30, rpm: 1500 });
+    expect(h.state.trip.active).not.toBeNull();
+    h.send({ type: 'clock/sync', wallOffsetMs: 2 * HOUR, at: h.now });
+    expect(h.lastEffects).toEqual([{ type: 'persist' }]);
+    expect(extractActiveTrip(h.state)?.startedAt).toBe(T0 + 220 + 2 * HOUR);
+  });
+});
+
+describe('the dashboard on request', () => {
+  /** Stopped at a red light with the engine running (not parked for 2 minutes). */
+  function stopped(config = makeConfig()): Harness {
+    const h = driving(40, config);
+    h.run(h.now + 6000, { speed: 0, rpm: 800 }, 500);
+    expect(h.state.context.context).toBe('stopped');
+    expect(h.frame().diagnostics).toBeNull();
+    return h;
+  }
+
+  it('opens at once with next-page or prev-page while stopped, on the current page', () => {
+    for (const action of ['next-page', 'prev-page'] as const) {
+      const h = stopped();
+      h.input(action);
+      expect(h.state.ui).toMatchObject({ dashboardRequested: true, page: 0 });
+      const frame = h.frame();
+      expect(frame.context).toBe('stopped');
+      expect(frame.diagnostics?.page).toBe('overview');
+    }
+  });
+
+  it('then flips pages; secondary closes it', () => {
+    const h = stopped();
+    h.input('next-page');
+    h.input('next-page');
+    expect(h.frame().diagnostics?.page).toBe('engine');
+    h.input('prev-page');
+    expect(h.frame().diagnostics?.page).toBe('overview');
+    h.input('secondary');
+    expect(h.state.ui.dashboardRequested).toBe(false);
+    expect(h.frame().diagnostics).toBeNull();
+    expect(h.frame().context).toBe('stopped');
+  });
+
+  it('closes by itself as soon as the car moves, and never opens while moving', () => {
+    const h = stopped();
+    h.input('next-page');
+    h.run(h.now + 400, { speed: 3, rpm: 1200 }, 200); // creeping: still stopped
+    expect(h.frame().diagnostics).not.toBeNull();
+    h.run(h.now + 2000, { speed: 15, rpm: 1500 }, 200);
+    expect(h.state.context.context).toBe('city');
+    expect(h.state.ui.dashboardRequested).toBe(false);
+    expect(h.frame().diagnostics).toBeNull();
+    h.input('next-page');
+    expect(h.state.ui.dashboardRequested).toBe(false);
+    expect(h.frame().diagnostics).toBeNull();
+    // Stopping again does not bring it back by itself.
+    h.run(h.now + 6000, { speed: 0, rpm: 800 }, 500);
+    expect(h.state.context.context).toBe('stopped');
+    expect(h.frame().diagnostics).toBeNull();
+  });
+
+  it('hands over to the parked dashboard, which secondary does not close', () => {
+    const h = stopped(makeConfig({ display: { context: { parkedAfterMs: 20_000 } } }));
+    h.input('next-page');
+    h.input('next-page');
+    h.run(h.now + 25_000, { speed: 0, rpm: 800 }, 500);
+    expect(h.state.context.context).toBe('parked');
+    expect(h.state.ui.dashboardRequested).toBe(false);
+    expect(h.frame().diagnostics?.page).toBe('engine');
+    h.input('secondary');
+    expect(h.frame().diagnostics?.page).toBe('engine');
+  });
+
+  it('lets secondary decline a ringing call first, and closes before dismissing a toast', () => {
+    const h = stopped();
+    h.phoneConnected();
+    h.input('next-page');
+    h.send({ type: 'call/update', call: callInfo(), at: h.now + 10 });
+    h.input('secondary');
+    expect(h.lastEffects).toEqual([
+      { type: 'phone/call-action', callId: 'call-1', action: 'decline' },
+    ]);
+    expect(h.state.ui.dashboardRequested).toBe(true);
+    h.send({ type: 'call/update', call: null, at: h.now + 10 });
+    h.send({ type: 'message/received', message: message('m1'), at: h.now + 10 });
+    h.input('secondary');
+    expect(h.state.ui.dashboardRequested).toBe(false);
+    expect(h.frame().toast?.kind).toBe('message');
+    h.input('secondary');
+    expect(h.frame().toast).toBeNull();
   });
 });
 
@@ -592,6 +922,41 @@ describe('tick', () => {
     expect(h.state.road).not.toBeNull();
   });
 
+  it('tells two phones with the same name apart by their device id', () => {
+    const h = new Harness();
+    h.send({ type: 'phone/link', connected: true, deviceName: 'Pixel', deviceId: 'A', at: T0 });
+    h.send({ type: 'nav/update', nav: navInfo(), at: T0 });
+    h.send({ type: 'media/update', media: mediaInfo(), at: T0 });
+    h.send({ type: 'phone/link', connected: false, at: T0 + 1000 });
+    // The passenger's phone of the same model (and default name) connects.
+    h.send({
+      type: 'phone/link',
+      connected: true,
+      deviceName: 'Pixel',
+      deviceId: 'B',
+      at: T0 + 2000,
+    });
+    expect(h.state.phone).toMatchObject({ connected: true, deviceName: 'Pixel', deviceId: 'B' });
+    expect(h.state.nav).toBeNull();
+    expect(h.state.media).toBeNull();
+  });
+
+  it('keeps the data of a phone that reconnects under a new name', () => {
+    const h = new Harness();
+    h.send({ type: 'phone/link', connected: true, deviceName: 'Pixel', deviceId: 'A', at: T0 });
+    h.send({ type: 'nav/update', nav: navInfo(), at: T0 });
+    h.send({ type: 'phone/link', connected: false, at: T0 + 1000 });
+    h.send({
+      type: 'phone/link',
+      connected: true,
+      deviceName: 'My Pixel',
+      deviceId: 'A',
+      at: T0 + 2000,
+    });
+    expect(h.state.phone).toMatchObject({ deviceName: 'My Pixel', deviceId: 'A' });
+    expect(h.state.nav).not.toBeNull();
+  });
+
   it('keeps phone data when the phone reconnects within the grace period', () => {
     const h = new Harness();
     h.phoneConnected(T0);
@@ -705,6 +1070,7 @@ describe('phone events', () => {
     expect(h.state.phone).toEqual({
       connected: true,
       deviceName: 'Pixel 9',
+      deviceId: null,
       appVersion: '1.2.0',
       since: T0 + 5,
     });
@@ -917,7 +1283,12 @@ describe('sensors and ADAS', () => {
       collision: 'caution',
       ttcSeconds: 2.4,
       collisionUpdatedAt: T0 + 20,
+      collisionWarningAt: null,
     });
+    h.send({ type: 'adas/collision', level: 'warning', ttcSeconds: 0.8, at: T0 + 25 });
+    expect(h.state.adas.collisionWarningAt).toBe(T0 + 25);
+    h.send({ type: 'adas/collision', level: 'caution', ttcSeconds: 1.9, at: T0 + 27 });
+    expect(h.state.adas.collisionWarningAt).toBe(T0 + 25);
     h.send({ type: 'adas/link', connected: false, at: T0 + 30 });
     expect(h.state.adas.moduleConnected).toBe(false);
     // Data from the module proves it is back.
@@ -1196,6 +1567,62 @@ describe('config', () => {
     expect(h.state.gear.learnedRatios).toBeNull();
     expect(h.lastEffects).toEqual([{ type: 'persist' }]);
     expect(extractPersisted(h.state).learnedGearRatios).toBeNull();
+  });
+
+  it('forgets the gear-numbering anchor with the learned ratios', () => {
+    const config = makeConfig({ vehicle: { transmission: 'automatic' } });
+    const anchor = { transmission: 'automatic' as const, secondGearRpmPerKph: 72 };
+    const h = new Harness(
+      config,
+      persisted({ learnedGearRatios: [72, 48, 35.5, 28, 23], gearAnchor: anchor }),
+    );
+    expect(h.state.gear.anchor).toEqual(anchor);
+    expect(extractPersisted(h.state).gearAnchor).toEqual(anchor);
+    h.send({
+      type: 'config',
+      config: makeConfig({ vehicle: { transmission: 'dct' } }),
+      at: T0 + 1,
+    });
+    expect(h.state.gear.anchor).toBeNull();
+    expect(extractPersisted(h.state)).toMatchObject({ learnedGearRatios: null, gearAnchor: null });
+  });
+});
+
+describe('gear numbering across a restart', () => {
+  const AUTO = makeConfig({ vehicle: { transmission: 'automatic', idleRpm: 750 } });
+  const LADDER = [72, 48, 35.5, 28, 23]; // 2nd … 6th: the converter kept 1st out
+
+  it('shows learned gears of an automatic right after start-up with a saved anchor', () => {
+    const gearAt50 = (saved: Parameters<typeof persisted>[0]) => {
+      const h = new Harness(AUTO, persisted(saved));
+      h.obdConnected(T0);
+      h.run(T0 + 3000, { speed: 50, rpm: 50 * 35.5, throttle: 20 }, 100);
+      return h.frame();
+    };
+    // Without an anchor nothing proves which ratio is which gear yet.
+    expect(widget(gearAt50({ learnedGearRatios: LADDER }), 'gear')).toBeUndefined();
+    const anchored = gearAt50({
+      learnedGearRatios: LADDER,
+      gearAnchor: { transmission: 'automatic', secondGearRpmPerKph: 73.1 },
+    });
+    expect(widget(anchored, 'gear')).toMatchObject({ gear: '4', inferred: true });
+  });
+
+  it('ignores an anchor learned on another transmission, or one without ratios', () => {
+    const other = new Harness(
+      AUTO,
+      persisted({
+        learnedGearRatios: LADDER,
+        gearAnchor: { transmission: 'dct', secondGearRpmPerKph: 73 },
+      }),
+    );
+    expect(other.state.gear.anchor).toBeNull();
+    const alone = new Harness(
+      AUTO,
+      persisted({ gearAnchor: { transmission: 'automatic', secondGearRpmPerKph: 73 } }),
+    );
+    expect(alone.state.gear.anchor).toBeNull();
+    expect(extractPersisted(alone.state).gearAnchor).toBeNull();
   });
 });
 

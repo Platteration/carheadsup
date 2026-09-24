@@ -6,6 +6,7 @@ import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
+import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.link.HudEndpoint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,15 +16,19 @@ import java.net.InetAddress
 import java.util.concurrent.Executors
 
 /**
- * Finds the HUD with DNS-SD: it advertises `_carheadsup._tcp` (see `server.mdns`). The newest
- * resolved address is published on [endpoint]; it becomes null when the service disappears.
+ * Finds the HUD with DNS-SD: it advertises `_carheadsup._tcp` (see `server.mdns`) with its id in
+ * the TXT record `id`. The newest resolved address of a HUD that [accept]s (given that id, or
+ * null when the advertisement has none) is published on [endpoint]; it becomes null when the
+ * service disappears. Once the phone is paired, [accept] passes only the paired HUD (and HUDs
+ * without an id, whose `challenge` is checked instead), so other HUDs are never contacted; an
+ * advertisement without an id never replaces one with an accepted id.
  *
  * Resolution uses `registerServiceInfoCallback` on Android 14+ and `resolveService` before
  * (which allows only one resolution at a time, so services are resolved one after another).
  * NSD does not retry failed discoveries or resolutions itself; [HudLink] calls [restart] when
  * nothing has been found for a while.
  */
-class HudDiscovery(context: Context) {
+class HudDiscovery(context: Context, private val accept: (advertisedHudId: String?) -> Boolean = { true }) {
     private val nsd = context.getSystemService(NsdManager::class.java)
     private val executor = Executors.newSingleThreadExecutor()
     private val state = MutableStateFlow<HudEndpoint?>(null)
@@ -32,6 +37,9 @@ class HudDiscovery(context: Context) {
     private var resolving = false
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private var currentServiceName: String? = null
+
+    /** Whether the published service advertises an id (then one without cannot displace it). */
+    private var currentHasId = false
 
     val endpoint: StateFlow<HudEndpoint?> = state.asStateFlow()
 
@@ -50,6 +58,7 @@ class HudDiscovery(context: Context) {
                     synchronized(this@HudDiscovery) {
                         if (serviceInfo.serviceName == currentServiceName) {
                             currentServiceName = null
+                            currentHasId = false
                             state.value = null
                         }
                     }
@@ -98,6 +107,7 @@ class HudDiscovery(context: Context) {
         resolveQueue.clear()
         resolving = false
         currentServiceName = null
+        currentHasId = false
         state.value = null
     }
 
@@ -120,7 +130,7 @@ class HudDiscovery(context: Context) {
             next,
             object : NsdManager.ResolveListener {
                 override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                    publish(serviceInfo.serviceName, serviceInfo.host?.let(::listOf).orEmpty(), serviceInfo.port)
+                    publish(serviceInfo, serviceInfo.host?.let(::listOf).orEmpty())
                     synchronized(this@HudDiscovery) {
                         resolving = false
                         resolveNext()
@@ -150,13 +160,14 @@ class HudDiscovery(context: Context) {
                 }
 
                 override fun onServiceUpdated(serviceInfo: NsdServiceInfo) {
-                    publish(serviceInfo.serviceName, serviceInfo.hostAddresses, serviceInfo.port)
+                    publish(serviceInfo, serviceInfo.hostAddresses)
                 }
 
                 override fun onServiceLost() {
                     synchronized(this@HudDiscovery) {
                         if (service.serviceName == currentServiceName) {
                             currentServiceName = null
+                            currentHasId = false
                             state.value = null
                         }
                     }
@@ -183,13 +194,33 @@ class HudDiscovery(context: Context) {
         infoCallback = null
     }
 
-    private fun publish(serviceName: String, addresses: List<InetAddress>, port: Int) {
+    private fun publish(serviceInfo: NsdServiceInfo, addresses: List<InetAddress>) {
+        val serviceName = serviceInfo.serviceName
+        val port = serviceInfo.port
+        val advertisedId =
+            serviceInfo.attributes[TXT_ID]?.toString(Charsets.UTF_8)?.takeIf(PhoneAuth::isValidId)
+        if (!accept(advertisedId)) {
+            Log.i(TAG, "Ignoring HUD \"$serviceName\" ($advertisedId): not the paired HUD")
+            synchronized(this) {
+                if (serviceName == currentServiceName) {
+                    currentServiceName = null
+                    currentHasId = false
+                    state.value = null
+                }
+            }
+            return
+        }
         // Prefer IPv4: link-local IPv6 addresses need a scope id that URLs handle poorly.
         val address = addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull() ?: return
         val host = address.hostAddress ?: return
         if (port !in 1..65535) return
         synchronized(this) {
+            if (advertisedId == null && currentHasId && serviceName != currentServiceName) {
+                Log.i(TAG, "Keeping the HUD with an id over \"$serviceName\" (no id)")
+                return
+            }
             currentServiceName = serviceName
+            currentHasId = advertisedId != null
             state.value = HudEndpoint(host.substringBefore('%'), port)
         }
         Log.i(TAG, "Found HUD \"$serviceName\" at $host:$port")
@@ -197,5 +228,8 @@ class HudDiscovery(context: Context) {
 
     private companion object {
         const val TAG = "HudDiscovery"
+
+        /** TXT record with the HUD's id (hud-server `discovery/mdns.ts`). */
+        const val TXT_ID = "id"
     }
 }

@@ -1,5 +1,5 @@
 import { rename } from 'node:fs/promises';
-import { EMPTY_PERSISTED_STATE } from '@carheadsup/core';
+import { EMPTY_PERSISTED_STATE, parseGearAnchor } from '@carheadsup/core';
 import type { MaintenanceRecord, PersistedState, PersistedStateWithTrip } from '@carheadsup/core';
 import type { Logger } from '@carheadsup/obd';
 import { SerialQueue, isNotFound, readJsonFile, writeFileAtomic } from './atomic.ts';
@@ -50,6 +50,11 @@ export function parsePersistedState(
     errors.push('learnedGearRatios: invalid');
   }
 
+  const anchor = value['gearAnchor'];
+  const parsedAnchor = parseGearAnchor(anchor);
+  if (parsedAnchor !== null) state.gearAnchor = parsedAnchor;
+  else if (anchor !== null && anchor !== undefined) errors.push('gearAnchor: invalid');
+
   const avg = value['avgLPer100km'];
   if (finiteNonNegative(avg) && avg <= MAX_L_PER_100KM) state.avgLPer100km = avg;
   else if (avg !== null && avg !== undefined) errors.push('avgLPer100km: invalid');
@@ -82,8 +87,9 @@ function emptyState(): PersistedState {
 }
 
 /**
- * `state.json`: the odometer, learned gear ratios, long-run consumption, service records and the
- * trip in progress.
+ * `state.json`: the odometer, learned gear ratios and their numbering anchor, long-run
+ * consumption, service records (dated on the wall clock) and the trip in progress (with
+ * wall-clock times).
  *
  * Every save keeps the previous file as `state.json.bak` before the new one takes its place
  * (both steps atomic, see `writeFileAtomic`), so there is always a complete earlier copy.

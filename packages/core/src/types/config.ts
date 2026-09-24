@@ -309,6 +309,12 @@ export interface SensorsConfig {
   fallbackLocation: { lat: number; lon: number } | null;
   /** Optional ADAS module feed (newline-delimited JSON over UDP). */
   adasUdpPort: number | null;
+  /**
+   * IPv4 / IPv6 addresses the ADAS feed accepts datagrams from (compared in canonical form, see
+   * `normalizeIpAddress`; an IPv4-mapped IPv6 address equals its IPv4 address). Empty = any
+   * sender, which lets anyone on the car's network raise or hide collision warnings.
+   */
+  adasAllowedSenders: string[];
 }
 
 export interface ServerConfig {

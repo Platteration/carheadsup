@@ -3,6 +3,7 @@ package dev.carheadsup.companion.hud
 import android.os.SystemClock
 import android.util.Log
 import dev.carheadsup.companion.data.CompanionSettings
+import dev.carheadsup.protocol.HudChallenge
 import dev.carheadsup.protocol.HudCodec
 import dev.carheadsup.protocol.HudDecodeResult
 import dev.carheadsup.protocol.HudError
@@ -11,9 +12,12 @@ import dev.carheadsup.protocol.HudPong
 import dev.carheadsup.protocol.HudToPhone
 import dev.carheadsup.protocol.HudWelcome
 import dev.carheadsup.protocol.PROTOCOL_VERSION
-import dev.carheadsup.protocol.PhoneMessages
 import dev.carheadsup.protocol.PhoneToHud
 import dev.carheadsup.protocol.PhoneWire
+import dev.carheadsup.protocol.auth.HudHandshake
+import dev.carheadsup.protocol.auth.HudPin
+import dev.carheadsup.protocol.auth.PhoneAuth
+import dev.carheadsup.protocol.auth.TrustProblem
 import dev.carheadsup.protocol.link.Heartbeat
 import dev.carheadsup.protocol.link.HudEndpoint
 import dev.carheadsup.protocol.link.MessageRateLimiter
@@ -55,11 +59,17 @@ sealed interface LinkStatus {
 
     data class Connecting(val endpoint: HudEndpoint) : LinkStatus
 
+    /**
+     * The HUD proved it knows the pairing token ([authenticated]), or — without a token — is the
+     * HUD the user confirmed, which nothing proves ([authenticated] false).
+     */
     data class Connected(
         val endpoint: HudEndpoint,
         val hudName: String,
         val hudVersion: String,
         val readMessagesAloud: Boolean,
+        val hudId: String,
+        val authenticated: Boolean,
         val rttMs: Long? = null,
     ) : LinkStatus
 
@@ -73,20 +83,33 @@ sealed interface LinkStatus {
         val message: String,
         val retryAtElapsedMs: Long,
     ) : LinkStatus
+
+    /**
+     * The phone did not trust the HUD that answered and sent it nothing: a different HUD than
+     * the paired one, a HUD without pairing token the user has not confirmed, or a HUD that
+     * could not prove the token.
+     */
+    data class Untrusted(val endpoint: HudEndpoint, val problem: TrustProblem, val retryAtElapsedMs: Long) : LinkStatus
 }
 
 /**
- * The phone side of `ws://<hud>/ws/phone`:
- * - resolves the HUD (manual address or mDNS), connects over the HUD's Wi-Fi and sends `hello`
- *   with the pairing token;
- * - after `welcome`, replays the latest nav/road/hazards/media/call state from [PhoneHub] and
+ * The phone side of `ws://<hud>/ws/phone` (protocol v2):
+ * - resolves the HUD (manual address or mDNS; once paired, discovery skips HUDs advertising
+ *   another id), connects over the HUD's Wi-Fi and answers its `challenge` through
+ *   [HudHandshake]: nothing at all goes to a HUD other than the paired one, or — without a
+ *   pairing token — to a HUD the user has not confirmed ([LinkStatus.Untrusted]);
+ * - checks the proof in `welcome` before anything else: only a verified HUD is reported
+ *   [LinkStatus.Connected], gets the phone's data, and has its messages (call actions …) acted
+ *   on; the first verified HUD is pinned ([onPinned]) and its address becomes [trustedEndpoint],
+ *   the only one REST calls and the settings page may use;
+ * - after that, replays the latest nav/road/hazards/media/call state from [PhoneHub] and
  *   forwards everything published there, rate-limited per message type (nav ≤ 4 Hz, location 1 Hz);
  * - pings every 5 s and tears the socket down when the HUD stays silent for 15 s (a vanished
  *   Wi-Fi never delivers a TCP close);
- * - reconnects with exponential backoff; a refused pairing, or a session a newer one of a phone
- *   with the same name replaced (close 4000), waits the maximum delay; while another phone holds
- *   the HUD it is refused with close 1013 ("another phone is connected") and backs off as usual;
- * - hands every other HUD message to [onMessage].
+ * - reconnects with exponential backoff; a refused or untrusted pairing, or a session a newer one
+ *   of this phone replaced (close 4000), waits the maximum delay; while another phone holds the
+ *   HUD it is refused with close 1013 ("another phone is connected") and backs off as usual;
+ * - hands every other message of a verified HUD to [onMessage].
  *
  * Changing the address or pairing token restarts the connection. All work runs in [scope].
  */
@@ -98,7 +121,11 @@ class HudLink(
     private val hub: PhoneHub,
     private val settings: StateFlow<CompanionSettings>,
     private val deviceName: String,
+    /** This install's identity (`hello.deviceId`). */
+    private val deviceId: String,
     private val appVersion: String,
+    /** Store the pin of the first HUD verified with the current pairing token. */
+    private val onPinned: (HudPin) -> Unit,
     private val onConnected: suspend (HudWelcome) -> Unit,
     private val onMessage: suspend (HudToPhone) -> Unit,
 ) {
@@ -107,11 +134,19 @@ class HudLink(
     private val backoff = ReconnectBackoff(initialMs = 1_000, maxMs = 30_000)
     private var job: Job? = null
 
+    /** The paired HUD id discovery was last started for (it filters advertisements by it). */
+    private var discoveryPinnedId: String? = null
+
     val status: StateFlow<LinkStatus> = state.asStateFlow()
 
-    /** The endpoint of the current or last session, for REST calls. */
+    /**
+     * Where a HUD last proved itself (or, without a pairing token, the HUD the user confirmed)
+     * with the current connection settings: the only address REST calls and the settings page
+     * may use, since they carry the API token. Kept across disconnects (the remote buttons fall
+     * back to REST), dropped when the settings change or another HUD answers there.
+     */
     @Volatile
-    var lastEndpoint: HudEndpoint? = null
+    var trustedEndpoint: HudEndpoint? = null
         private set
 
     @Synchronized
@@ -124,6 +159,7 @@ class HudLink(
                     .distinctUntilChanged()
                     .collectLatest {
                         backoff.reset()
+                        trustedEndpoint = null
                         runLoop()
                     }
             }
@@ -145,7 +181,6 @@ class HudLink(
     private suspend fun runLoop() {
         while (currentCoroutineContext().isActive) {
             val endpoint = resolveEndpoint()
-            lastEndpoint = endpoint
             state.value = LinkStatus.Connecting(endpoint)
             val outcome =
                 try {
@@ -156,15 +191,17 @@ class HudLink(
                     Log.e(TAG, "Session crashed", e)
                     SessionOutcome.Closed("internal error: ${e.message}")
                 }
+            if (outcome is SessionOutcome.Untrusted && endpoint == trustedEndpoint) trustedEndpoint = null
             val delayMs =
                 when (outcome) {
-                    is SessionOutcome.Refused -> backoff.refusedDelayMs()
+                    is SessionOutcome.Refused, is SessionOutcome.Untrusted -> backoff.refusedDelayMs()
                     is SessionOutcome.Closed -> backoff.delayAfterClose(outcome.code)
                 }
             val retryAt = SystemClock.elapsedRealtime() + delayMs
             state.value =
                 when (outcome) {
                     is SessionOutcome.Refused -> LinkStatus.Refused(endpoint, outcome.code, outcome.message, retryAt)
+                    is SessionOutcome.Untrusted -> LinkStatus.Untrusted(endpoint, outcome.problem, retryAt)
                     is SessionOutcome.Closed -> LinkStatus.Waiting(endpoint, outcome.reason, retryAt)
                 }
             // Drain a stale wake-up, then wait for the delay or an explicit "reconnect now".
@@ -183,7 +220,15 @@ class HudLink(
             // An invalid manual address: wait for the settings to change (collectLatest restarts us).
             return settings.map { it.manualEndpoint }.filterNotNull().first()
         }
-        discovery.start()
+        // Discovery skips advertisements of other HUDs once paired, and does not report them
+        // again by itself: start afresh when the pairing changed.
+        val pinnedId = HudPin.active(current.hudPin, current.pairingToken)?.hudId
+        if (pinnedId != discoveryPinnedId) {
+            discoveryPinnedId = pinnedId
+            discovery.restart()
+        } else {
+            discovery.start()
+        }
         while (true) {
             discovery.endpoint.value?.let { return it }
             state.value = LinkStatus.Searching
@@ -207,6 +252,9 @@ class HudLink(
         data class Closed(val reason: String, val code: Int? = null) : SessionOutcome
 
         data class Refused(val code: HudErrorCode, val message: String) : SessionOutcome
+
+        /** The phone refused the HUD (see [HudHandshake]). */
+        data class Untrusted(val problem: TrustProblem) : SessionOutcome
     }
 
     private sealed interface LoopEvent {
@@ -290,11 +338,28 @@ class HudLink(
         private val limiter = MessageRateLimiter()
         private val heartbeat = Heartbeat(intervalMs = PING_INTERVAL_MS, timeoutMs = SILENCE_TIMEOUT_MS)
         private val openedAt = SystemClock.elapsedRealtime()
+        private val pairingToken = settings.value.pairingToken
+        private val handshake =
+            HudHandshake(
+                pairingToken = pairingToken,
+                deviceId = deviceId,
+                device = deviceName,
+                appVersion = appVersion,
+                pin = settings.value.hudPin,
+            )
+
+        /** Set once the HUD's `welcome` checked out; nothing is sent or acted on before. */
         private var welcome: HudWelcome? = null
         private var forwarder: Job? = null
 
         suspend fun handle(event: LoopEvent, now: Long): SessionOutcome? = when (event) {
-            LoopEvent.Opened -> sendHello()
+            // The HUD speaks first (`challenge`); a token it cannot hold can never match.
+            LoopEvent.Opened ->
+                if (PhoneAuth.isValidToken(pairingToken)) {
+                    null
+                } else {
+                    SessionOutcome.Refused(HudErrorCode.BAD_TOKEN, "pairing token is too long")
+                }
 
             is LoopEvent.Frame -> onFrame(event.text, now)
 
@@ -310,15 +375,6 @@ class HudLink(
 
         fun close() {
             forwarder?.cancel()
-        }
-
-        private fun sendHello(): SessionOutcome? {
-            val hello = PhoneMessages.hello(deviceName, appVersion, settings.value.pairingToken)
-            if (PhoneWire.encode(hello) == null) {
-                return SessionOutcome.Refused(HudErrorCode.BAD_TOKEN, "pairing token is too long")
-            }
-            sendNow(hello)
-            return null
         }
 
         private suspend fun onFrame(text: String, now: Long): SessionOutcome? {
@@ -338,16 +394,56 @@ class HudLink(
                     }
                 }
             when (message) {
-                is HudWelcome -> onWelcome(message, now)
+                is HudChallenge -> return onChallenge(message)
+
+                is HudWelcome -> return onWelcome(message, now)
+
                 is HudError -> return onError(message)
-                is HudPong -> onPong(message, now)
-                else -> onMessage(message)
+
+                else ->
+                    if (welcome == null) {
+                        // Not verified: a peer that has not proven itself is not obeyed.
+                        Log.w(TAG, "Ignoring ${message.javaClass.simpleName} from an unverified HUD")
+                    } else if (message is HudPong) {
+                        onPong(message, now)
+                    } else {
+                        onMessage(message)
+                    }
             }
             return null
         }
 
-        private suspend fun onWelcome(message: HudWelcome, now: Long) {
-            if (message.v != PROTOCOL_VERSION) Log.w(TAG, "HUD speaks v${message.v}, we speak v$PROTOCOL_VERSION")
+        private fun onChallenge(message: HudChallenge): SessionOutcome? =
+            when (val result = handshake.onChallenge(message)) {
+                is HudHandshake.ChallengeResult.SendHello -> {
+                    sendNow(result.hello)
+                    null
+                }
+
+                is HudHandshake.ChallengeResult.Refuse -> {
+                    Log.w(TAG, "Not talking to the HUD at ${endpoint.display()}: ${result.problem}")
+                    SessionOutcome.Untrusted(result.problem)
+                }
+
+                is HudHandshake.ChallengeResult.UnsupportedVersion ->
+                    SessionOutcome.Refused(
+                        HudErrorCode.UNSUPPORTED_VERSION,
+                        "the HUD speaks protocol version ${result.hudVersion}, this app $PROTOCOL_VERSION",
+                    )
+            }
+
+        private suspend fun onWelcome(message: HudWelcome, now: Long): SessionOutcome? {
+            val verified =
+                when (val result = handshake.onWelcome(message)) {
+                    is HudHandshake.WelcomeResult.Refuse -> {
+                        Log.w(TAG, "The HUD at ${endpoint.display()} failed verification: ${result.problem}")
+                        return SessionOutcome.Untrusted(result.problem)
+                    }
+
+                    is HudHandshake.WelcomeResult.Verified -> result
+                }
+            verified.newPin?.let(onPinned)
+            trustedEndpoint = endpoint
             welcome = message
             backoff.reset()
             limiter.reset()
@@ -361,9 +457,18 @@ class HudLink(
                 scope.launch(start = CoroutineStart.UNDISPATCHED) {
                     hub.outgoing.collect { events.send(LoopEvent.Outgoing(it)) }
                 }
-            state.value = LinkStatus.Connected(endpoint, message.hudName, message.hudVersion, message.readMessagesAloud)
+            state.value =
+                LinkStatus.Connected(
+                    endpoint = endpoint,
+                    hudName = message.hudName,
+                    hudVersion = message.hudVersion,
+                    readMessagesAloud = message.readMessagesAloud,
+                    hudId = verified.hudId,
+                    authenticated = verified.authenticated,
+                )
             hub.replay().forEach(::sendNow)
             onConnected(message)
+            return null
         }
 
         private fun onError(message: HudError): SessionOutcome? {

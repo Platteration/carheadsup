@@ -25,7 +25,7 @@ import { Elm327 } from '../src/elm327.ts';
 import { ObdPoller } from '../src/poller.ts';
 import { Elm327Emulator, SIM_TPMS_PIDS } from '../src/sim/elm327-emulator.ts';
 import { GEAR_COUNT, rpmPerKph } from '../src/sim/model.ts';
-import { DEMO_SCENARIO } from '../src/sim/scenario.ts';
+import { DEMO_PARKED_S, DEMO_SCENARIO } from '../src/sim/scenario.ts';
 import { VehicleSimulator } from '../src/sim/vehicle-sim.ts';
 
 const DRIVER = { timeoutMs: 80, settleMs: 5, resetTimeoutMs: 300, searchTimeoutMs: 500 } as const;
@@ -157,11 +157,7 @@ describe('ObdPoller events → reducer → composer', () => {
 // ---------------------------------------------------------------------------------------------
 
 const MODEL_RATIOS = Array.from({ length: GEAR_COUNT }, (_, i) => rpmPerKph(i + 1));
-/**
- * One loop of the demo drive. Its parked step follows the HUD's engine-off parking delay, so
- * the loop length depends on the core config; scoring over whole loops keeps the amount of
- * driving scored independent of it.
- */
+/** One loop of the demo drive (scoring over whole loops keeps the driving scored comparable). */
 const DEMO_LOOP_S = DEMO_SCENARIO.reduce((sum, step) => sum + step.durationS, 0);
 
 interface Agreement {
@@ -274,5 +270,56 @@ describe('simulator drivetrain → gear estimator', () => {
     });
     expect(agreement.scored).toBeGreaterThan(1000);
     expect(agreement.mismatches).toEqual([]);
+  });
+});
+
+describe('the demo drive through the core', () => {
+  it('loops in about 5 minutes, its parked step independent of the HUD’s parking delay', () => {
+    expect(DEMO_LOOP_S).toBeGreaterThanOrEqual(280);
+    expect(DEMO_LOOP_S).toBeLessThanOrEqual(320);
+    expect(DEMO_SCENARIO.at(-1)).toMatchObject({ name: 'parked', durationS: DEMO_PARKED_S });
+    // Far shorter than the start-stop protection: the dashboard must be asked for.
+    expect(DEMO_PARKED_S * 1000).toBeLessThan(
+      DEFAULT_CONFIG.display.context.engineOffParkedAfterMs / 2,
+    );
+  });
+
+  it('is stopped when the parked step begins, so the phone’s next-page opens the dashboard', () => {
+    const sim = new VehicleSimulator({ mode: 'scenario', engineTempC: 90 });
+    const config = DEFAULT_CONFIG;
+    const T0 = 1_700_000_000_000;
+    let state = createInitialState(config, EMPTY_PERSISTED_STATE, T0);
+    state = reduce(state, { type: 'obd/link', state: 'connected', at: T0 }, config);
+    let step = sim.status().scenarioStep;
+    const parked: Array<{ context: string; dashboard: boolean }> = [];
+    for (let i = 1; i <= DEMO_LOOP_S * 10; i++) {
+      sim.step(100);
+      const at = T0 + i * 100;
+      const snap = sim.snapshot();
+      state = reduce(
+        state,
+        {
+          type: 'obd/samples',
+          samples: [
+            { signal: 'speed', value: Math.round(snap.speedKph) },
+            { signal: 'rpm', value: snap.rpm },
+          ],
+          at,
+        },
+        config,
+      );
+      const now = sim.status().scenarioStep;
+      if (now !== step && now === 'parked') {
+        expect(state.context.context).toBe('stopped');
+        state = reduce(state, { type: 'input', action: 'next-page', at }, config);
+      }
+      step = now;
+      if (step === 'parked') {
+        const frame = composeFrame(state, config);
+        parked.push({ context: frame.context, dashboard: frame.diagnostics !== null });
+      }
+    }
+    expect(parked.length).toBeGreaterThan(DEMO_PARKED_S * 10 - 5);
+    expect(parked.every((p) => p.context === 'stopped' && p.dashboard)).toBe(true);
   });
 });

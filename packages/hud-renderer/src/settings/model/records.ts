@@ -355,11 +355,14 @@ export interface SignalAging {
 
 /**
  * Rows for the live signal table, in the canonical signal order. A value is stale when it is
- * older than its limit relative to the newest sample in the same response (the phone's clock may
- * differ from the HUD's); when, across polls (`aging`), its sample time has not moved for longer
- * than its limit — which catches a car that stopped answering altogether while the adapter link
- * still reports connected; and always while the OBD link is not connected. A frozen reading is
- * never shown as live.
+ * older than its limit on the HUD's own clock (`diagnostics.now − at`: the phone's clock may be
+ * minutes off, and this works from the very first poll — a car that stopped answering while the
+ * adapter link still reports connected shows stale at once), and always while the OBD link is not
+ * connected. A frozen reading is never shown as live.
+ *
+ * Without `now` (an older HUD) a value is stale when it is older than its limit relative to the
+ * newest sample in the same response, or when, across polls (`aging`), its sample time has not
+ * moved for longer than its limit.
  */
 export function signalRows(
   diagnostics: ApiDiagnostics,
@@ -370,6 +373,8 @@ export function signalRows(
     const sample = diagnostics.signals[id];
     return sample !== undefined && Number.isFinite(sample.value) ? [{ id, ...sample }] : [];
   });
+  const hudNow: unknown = diagnostics.now;
+  const serverNow = typeof hudNow === 'number' && Number.isFinite(hudNow) ? hudNow : null;
   const newest = entries.reduce((max, e) => Math.max(max, e.at), Number.NEGATIVE_INFINITY);
   const linkUp = diagnostics.link.state === 'connected';
   /** How long the signal's sample time has stood still, beyond one poll of slack. */
@@ -379,6 +384,8 @@ export function signalRows(
       ? 0
       : aging.now - seen.changedAt - Math.max(0, aging.poll);
   };
+  const age = (id: SignalId, at: number): number =>
+    serverNow !== null ? serverNow - at : Math.max(newest - at, frozenFor(id));
   return entries.map(({ id, value, at }) => {
     const meta = SIGNAL_META[id];
     const shown = signalInDriverUnits(meta, value, units);
@@ -391,7 +398,7 @@ export function signalRows(
       value: formatNumber(shown.value, shown.decimals),
       unit: shown.unit,
       abnormal,
-      stale: !linkUp || newest - at > staleLimitMs(id) || frozenFor(id) > staleLimitMs(id),
+      stale: !linkUp || !(age(id, at) <= staleLimitMs(id)),
     };
   });
 }

@@ -264,7 +264,16 @@ describe('phoneMessageToEvents', () => {
 
   it('produces no events for session messages', () => {
     for (const message of [
-      { t: 'hello', v: 1, device: 'Pixel', app: 'carheadsup', appVersion: '1.0', token: '' },
+      {
+        t: 'hello',
+        v: 2,
+        device: 'Pixel',
+        deviceId: '8PHy8_T19vf4-fr7_P3-_w',
+        app: 'carheadsup',
+        appVersion: '1.0',
+        nonce: 'ICEiIyQlJicoKSorLC0uLw',
+        proof: 'mm0V3w_MTQxN1Eo5QmrfJ3EpsfnnlUZYJPzZ0YPD62s',
+      },
       { t: 'ping', id: 3 },
       { t: 'trips-request', since: 0 },
     ]) {

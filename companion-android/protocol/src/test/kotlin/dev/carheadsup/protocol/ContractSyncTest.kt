@@ -1,8 +1,14 @@
 package dev.carheadsup.protocol
 
+import dev.carheadsup.protocol.auth.AuthVector
+import dev.carheadsup.protocol.auth.PhoneAuth
+import dev.carheadsup.protocol.auth.SHARED_AUTH_VECTORS
 import dev.carheadsup.protocol.link.PhoneCloseCode
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.descriptors.elementNames
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
@@ -132,12 +138,48 @@ class ContractSyncTest {
         assertEquals(limit("id"), WireLimits.ID)
         assertEquals(limit("trackKey"), WireLimits.TRACK_KEY)
         assertEquals(limit("text"), WireLimits.TEXT)
-        assertEquals(limit("token"), WireLimits.TOKEN)
         assertEquals(limit("version"), WireLimits.VERSION)
         assertEquals(limit("phoneNumber"), WireLimits.PHONE_NUMBER)
         assertEquals(limit("iconPngBase64"), WireLimits.ICON_PNG_BASE64)
         assertEquals(limit("lanes"), WireLimits.LANES)
         assertEquals(limit("laneDirections"), WireLimits.LANE_DIRECTIONS)
         assertEquals(limit("hazards"), WireLimits.HAZARDS)
+    }
+
+    @Test
+    fun `authentication constants match phone-auth_ts and the config schema`() {
+        val auth = source("packages/core/src/protocol/phone-auth.ts")
+        fun constant(key: String): String =
+            Regex("\\b$key: '?([^',]+)'?,").find(auth.substringAfter("export const PHONE_AUTH"))!!.groupValues[1]
+        assertEquals(constant("phoneContext"), PhoneAuth.PHONE_CONTEXT)
+        assertEquals(constant("hudContext"), PhoneAuth.HUD_CONTEXT)
+        assertEquals(constant("idChars").toInt(), PhoneAuth.ID_CHARS)
+        assertEquals(constant("proofChars").toInt(), PhoneAuth.PROOF_CHARS)
+        val schema = source("packages/core/src/config/schema.ts")
+        val maxToken = Regex("pairingToken: text\\(0, (\\d+)\\)").find(schema)!!.groupValues[1].toInt()
+        assertEquals(maxToken, PhoneAuth.MAX_TOKEN_CHARS)
+    }
+
+    @Test
+    fun `the copied authentication vectors are the ones the HUD asserts`() {
+        val file = ProtocolJson.parseToJsonElement(source("packages/core/test/protocol/phone-auth-vectors.json"))
+        val vectors =
+            file.jsonObject.getValue("vectors").jsonArray.map { element ->
+                val v = element.jsonObject
+                fun field(name: String): String = v.getValue(name).jsonPrimitive.content
+                AuthVector(
+                    name = field("name"),
+                    pairingToken = field("pairingToken"),
+                    hudId = field("hudId"),
+                    hudNonce = field("hudNonce"),
+                    phoneNonce = field("phoneNonce"),
+                    deviceId = field("deviceId"),
+                    phoneMessage = field("phoneMessage"),
+                    hudMessage = field("hudMessage"),
+                    phoneProof = field("phoneProof"),
+                    hudProof = field("hudProof"),
+                )
+            }
+        assertEquals(vectors, SHARED_AUTH_VECTORS)
     }
 }

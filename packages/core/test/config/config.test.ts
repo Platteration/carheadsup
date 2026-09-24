@@ -161,6 +161,7 @@ describe('DEFAULT_CONFIG', () => {
       buttons: { primary: null, secondary: null, next: null },
       fallbackLocation: null,
       adasUdpPort: null,
+      adasAllowedSenders: [],
     });
     expect(c.server).toEqual({
       port: 8080,
@@ -261,6 +262,26 @@ describe('parseConfig', () => {
     ],
     ['sensors.adasUdpPort', 70000, 'sensors.adasUdpPort: expected number <= 65535'],
     [
+      'sensors.adasAllowedSenders',
+      '10.42.0.50',
+      'sensors.adasAllowedSenders: expected array, got string',
+    ],
+    [
+      'sensors.adasAllowedSenders',
+      ['10.42.0.50', 'adas.local'],
+      'sensors.adasAllowedSenders[1]: expected an IPv4 or IPv6 address such as 10.42.0.50',
+    ],
+    [
+      'sensors.adasAllowedSenders',
+      ['10.42.0.50', '::ffff:10.42.0.50'],
+      'sensors.adasAllowedSenders[1]: duplicate address "10.42.0.50"',
+    ],
+    [
+      'sensors.adasAllowedSenders',
+      Array.from({ length: 33 }, (_, i) => `10.42.0.${i + 1}`),
+      'sensors.adasAllowedSenders: expected at most 32 items',
+    ],
+    [
       'display.projection.corners.tl',
       [0],
       'display.projection.corners.tl: expected at least 2 items',
@@ -314,6 +335,33 @@ describe('parseConfig', () => {
     expect(config.display.brightness.riseTimeMs).toBe(5000);
     expect(config.vehicle.name).toBe('Civic');
     expect(config.vehicle.redlineRpm).toBe(6500);
+  });
+
+  it('accepts IPv4 and IPv6 ADAS senders as written', () => {
+    const senders = ['10.42.0.50', '::ffff:10.42.0.51', '2001:DB8::1', 'fe80::1'];
+    const { config, errors } = parseConfig({ sensors: { adasAllowedSenders: senders } });
+    expect(errors).toEqual([]);
+    expect(config.sensors.adasAllowedSenders).toEqual(senders);
+    expect(hudConfigSchema.safeParse(config).success).toBe(true);
+  });
+
+  it.each([
+    ['a host name', 'adas.local'],
+    ['a prefix', '10.42.0.0/24'],
+    ['a port', '10.42.0.50:5005'],
+    ['surrounding spaces', ' 10.42.0.50'],
+    ['a zone index', 'fe80::1%wlan0'],
+    ['an empty entry', ''],
+  ])('rejects an ADAS sender with %s', (_label, entry) => {
+    const { config, errors } = mergeConfig(
+      { ...defaults(), sensors: { ...defaults().sensors, adasAllowedSenders: ['10.42.0.9'] } },
+      { sensors: { adasAllowedSenders: ['10.42.0.50', entry] } },
+    );
+    expect(errors).toEqual([
+      'sensors.adasAllowedSenders[1]: expected an IPv4 or IPv6 address such as 10.42.0.50',
+    ]);
+    // The previous list stays in force.
+    expect(config.sensors.adasAllowedSenders).toEqual(['10.42.0.9']);
   });
 
   it('replaces a broken array wholesale instead of keeping half of it', () => {

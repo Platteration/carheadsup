@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { TripConfig } from '../../src/types/config.ts';
 import {
   createTripState,
+  reconcileResumedTrip,
   restoreActiveTrip,
   resumeTripState,
+  shiftActiveTrip,
   tripId,
   updateTrip,
   type TripInput,
@@ -398,17 +400,18 @@ describe('trips across a restart', () => {
   it('round-trips a trip in progress through JSON', () => {
     const active = drive().active;
     expect(active).not.toBeNull();
-    const restored = restoreActiveTrip(JSON.parse(JSON.stringify(active)), T0 + 3_600_000);
+    const restored = restoreActiveTrip(JSON.parse(JSON.stringify(active)));
     expect(restored).toEqual(active);
     expect(restored).not.toBe(active);
   });
 
   it('completes the resumed trip on the first update after a long power-down', () => {
     const before = drive();
-    const active = restoreActiveTrip(JSON.parse(JSON.stringify(before.active)), T0 + 7_200_000);
+    const active = restoreActiveTrip(JSON.parse(JSON.stringify(before.active)));
     if (active === null) throw new Error('not restored');
-    const resumed = resumeTripState(active, PRICING);
+    const resumed = resumeTripState(active, PRICING, T0 + 7_200_000);
     expect(resumed.current).toEqual(before.current);
+    expect(resumed.endPending).toBe(false);
     const after = updateTrip(resumed, input(T0 + 7_200_000, { linkUp: false }), CONFIG, PRICING);
     expect(after.active).toBeNull();
     expect(after.completedCount).toBe(1);
@@ -421,9 +424,9 @@ describe('trips across a restart', () => {
 
   it('continues the same trip after a short power blip', () => {
     const before = drive();
-    const active = restoreActiveTrip(before.active, T0 + 700_000);
+    const active = restoreActiveTrip(before.active);
     if (active === null) throw new Error('not restored');
-    const after = feed(resumeTripState(active, PRICING), [
+    const after = feed(resumeTripState(active, PRICING, T0 + 700_000), [
       ...seconds(T0 + 700_000, 60, () => ({ speedKph: 60, odometerKm: 910 })),
       ...parked(T0 + 761_000, 400_000),
     ]);
@@ -439,7 +442,7 @@ describe('trips across a restart', () => {
     ['a negative distance', { distanceKm: -1 }],
     ['a NaN duration', { movingMs: Number.NaN }],
     ['activity before the start', { lastActivityAt: T0 - 1 }],
-    ['a sample after start-up', { last: { at: T0 + 10_000_000 } }],
+    ['a last sample before the last activity', { last: { at: T0 } }],
     ['a broken odometer', { odometer: { firstKm: 1 } }],
     ['a non-boolean flag', { fuelKnown: 'yes' }],
   ])('rejects %s', (_, patch) => {
@@ -452,6 +455,159 @@ describe('trips across a restart', () => {
             ...patch,
             last: { ...active?.last, ...(patch as { last?: object }).last },
           };
-    expect(restoreActiveTrip(value, T0 + 3_600_000)).toBeNull();
+    expect(restoreActiveTrip(value)).toBeNull();
+  });
+
+  it('completes, rather than drops or continues, a trip saved "in the future" of the start-up', () => {
+    // An unclean power cut on a Pi without a real-time clock: it boots with an older time than
+    // the one the trip was saved with, so how long the car was off is unknown.
+    const before = drive();
+    const active = restoreActiveTrip(JSON.parse(JSON.stringify(before.active)));
+    if (active === null) throw new Error('not restored');
+    const boot = T0 + 300_000; // before the trip's last sample (T0 + 621 s)
+    const resumed = resumeTripState(active, PRICING, boot);
+    expect(resumed.endPending).toBe(true);
+    expect(resumed.current).toEqual(before.current);
+    // Even a sample of the next drive right away: the old trip ends first, a new one starts.
+    const after = updateTrip(resumed, input(boot + 1000, { speedKph: 30 }), CONFIG, PRICING);
+    expect(after.completedCount).toBe(1);
+    expect(after.endPending).toBe(false);
+    expect(after.lastCompleted).toMatchObject({
+      id: tripId(T0),
+      startedAt: T0,
+      endedAt: T0 + 600_000,
+      distanceKm: expect.closeTo(9.93, 2) as unknown,
+    });
+    expect(after.active?.startedAt).toBe(boot + 1000);
+  });
+
+  describe('network time after a resumed trip (a start-up clock that was behind)', () => {
+    const DAY = 24 * 3_600_000;
+
+    /** Resumed 81 s after the last activity by the start-up clock, then 2 minutes of driving. */
+    function resumedAndDriving(): { state: TripState; boot: number } {
+      const active = restoreActiveTrip(JSON.parse(JSON.stringify(drive().active)));
+      if (active === null) throw new Error('not restored');
+      const boot = T0 + 681_000;
+      const state = feed(resumeTripState(active, PRICING, boot), [
+        ...parked(boot, 10_000, { linkUp: false }),
+        ...seconds(boot + 20_000, 120, () => ({ speedKph: 60, fuelRateLph: 4, odometerKm: 911 })),
+      ]);
+      expect(state.completedCount).toBe(0);
+      expect(state.current?.distanceKm).toBeCloseTo(11.93, 1);
+      expect(state.resumed?.sinceResume?.startedAt).toBe(boot + 20_000);
+      return { state, boot };
+    }
+
+    it('completes the trip from before the restart, with its saved times, and goes on with the rest', () => {
+      const { state, boot } = resumedAndDriving();
+      const split = reconcileResumedTrip(state, DAY, CONFIG, PRICING);
+      expect(split.completedCount).toBe(1);
+      expect(split.lastCompleted).toMatchObject({
+        id: tripId(T0),
+        startedAt: T0,
+        endedAt: T0 + 600_000,
+        distanceKm: expect.closeTo(9.93, 2) as unknown,
+        startOdometerKm: 900,
+      });
+      expect(split.resumed).toBeNull();
+      expect(split.active).toMatchObject({
+        startedAt: boot + 20_000,
+        distanceKm: expect.closeTo(2, 1) as unknown,
+      });
+      expect(split.current).toMatchObject({
+        startedAt: boot + 20_000 + DAY,
+        distanceKm: expect.closeTo(2, 1) as unknown,
+      });
+      // The new trip goes on and ends on its own, with wall-clock times.
+      const ended = feed(split, [
+        ...seconds(boot + 141_000, 10, () => ({ speedKph: 60, wallOffsetMs: DAY })),
+        ...parked(boot + 152_000, 300_000, { wallOffsetMs: DAY }),
+      ]);
+      expect(ended.completedCount).toBe(2);
+      expect(ended.lastCompleted).toMatchObject({
+        id: tripId(boot + 20_000 + DAY),
+        startedAt: boot + 20_000 + DAY,
+        endedAt: boot + 151_000 + DAY,
+        distanceKm: expect.closeTo(2.17, 1) as unknown,
+      });
+    });
+
+    it('splits before any driving since the start-up too', () => {
+      const active = restoreActiveTrip(JSON.parse(JSON.stringify(drive().active)));
+      if (active === null) throw new Error('not restored');
+      const resumed = resumeTripState(active, PRICING, T0 + 681_000);
+      const split = reconcileResumedTrip(resumed, 3_600_000, CONFIG, PRICING);
+      expect(split.completedCount).toBe(1);
+      expect(split.lastCompleted?.id).toBe(tripId(T0));
+      expect(split.active).toBeNull();
+      expect(split.current).toBeNull();
+    });
+
+    it('keeps the trip together when the break was short after all, or the clock was ahead', () => {
+      const { state } = resumedAndDriving();
+      // 81 s + 2 min is still shorter than the 5 minutes that end a trip.
+      expect(reconcileResumedTrip(state, 120_000, CONFIG, PRICING)).toBe(state);
+      expect(reconcileResumedTrip(state, -3_600_000, CONFIG, PRICING)).toBe(state);
+      expect(reconcileResumedTrip(state, Number.NaN, CONFIG, PRICING)).toBe(state);
+    });
+
+    it('forgets where the trip was resumed once it ends', () => {
+      const { state, boot } = resumedAndDriving();
+      const ended = feed(state, parked(boot + 141_000, 300_000));
+      expect(ended.completedCount).toBe(1);
+      expect(ended.resumed).toBeNull();
+      expect(reconcileResumedTrip(ended, DAY, CONFIG, PRICING)).toBe(ended);
+    });
+
+    it('does not keep one for a trip that is completed at once', () => {
+      const active = restoreActiveTrip(JSON.parse(JSON.stringify(drive().active)));
+      if (active === null) throw new Error('not restored');
+      expect(resumeTripState(active, PRICING, T0 + 300_000).resumed).toBeNull();
+      expect(createTripState().resumed).toBeNull();
+    });
+  });
+
+  it('shifts every time of a trip by an offset, and back', () => {
+    const active = drive().active;
+    if (active === null) throw new Error('no trip');
+    const shifted = shiftActiveTrip(active, 5000);
+    expect(shifted).toMatchObject({
+      startedAt: active.startedAt + 5000,
+      lastActivityAt: active.lastActivityAt + 5000,
+      last: { at: active.last.at + 5000 },
+      distanceKm: active.distanceKm,
+    });
+    expect(shiftActiveTrip(shifted, -5000)).toEqual(active);
+    expect(shiftActiveTrip(active, 0)).toBe(active);
+  });
+});
+
+describe('trip times and the wall clock', () => {
+  const HOUR = 3_600_000;
+
+  it('measures durations in engine time and stamps records with wall-clock times', () => {
+    // Engine time starts at T0; network time then shows the wall clock was 3 hours behind.
+    let s = feed(
+      createTripState(),
+      seconds(T0, 300, (i) => ({ speedKph: i < 5 ? 0 : 50, fuelRateLph: 3, odometerKm: 500 })),
+    );
+    expect(s.current?.startedAt).toBe(T0);
+    const offset = 3 * HOUR;
+    s = feed(
+      s,
+      seconds(T0 + 301_000, 300, () => ({ speedKph: 50, fuelRateLph: 3, wallOffsetMs: offset })),
+    );
+    // The trip goes on, not split by the step, its start moved to the corrected wall clock.
+    expect(s.completedCount).toBe(0);
+    expect(s.current).toMatchObject({ startedAt: T0 + offset, durationS: 601 });
+    s = feed(s, parked(T0 + 602_000, 300_000, { wallOffsetMs: offset }));
+    expect(s.completedCount).toBe(1);
+    expect(s.lastCompleted).toMatchObject({
+      id: tripId(T0 + offset),
+      startedAt: T0 + offset,
+      endedAt: T0 + 601_000 + offset,
+      durationS: 601,
+    });
   });
 });

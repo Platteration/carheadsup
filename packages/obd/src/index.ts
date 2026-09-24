@@ -80,7 +80,7 @@ export {
   type VehicleSnapshot,
 } from './sim/vehicle-sim.ts';
 export {
-  DEMO_PARKED_DASHBOARD_S,
+  DEMO_PARKED_S,
   DEMO_SCENARIO,
   SpeedController,
   type ScenarioStep,

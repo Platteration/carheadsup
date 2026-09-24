@@ -1,5 +1,5 @@
 import { parsePhoneMessage, type HudEvent, type PhoneToHud } from '@carheadsup/core';
-import { DEMO_SCENARIO, VehicleSimulator } from '@carheadsup/obd';
+import { DEMO_PARKED_S, DEMO_SCENARIO, VehicleSimulator } from '@carheadsup/obd';
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   ARRIVED_END_MS,
@@ -10,6 +10,7 @@ import {
   ROAD_REFRESH_MS,
   SCENARIO_CALLER,
   SIM_PHONE_DEVICE,
+  SIM_PHONE_DEVICE_ID,
   SimPhone,
   TRACK_CHANGE_MS,
 } from '../../src/sim/phone.ts';
@@ -87,6 +88,7 @@ describe('SimPhone over one demo loop', () => {
       type: 'phone/link',
       connected: true,
       deviceName: SIM_PHONE_DEVICE,
+      deviceId: SIM_PHONE_DEVICE_ID,
     });
     // Every message went through the translator, whose events were emitted.
     expect(h.events.filter((e: HudEvent) => e.type === 'tick')).toHaveLength(h.sent.length);
@@ -189,14 +191,24 @@ describe('SimPhone over one demo loop', () => {
     expect(roads.at(-1)).toMatchObject({ step: 'warm-up', name: 'Maple Street' }); // the loop restarts
   });
 
+  it('presses the remote’s next-page button once the car stands parked, opening the dashboard', () => {
+    const inputs = h.of('input');
+    expect(inputs.map((s) => [s.step, s.message.action])).toEqual([['parked', 'next-page']]);
+    // As the step begins: the whole parked step shows the dashboard.
+    const parkedAt = h.sent.find((s) => s.step === 'parked')?.at;
+    expect(inputs[0]!.at).toBe(parkedAt);
+  });
+
   it('re-sends the road at least every 30 s, so the HUD never drops a valid limit', () => {
     const times = h.of('road').map((s) => s.at);
     for (let i = 1; i < times.length; i += 1) {
       expect(times[i]! - times[i - 1]!).toBeLessThanOrEqual(ROAD_REFRESH_MS + NAV_UPDATE_MS);
     }
-    // Also standing still at the end of the loop, for more than the HUD's 75 s road lifetime.
+    // Also while standing still at the end of the loop (the HUD drops a road after 75 s).
     const parked = h.of('road').filter((s) => s.step === 'parked');
-    expect(parked.length).toBeGreaterThanOrEqual(5);
+    expect(parked.length).toBeGreaterThanOrEqual(
+      1 + Math.floor((DEMO_PARKED_S * 1000) / ROAD_REFRESH_MS),
+    );
   });
 
   it('reports the speed camera on the highway and clears it once passed', () => {

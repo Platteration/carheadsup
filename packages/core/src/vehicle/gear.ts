@@ -3,6 +3,8 @@ import {
   GEAR_RATIO_TOLERANCE,
   LAUNCH_HINT_KPH,
   LEARN_ANALYSE_EVERY,
+  LEARN_MAX_RATIO,
+  LEARN_MIN_RATIO,
   UPSHIFT_HINT_KPH,
   createGearLearner,
   findGearClusters,
@@ -52,6 +54,18 @@ export interface PendingGearChange {
 }
 
 /**
+ * What numbers the learned ratios across restarts. On an automatic that is the 2nd-gear ratio
+ * seen after the first upshift from a standstill (`secondGearHint`), which a session otherwise
+ * has to observe (twice) before it can show any learned gear. Persisted with the transmission it
+ * was learned on (`PersistedState.gearAnchor`).
+ */
+export interface GearAnchor {
+  transmission: TransmissionType;
+  /** rpm per km/h. */
+  secondGearRpmPerKph: number;
+}
+
+/**
  * Gear estimator state. Implementations add private learner fields; `estimate` and
  * `learnedRatios` are the public surface.
  */
@@ -59,6 +73,11 @@ export interface GearState {
   estimate: GearEstimate;
   /** Learned overall ratios, rpm per km/h, 1st gear first; null until learned with confidence. */
   learnedRatios: number[] | null;
+  /**
+   * Numbering anchor of the learned ratios: restored at start-up, then kept up to date with this
+   * session's upshifts (automatics). Null without learned ratios.
+   */
+  anchor: GearAnchor | null;
   /** Inferred change not yet confirmed; the previous estimate is still displayed. */
   pending: PendingGearChange | null;
   /** Recent valid samples [at, km/h, rpm], oldest first, for the decoupling test. */
@@ -111,14 +130,63 @@ const MAX_HOLD_MS = 1000;
 
 const UNKNOWN: GearEstimate = { gear: null, inferred: false, confidence: 0 };
 
-export function createGearState(learnedRatios: number[] | null): GearState {
+const TRANSMISSIONS: readonly TransmissionType[] = ['manual', 'automatic', 'dct', 'cvt'];
+
+/** A gear anchor read back from disk, validated (a fresh copy), or null. */
+export function parseGearAnchor(value: unknown): GearAnchor | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const { transmission, secondGearRpmPerKph: ratio } = value as Record<string, unknown>;
+  if (!TRANSMISSIONS.includes(transmission as TransmissionType)) return null;
+  if (typeof ratio !== 'number' || !(ratio >= LEARN_MIN_RATIO && ratio <= LEARN_MAX_RATIO)) {
+    return null;
+  }
+  return { transmission: transmission as TransmissionType, secondGearRpmPerKph: ratio };
+}
+
+/**
+ * Initial gear state from persisted learned ratios and their numbering anchor. The anchor is
+ * kept only together with ratios and, when `transmission` is given, only if it was learned on
+ * that transmission.
+ */
+export function createGearState(
+  learnedRatios: number[] | null,
+  anchor: unknown = null,
+  transmission?: TransmissionType,
+): GearState {
+  const ratios = normaliseLearnedRatios(learnedRatios);
+  const parsed = ratios === null ? null : parseGearAnchor(anchor);
   return {
     estimate: UNKNOWN,
-    learnedRatios: normaliseLearnedRatios(learnedRatios),
+    learnedRatios: ratios,
+    anchor:
+      parsed !== null && (transmission === undefined || parsed.transmission === transmission)
+        ? parsed
+        : null,
     pending: null,
     recent: [],
     learner: createGearLearner(),
   };
+}
+
+/**
+ * The anchor after this session's observations: an automatic's 2nd-gear hint, once there is one
+ * (rounded like learned ratios; the same object while unchanged). Without learned ratios there
+ * is nothing to anchor.
+ */
+function updateAnchor(
+  anchor: GearAnchor | null,
+  learnedRatios: readonly number[] | null,
+  learner: GearLearnerState,
+  transmission: TransmissionType,
+): GearAnchor | null {
+  if (learnedRatios === null) return null;
+  if (transmission !== 'automatic') return anchor;
+  const hint = secondGearHint(learner);
+  if (hint === null) return anchor;
+  const secondGearRpmPerKph = Math.round(hint * 100) / 100;
+  return anchor?.transmission === transmission && anchor.secondGearRpmPerKph === secondGearRpmPerKph
+    ? anchor
+    : { transmission, secondGearRpmPerKph };
 }
 
 /**
@@ -142,7 +210,7 @@ export function updateGear(state: GearState, input: GearInput, vehicle: VehicleC
       : { ...state, estimate: UNKNOWN, pending: null, recent: [] };
   }
 
-  let { learner, learnedRatios } = state;
+  let { learner, learnedRatios, anchor } = state;
   if (vehicle.gearRatiosRpmPerKph === null) {
     learner = observeGearSample(learner, input, vehicle);
     if (learner.sinceAnalysis >= LEARN_ANALYSE_EVERY && learner.histogram) {
@@ -160,6 +228,7 @@ export function updateGear(state: GearState, input: GearInput, vehicle: VehicleC
       }
       learner = { ...learner, sinceAnalysis: 0 };
     }
+    anchor = updateAnchor(anchor, learnedRatios, learner, vehicle.transmission);
   }
 
   const recent = updateRecent(state.recent, input);
@@ -171,7 +240,7 @@ export function updateGear(state: GearState, input: GearInput, vehicle: VehicleC
       ? { firstGear: 1, proven: configured.length }
       : learnedRatios === null
         ? UNPROVEN
-        : learnedNumbering(learnedRatios, vehicle.transmission, learner);
+        : learnedNumbering(learnedRatios, vehicle.transmission, learner, anchor);
   const raw: GearEstimate =
     reported !== null
       ? { gear: reported, inferred: false, confidence: 1 }
@@ -179,7 +248,7 @@ export function updateGear(state: GearState, input: GearInput, vehicle: VehicleC
 
   const neutral = neutralEstimate(vehicle.transmission, configured === null);
   const { estimate, pending } = debounce(state, raw, input.at, vehicle.transmission, neutral);
-  return { estimate, learnedRatios, pending, recent, learner };
+  return { estimate, learnedRatios, anchor, pending, recent, learner };
 }
 
 function validSample(input: GearInput): input is GearInput & { speedKph: number; rpm: number } {
@@ -280,16 +349,18 @@ export function gaplessPrefix(ratios: readonly number[]): number {
  *  - automatic: the ratio after the first upshift is 2nd gear. It matches the highest learned
  *    ratio (1st, which the torque converter's slip keeps out of the histogram, is missing: number
  *    from 2) or the second highest (number from 1). Anything else — including no upshift seen
- *    yet — proves nothing, and no inferred number is shown.
+ *    yet, this session or (`anchor`) before — proves nothing, and no inferred number is shown.
  */
 export function learnedNumbering(
   ratios: readonly number[],
   transmission: TransmissionType,
   learner: GearLearnerState,
+  anchor: GearAnchor | null = null,
 ): GearNumbering {
   let firstGear = 1;
   if (transmission === 'automatic') {
-    const second = secondGearHint(learner);
+    const persisted = anchor?.transmission === transmission ? anchor.secondGearRpmPerKph : null;
+    const second = secondGearHint(learner) ?? persisted;
     const match =
       second === null ? null : matchGearRatio(second, UPSHIFT_HINT_KPH, ratios, transmission);
     if (match === null || match.index > 1) return UNPROVEN;

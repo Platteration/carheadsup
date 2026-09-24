@@ -1,3 +1,4 @@
+import type { CollisionLevel } from '../types/adas.ts';
 import type { HudConfig } from '../types/config.ts';
 import type { CallInfo, CallState, MessageInfo } from '../types/phone.ts';
 import type { SignalId } from '../types/signals.ts';
@@ -14,6 +15,11 @@ import { freshValue } from '../staleness.ts';
 export const ENGINE_RUNNING_RPM = 300;
 /** ADAS readings (blind spot, collision) older than this are ignored. */
 export const ADAS_FRESH_MS = 1000;
+/**
+ * A forward-collision 'warning' stays up at least this long after the module last reported it,
+ * so a warning that flickers with the module's reports (warning, caution, warning …) holds.
+ */
+export const COLLISION_WARNING_HOLD_MS = 1000;
 /** A light-sensor reading older than this no longer drives brightness. */
 export const LUX_FRESH_MS = 5000;
 /** Message notifications are forgotten this long after receipt. */
@@ -38,6 +44,19 @@ export const ROAD_TTL_MS = 75_000;
 export const MAINTENANCE_RECHECK_MS = 60_000;
 /** Speed samples further apart than this are not integrated across (odometer). */
 export const ODOMETER_MAX_GAP_MS = 5000;
+
+/**
+ * The wall-clock time (epoch ms) of an engine time. Engine time — `state.now` and every stamp in
+ * `HudState` — is monotonic and never steps; the wall clock can (see `ClockState`).
+ */
+export function toWallTime(state: HudState, engineMs: number): number {
+  return engineMs + state.clock.wallOffsetMs;
+}
+
+/** The wall-clock time (epoch ms) at `state.now`: for the clock, the sun and calendar dates. */
+export function wallNow(state: HudState): number {
+  return toWallTime(state, state.now);
+}
 
 /** Fresh value of a vehicle signal at `state.now`, or null when missing or stale. */
 export function freshSignal(state: HudState, signal: SignalId): number | null {
@@ -108,6 +127,29 @@ export function isAdasFresh(state: HudState, updatedAt: number | null): boolean 
     state.now - updatedAt >= 0 &&
     state.now - updatedAt <= ADAS_FRESH_MS
   );
+}
+
+/**
+ * The forward-collision level to show: 'warning' for {@link COLLISION_WARNING_HOLD_MS} after the
+ * module last reported one (whatever it reports meanwhile, even after disconnecting); otherwise
+ * the module's fresh reading (see `isAdasFresh`), else 'none'.
+ */
+export function collisionLevel(state: HudState): CollisionLevel {
+  const { adas, now } = state;
+  const warnedAt = adas.collisionWarningAt;
+  if (warnedAt !== null && now - warnedAt >= 0 && now - warnedAt <= COLLISION_WARNING_HOLD_MS) {
+    return 'warning';
+  }
+  return isAdasFresh(state, adas.collisionUpdatedAt) ? adas.collision : 'none';
+}
+
+/**
+ * Whether the full-screen diagnostics dashboard is up: always when parked, and when stopped once
+ * the driver asked for it (`UiState.dashboardRequested`). Never while moving.
+ */
+export function isDashboardShown(state: HudState): boolean {
+  const { context } = state.context;
+  return context === 'parked' || (context === 'stopped' && state.ui.dashboardRequested);
 }
 
 /** Call states that put a call card on screen (plus 'ended', briefly). */

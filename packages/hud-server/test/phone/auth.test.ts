@@ -1,0 +1,45 @@
+import { isAuthId } from '@carheadsup/core';
+import { describe, expect, it } from 'vitest';
+import shared from '../../../core/test/protocol/phone-auth-vectors.json' with { type: 'json' };
+import { hudProof, phoneProof, proofsEqual, randomAuthId } from '../../src/phone/auth.ts';
+
+describe('phone link proofs', () => {
+  it.each(shared.vectors.map((v) => [v.name, v] as const))(
+    'match the shared vector "%s" (also asserted by the companion app)',
+    (_name, vector) => {
+      expect(phoneProof(vector.pairingToken, vector)).toBe(vector.phoneProof);
+      expect(hudProof(vector.pairingToken, vector)).toBe(vector.hudProof);
+    },
+  );
+
+  it('depend on the token, both nonces and the device', () => {
+    const [vector] = shared.vectors;
+    if (vector === undefined) throw new Error('no vectors');
+    const base = phoneProof(vector.pairingToken, vector);
+    expect(phoneProof(`${vector.pairingToken}x`, vector)).not.toBe(base);
+    expect(phoneProof(vector.pairingToken, { ...vector, hudNonce: vector.phoneNonce })).not.toBe(
+      base,
+    );
+    expect(phoneProof(vector.pairingToken, { ...vector, phoneNonce: vector.hudNonce })).not.toBe(
+      base,
+    );
+    expect(phoneProof(vector.pairingToken, { ...vector, deviceId: vector.hudId })).not.toBe(base);
+    // A phone's proof is never the HUD's (the contexts differ), even with the nonces swapped.
+    const swapped = { ...vector, hudNonce: vector.phoneNonce, phoneNonce: vector.hudNonce };
+    expect(hudProof(vector.pairingToken, swapped)).not.toBe(base);
+  });
+
+  it('compares proofs exactly', () => {
+    const proof = shared.vectors[0]!.phoneProof;
+    expect(proofsEqual(proof, proof)).toBe(true);
+    expect(proofsEqual(proof, `${proof.slice(0, -1)}A`)).toBe(proof.endsWith('A'));
+    expect(proofsEqual(proof, proof.slice(0, -1))).toBe(false);
+    expect(proofsEqual(proof, '')).toBe(false);
+  });
+
+  it('makes random 22-character ids', () => {
+    const ids = new Set(Array.from({ length: 50 }, () => randomAuthId()));
+    expect(ids.size).toBe(50);
+    for (const id of ids) expect(isAuthId(id)).toBe(true);
+  });
+});

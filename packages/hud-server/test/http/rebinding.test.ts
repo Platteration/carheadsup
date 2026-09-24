@@ -1,8 +1,7 @@
 import { request } from 'node:http';
 import { hostname } from 'node:os';
-import { PROTOCOL_VERSION } from '@carheadsup/core';
 import { afterEach, describe, expect, it } from 'vitest';
-import { TestSocket, startTestServer } from '../helpers.ts';
+import { TestSocket, answerChallenge, startTestServer } from '../helpers.ts';
 import type { TestServer } from '../helpers.ts';
 
 /** DNS rebinding: a page on http://evil.example:<port> whose name now resolves to the HUD. */
@@ -98,14 +97,7 @@ describe('Host validation (DNS rebinding)', () => {
     });
     sockets.push(phone);
     await phone.opened;
-    phone.send({
-      t: 'hello',
-      v: PROTOCOL_VERSION,
-      device: 'Pixel',
-      app: 'carheadsup',
-      appVersion: '1',
-      token: '',
-    });
+    phone.send(answerChallenge(await phone.nextOfType('challenge'), { device: 'Pixel' }));
     expect(await phone.nextOfType('welcome')).toMatchObject({ t: 'welcome' });
   });
 

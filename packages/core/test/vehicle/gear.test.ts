@@ -591,6 +591,53 @@ describe('gear numbering of learned ratios (regression: core-3)', () => {
     expect(new Set(gears(estimates))).toEqual(new Set([null]));
   });
 
+  it('numbers an automatic right away from a persisted anchor', () => {
+    const anchor = { transmission: 'automatic' as const, secondGearRpmPerKph: 73.2 };
+    const state = createGearState([72, 48, 35.5, 28, 23], anchor, 'automatic');
+    expect(state.anchor).toEqual(anchor);
+    const { estimates } = run(steady(T0, 20, 100, 50, 35.5), AUTO_LEARNING, state);
+    expect(gears(estimates).at(-1)).toBe(4);
+    // An anchor matching the second-highest ratio numbers the ladder from 1st.
+    const fromFirst = createGearState([118, 72, 48, 35.5, 28, 23], anchor, 'automatic');
+    expect(
+      gears(run(steady(T0, 20, 100, 50, 35.5), AUTO_LEARNING, fromFirst).estimates).at(-1),
+    ).toBe(4);
+  });
+
+  it('learns the anchor from this session’s upshifts, for the next start', () => {
+    const drive = autoCityDrive(new Drive({ ratios: SIX_SPEED, seed: 5, converterSlip: slip }), 6);
+    const { state } = runDrive(drive, AUTO_LEARNING);
+    expect(state.learnedRatios).not.toBeNull();
+    expect(state.anchor?.transmission).toBe('automatic');
+    // 2nd gear (68 rpm per km/h) plus some converter slip.
+    expect(state.anchor?.secondGearRpmPerKph).toBeGreaterThan(66);
+    expect(state.anchor?.secondGearRpmPerKph).toBeLessThan(76);
+    // A manual never learns one (its launches anchor it every session).
+    const manual = runDrive(
+      new Drive({ ratios: SIX_SPEED, seed: 3 }).launch(20).shift(2).inGear(2, 40, 4).stop(2),
+      LEARNING,
+      createGearState([118, 68, 46, 35, 28, 23]),
+    );
+    expect(manual.state.anchor).toBeNull();
+  });
+
+  it('keeps a persisted anchor only with ratios and for the transmission it was learned on', () => {
+    const anchor = { transmission: 'automatic' as const, secondGearRpmPerKph: 73.2 };
+    expect(createGearState(null, anchor, 'automatic').anchor).toBeNull();
+    expect(createGearState([72, 48], anchor, 'dct').anchor).toBeNull();
+    expect(createGearState([72, 48], anchor).anchor).toEqual(anchor);
+    for (const junk of [
+      null,
+      'fast',
+      { transmission: 'automatic', secondGearRpmPerKph: -3 },
+      { transmission: 'automatic', secondGearRpmPerKph: Number.NaN },
+      { transmission: 'steam', secondGearRpmPerKph: 70 },
+      { transmission: 'automatic' },
+    ]) {
+      expect(createGearState([72, 48], junk).anchor).toBeNull();
+    }
+  });
+
   it('never numbers learned gears above a gap', () => {
     // An automatic's first publication with 3rd missing: 2nd, 4th, 5th, 6th.
     const upshifts: Array<[number, number]> = [
@@ -673,6 +720,23 @@ describe('gear numbering of learned ratios (regression: core-3)', () => {
       expect(learnedNumbering(ladder, 'automatic', createGearLearner()).proven).toBe(0);
       expect(learnedNumbering(ladder.slice(2), 'automatic', withUpshifts(70)).proven).toBe(0);
       expect(learnedNumbering(ladder, 'automatic', withUpshifts(47)).proven).toBe(0);
+    });
+
+    it('falls back to a persisted anchor on an automatic, this session’s upshifts first', () => {
+      const anchor = { transmission: 'automatic' as const, secondGearRpmPerKph: 70 };
+      expect(learnedNumbering(ladder, 'automatic', createGearLearner(), anchor)).toEqual({
+        firstGear: 1,
+        proven: 6,
+      });
+      expect(learnedNumbering(ladder.slice(1), 'automatic', createGearLearner(), anchor)).toEqual({
+        firstGear: 2,
+        proven: 5,
+      });
+      // This session saw upshifts into a ratio that is not 2nd of this ladder: unproven.
+      expect(learnedNumbering(ladder, 'automatic', withUpshifts(47), anchor).proven).toBe(0);
+      // An anchor from another transmission proves nothing.
+      const dct = { ...anchor, transmission: 'dct' as const };
+      expect(learnedNumbering(ladder, 'automatic', createGearLearner(), dct).proven).toBe(0);
     });
 
     it('anchors a manual by its launch ratio (1st gear), trusting the ladder until then', () => {

@@ -104,7 +104,8 @@ class LinkTest {
         @Test
         fun `a session the HUD replaced does not come straight back (android-8)`() {
             // Welcome reset the backoff; the HUD then closes the session with 4000 "replaced"
-            // because another phone took over. Reconnecting after ~1 s would take it back.
+            // because a newer session with this device id took over. Reconnecting after ~1 s
+            // would take it back.
             val backoff = ReconnectBackoff(jitter = 0.0)
             backoff.reset()
             assertEquals(30_000L, backoff.delayAfterClose(PhoneCloseCode.REPLACED))

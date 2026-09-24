@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files FileExportBridge shares on Android 9 and older (cache, so they never pile up). -->
+<paths>
+    <cache-path name="exports" path="exports/" />
+</paths>

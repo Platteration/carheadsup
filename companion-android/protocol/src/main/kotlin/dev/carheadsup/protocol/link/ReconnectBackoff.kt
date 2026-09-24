@@ -44,10 +44,10 @@ public class ReconnectBackoff(
 
     /**
      * Delay after the session was closed with WebSocket close [code] (null when it just failed).
-     * A session the HUD replaced ([PhoneCloseCode.REPLACED]: a newer session of a phone with the
-     * same name and app took over — normally this phone's own reconnect, but possibly a second
-     * phone of the same model) waits the maximum like a refusal: coming straight back would take
-     * the HUD from that phone, which would do the same, and the two would swap every second.
+     * A session the HUD replaced ([PhoneCloseCode.REPLACED]: a newer session with this phone's
+     * device id took over — normally this phone's own reconnect, or a copy of the app's data on
+     * another phone) waits the maximum like a refusal: coming straight back would take the HUD
+     * from that session, which would do the same, and the two would swap every second.
      */
     public fun delayAfterClose(code: Int?): Long =
         if (code == PhoneCloseCode.REPLACED) refusedDelayMs() else nextDelayMs()
@@ -59,7 +59,7 @@ public class ReconnectBackoff(
 
 /** WebSocket close codes the HUD uses on `/ws/phone` (hud-server `PHONE_CLOSE`). */
 public object PhoneCloseCode {
-    /** A newer session (from a phone with the same name and app) replaced this one. */
+    /** A newer session from this phone (same `hello.deviceId`) replaced this one. */
     public const val REPLACED: Int = 4000
 
     /** Wrong pairing token. */

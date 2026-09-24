@@ -8,6 +8,7 @@ import { HAZARD_TYPES, LANE_DIRECTIONS, MANEUVER_TYPES } from '../types/nav.ts';
 import type { RoadClass } from '../types/nav.ts';
 import type { CallState } from '../types/phone.ts';
 import type { AdasMessage, PhoneToHud, RendererToServer } from '../types/protocol.ts';
+import { AUTH_ID_PATTERN, AUTH_PROOF_PATTERN, PHONE_AUTH } from './phone-auth.ts';
 
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -30,7 +31,6 @@ export const PROTOCOL_LIMITS = {
    * while moving, see `hazardLabel`).
    */
   text: 300,
-  token: 256,
   version: 64,
   phoneNumber: 40,
   /** Base64 of a ≤ 32 KiB PNG: 4·⌈32768/3⌉ = 43 692 characters, rounded up to 44 KiB. */
@@ -105,6 +105,15 @@ const orNull = <T extends z.ZodType>(schema: T) => schema.nullable().default(nul
 /** Optional, nullable field (kept as-is when present, absent when omitted). */
 const maybe = <T extends z.ZodType>(schema: T) => schema.nullable().optional();
 
+/** `hudId`, `deviceId`, nonces: 22 base64url characters. */
+const authId = z
+  .string()
+  .regex(AUTH_ID_PATTERN, `expected ${PHONE_AUTH.idChars} base64url characters`);
+/** An HMAC proof: 43 base64url characters. */
+const authProof = z
+  .string()
+  .regex(AUTH_PROOF_PATTERN, `expected ${PHONE_AUTH.proofChars} base64url characters`);
+
 const nonNegative = (max: number) => z.number().min(0).max(max);
 const epochMs = z.number().int().min(0).max(8.64e15);
 const speedLimitKph = z.number().gt(0).max(500);
@@ -151,9 +160,11 @@ const phoneSchemas = [
     t: z.literal('hello'),
     v: z.number().int().min(0).max(1_000_000),
     device: label(L.name),
+    deviceId: authId,
     app: label(L.name),
     appVersion: label(L.version),
-    token: label(L.token),
+    nonce: authId,
+    proof: authProof,
   }),
   z.object({
     t: z.literal('nav'),
@@ -326,8 +337,10 @@ function parseFrame<T>(
  *
  * Also: unknown `t` values, out-of-range numbers, unknown enum values (maneuvers, lanes, hazard
  * types, input actions …), more than 16 lanes or 50 hazards, duplicate hazard ids, control
- * characters in display strings and non-PNG icons are rejected. Omitted nullable fields are
- * normalised to null. Never throws; errors read like "nav.distanceM: expected number >= 0".
+ * characters in display strings, non-PNG icons and a `hello` whose `deviceId`, `nonce` or
+ * `proof` is not base64url of the right length (22, 22, 43 characters) are rejected. Omitted
+ * nullable fields are normalised to null. Never throws; errors read like
+ * "nav.distanceM: expected number >= 0".
  */
 export function parsePhoneMessage(raw: string): ParseResult<PhoneToHud> {
   return parseFrame(raw, L.phoneFrameChars, phoneToHudSchema, PHONE_TYPES, rejectMessageContent);

@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,7 +32,8 @@ import dev.carheadsup.companion.BuildConfig
 import dev.carheadsup.companion.R
 import dev.carheadsup.companion.ui.MainViewModel
 import dev.carheadsup.companion.ui.theme.StatusColors
-import dev.carheadsup.protocol.WireLimits
+import dev.carheadsup.protocol.auth.HudPin
+import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.link.HudEndpoint
 
 /** HUD address, pairing, privacy toggles and the entry to the HUD's own settings app. */
@@ -46,7 +48,7 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (String) -> Unit) {
     var pairingToken by rememberSaveable(settings.pairingToken) { mutableStateOf(settings.pairingToken) }
     var apiToken by rememberSaveable(settings.apiToken) { mutableStateOf(settings.apiToken) }
     val addressValid = useDiscovery || HudEndpoint.parse(address) != null
-    val tokenValid = pairingToken.length <= WireLimits.TOKEN && pairingToken.none { it.isISOControl() }
+    val tokenValid = PhoneAuth.isValidToken(pairingToken) && pairingToken.none { it.isISOControl() }
     val dirty =
         useDiscovery != settings.useDiscovery || address != settings.manualAddress ||
             pairingToken != settings.pairingToken || apiToken != settings.apiToken
@@ -87,6 +89,7 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (String) -> Unit) {
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 modifier = Modifier.fillMaxWidth(),
             )
+            PairingState(settings.hudPin, settings.pairingToken, onForget = viewModel::forgetPairedHud)
             OutlinedTextField(
                 value = apiToken,
                 onValueChange = { apiToken = it },
@@ -146,7 +149,7 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (String) -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            val url = viewModel.settingsUrl()
+            val url by viewModel.settingsUrl.collectAsStateWithLifecycle()
             FilledTonalButton(onClick = { url?.let(onOpenHudSettings) }, enabled = url != null) {
                 Text(stringResource(R.string.action_open_hud_settings))
             }
@@ -158,6 +161,40 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (String) -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/** Which HUD the saved pairing code is paired with, if any, and a way to forget it. */
+@Composable
+private fun PairingState(pin: HudPin?, pairingToken: String, onForget: () -> Unit) {
+    val paired = HudPin.active(pin, pairingToken)
+    val text =
+        when {
+            paired != null && pairingToken.isNotEmpty() -> stringResource(
+                R.string.setup_paired,
+                shortHudId(paired.hudId),
+            )
+
+            paired != null -> stringResource(R.string.setup_confirmed_open, shortHudId(paired.hudId))
+
+            pairingToken.isNotEmpty() -> stringResource(R.string.setup_not_paired)
+
+            else -> stringResource(R.string.setup_no_pairing_code)
+        }
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (pairingToken.isEmpty()) StatusColors.warning else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        if (paired != null) {
+            TextButton(onClick = onForget) { Text(stringResource(R.string.action_forget_paired_hud)) }
+        }
     }
 }
 

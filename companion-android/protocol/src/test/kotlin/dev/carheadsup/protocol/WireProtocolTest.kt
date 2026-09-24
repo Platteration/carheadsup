@@ -16,6 +16,13 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
 
+private const val DEVICE_ID = "8PHy8_T19vf4-fr7_P3-_w"
+private const val NONCE = "ICEiIyQlJicoKSorLC0uLw"
+private const val PROOF = "mm0V3w_MTQxN1Eo5QmrfJ3EpsfnnlUZYJPzZ0YPD62s"
+private const val HUD_ID = "AAECAwQFBgcICQoLDA0ODw"
+private const val HUD_NONCE = "EBESExQVFhcYGRobHB0eHw"
+private const val HUD_PROOF = "wIu7H--GvAeClpHJIEVrddKdvL1LPRWflY9h4CG8DMo"
+
 class WireProtocolTest {
     private fun encode(message: PhoneToHud): JsonObject =
         ProtocolJson.parseToJsonElement(PhoneWire.encodeUnchecked(message)).jsonObject
@@ -23,16 +30,27 @@ class WireProtocolTest {
     @Nested
     inner class PhoneToHudEncoding {
         @Test
-        fun `hello carries the discriminator, version and token`() {
-            val json = encode(PhoneMessages.hello(device = "Pixel 9", appVersion = "1.2.0", token = "s3cret"))
+        fun `hello carries the discriminator, version, identity and proof — never a token`() {
+            val json =
+                encode(
+                    PhoneMessages.hello(
+                        device = "Pixel 9",
+                        deviceId = DEVICE_ID,
+                        appVersion = "1.2.0",
+                        nonce = NONCE,
+                        proof = PROOF,
+                    ),
+                )
             assertEquals(
                 mapOf(
                     "t" to JsonPrimitive("hello"),
-                    "v" to JsonPrimitive(1),
+                    "v" to JsonPrimitive(2),
                     "device" to JsonPrimitive("Pixel 9"),
+                    "deviceId" to JsonPrimitive(DEVICE_ID),
                     "app" to JsonPrimitive("carheadsup-companion"),
                     "appVersion" to JsonPrimitive("1.2.0"),
-                    "token" to JsonPrimitive("s3cret"),
+                    "nonce" to JsonPrimitive(NONCE),
+                    "proof" to JsonPrimitive(PROOF),
                 ),
                 json,
             )
@@ -121,7 +139,7 @@ class WireProtocolTest {
         fun `phone frames round-trip through the decoder`() {
             val messages =
                 listOf(
-                    PhoneMessages.hello("d", "1", "t"),
+                    PhoneMessages.hello("d", DEVICE_ID, "1", NONCE, PROOF),
                     PhoneNav(
                         active = true,
                         source = "google-maps",
@@ -142,7 +160,7 @@ class WireProtocolTest {
         fun `wireType matches the encoded discriminator for every message type`() {
             val all: List<PhoneToHud> =
                 listOf(
-                    PhoneMessages.hello("d", "1", "t"),
+                    PhoneMessages.hello("d", DEVICE_ID, "1", NONCE, PROOF),
                     PhoneMessages.navEnded("s"),
                     PhoneMessages.roadUnknown(),
                     PhoneMessages.noHazards(),
@@ -163,10 +181,33 @@ class WireProtocolTest {
         private fun decode(raw: String): HudToPhone = (HudCodec.decode(raw) as HudDecodeResult.Message).message
 
         @Test
+        fun challenge() {
+            assertEquals(
+                HudChallenge(2, HUD_ID, HUD_NONCE),
+                decode("""{"t":"challenge","v":2,"hudId":"$HUD_ID","nonce":"$HUD_NONCE"}"""),
+            )
+            // Missing fields decode as empty, which the handshake refuses with a clear reason.
+            assertEquals(HudChallenge(2, "", ""), decode("""{"t":"challenge","v":2}"""))
+        }
+
+        @Test
         fun welcome() {
             val welcome =
-                decode("""{"t":"welcome","v":1,"hudName":"carheadsup","hudVersion":"0.1.0","readMessagesAloud":true}""")
-            assertEquals(HudWelcome(1, "carheadsup", "0.1.0", readMessagesAloud = true), welcome)
+                decode(
+                    """{"t":"welcome","v":2,"hudName":"carheadsup","hudVersion":"0.1.0","readMessagesAloud":true,""" +
+                        """"hudId":"$HUD_ID","proof":"$HUD_PROOF"}""",
+                )
+            assertEquals(
+                HudWelcome(
+                    2,
+                    "carheadsup",
+                    "0.1.0",
+                    readMessagesAloud = true,
+                    hudId = HUD_ID,
+                    proof = HUD_PROOF,
+                ),
+                welcome,
+            )
         }
 
         @Test
@@ -260,7 +301,8 @@ class WireProtocolTest {
         fun `HUD messages round-trip through the codec`() {
             val messages: List<HudToPhone> =
                 listOf(
-                    HudWelcome(1, "hud", "1.0", false),
+                    HudChallenge(2, HUD_ID, HUD_NONCE),
+                    HudWelcome(2, "hud", "1.0", false, HUD_ID, HUD_PROOF),
                     HudError(HudErrorCode.UNSUPPORTED_VERSION, "v2 required"),
                     HudCallAction("c", CallAction.ACCEPT),
                     HudMaintenanceDue(

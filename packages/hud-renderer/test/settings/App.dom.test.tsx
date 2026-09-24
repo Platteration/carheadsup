@@ -416,6 +416,30 @@ describe('settings app', () => {
     expect(blobs).not.toHaveBeenCalled();
   });
 
+  it('saves the trips CSV through the companion app when it offers to', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP2A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.0.0 Mobile Safari/537.36',
+    );
+    const saveFile = vi.fn((_text: string, _name: string, _type: string) => 'saved');
+    const host = globalThis as { CarheadsupAndroid?: unknown };
+    host.CarheadsupAndroid = { saveFile };
+    try {
+      const root = start(new MockHud());
+      await ready(root);
+      const trips = () => section(root, 'trips');
+      await waitFor(() => !button(trips(), 'Download CSV').disabled);
+      await click(button(trips(), 'Download CSV'));
+      await waitFor(() => text(trips()).includes('Downloads'));
+      expect(saveFile).toHaveBeenCalledTimes(1);
+      const [csv, name, type] = saveFile.mock.calls[0]!;
+      expect(csv).toContain('trip-5');
+      expect(name).toMatch(/\.csv$/);
+      expect(type).toMatch(/^text\/csv/);
+    } finally {
+      delete host.CarheadsupAndroid;
+    }
+  });
+
   it('deletes a trip after confirmation', async () => {
     const hud = new MockHud();
     const root = start(hud);
@@ -514,6 +538,32 @@ describe('settings app', () => {
     const pairing = field(section(root, 'phone'), 'Pairing code');
     await type(pairing.querySelector('input')!, 'my code');
     expect(text(pairing.querySelector('.field__error'))).toContain('No spaces');
+  });
+
+  it('shows whether phones must pair, and makes a pairing code with one tap', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    const phone = () => section(root, 'phone');
+    const status = () => text(phone().querySelector('.section__aside'));
+    expect(status()).toBe('Paired');
+    expect(phone().querySelector('.notice')).toBeNull();
+
+    // Without a code the HUD is open: said plainly, with the way out right there.
+    const input = field(phone(), 'Pairing code').querySelector('input')!;
+    await type(input, '');
+    expect(status()).toBe('Not paired · open');
+    const notice = phone().querySelector('.notice');
+    expect(notice?.classList.contains('notice--warning')).toBe(true);
+    expect(text(notice)).toContain('Any phone on the car’s Wi-Fi can connect');
+    expect(text(notice)).toContain('cannot verify');
+
+    await click(button(phone(), 'Generate pairing code'));
+    expect(input.value).toMatch(/^[A-Za-z0-9]{24}$/);
+    expect(status()).toBe('Paired');
+    expect(phone().querySelector('.notice')).toBeNull();
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => hud.config.phone.pairingToken === input.value);
   });
 
   it('keeps a live change reverted while its PATCH was in flight', async () => {

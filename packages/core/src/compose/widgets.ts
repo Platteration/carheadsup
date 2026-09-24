@@ -8,6 +8,7 @@ import {
   hazardDistanceM,
   navDistanceM,
   navRemainingM,
+  wallNow,
 } from '../state/selectors.ts';
 import type { DrivingContext, HudConfig, WidgetId, Zone } from '../types/config.ts';
 import type {
@@ -280,6 +281,7 @@ function lanesWidget(env: WidgetEnv, zone: Zone): LanesWidget | null {
   return { id: 'lanes', zone, lanes };
 }
 
+/** The phone's ETA is a wall-clock time, so the remaining minutes are counted on the wall clock. */
 function etaWidget({ state, config }: WidgetEnv, zone: Zone): EtaWidget | null {
   if (state.nav === null) return null;
   const { etaEpochMs, remainingSeconds, remainingDistanceM } = state.nav.info;
@@ -288,7 +290,7 @@ function etaWidget({ state, config }: WidgetEnv, zone: Zone): EtaWidget | null {
   if (remainingSeconds !== null && Number.isFinite(remainingSeconds)) {
     remainingMinutes = Math.max(0, Math.round(remainingSeconds / 60));
   } else if (etaEpochMs !== null && Number.isFinite(etaEpochMs)) {
-    remainingMinutes = Math.max(0, Math.round((etaEpochMs - state.now) / 60_000));
+    remainingMinutes = Math.max(0, Math.round((etaEpochMs - wallNow(state)) / 60_000));
   }
   const remainingM = navRemainingM(state);
   return {
@@ -420,7 +422,7 @@ function tpmsWidget({ state, config, moving }: WidgetEnv, zone: Zone): TpmsWidge
 }
 
 function clockWidget({ state, config }: WidgetEnv, zone: Zone): ClockWidget {
-  return { id: 'clock', zone, epochMs: state.now, format: config.units.clock };
+  return { id: 'clock', zone, epochMs: wallNow(state), format: config.units.clock };
 }
 
 function outsideTempWidget({ state, config }: WidgetEnv, zone: Zone): OutsideTempWidget | null {

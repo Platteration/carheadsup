@@ -19,6 +19,7 @@ export {
   widgetPlacementsSchema,
   WIDGET_IDS,
   LAYOUT_ZONES,
+  MAX_ADAS_ALLOWED_SENDERS,
 } from './schema.ts';
 
 // ---------------------------------------------------------------------------
@@ -253,6 +254,7 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
     buttons: { primary: null, secondary: null, next: null },
     fallbackLocation: null,
     adasUdpPort: null,
+    adasAllowedSenders: [],
   },
   server: {
     port: 8080,

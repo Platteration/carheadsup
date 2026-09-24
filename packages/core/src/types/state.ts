@@ -51,8 +51,14 @@ export interface EnvironmentState {
 
 export interface UiState {
   blanked: boolean;
-  /** Parked-dashboard page index. */
+  /** Dashboard page index. */
   page: number;
+  /**
+   * The driver opened the dashboard while stopped ('next-page' / 'prev-page'); it shows until
+   * 'secondary' closes it or the vehicle moves. Only ever true in the 'stopped' context (parked
+   * shows the dashboard anyway).
+   */
+  dashboardRequested: boolean;
   /** Manual brightness trim from the driver, −0.5–0.5. */
   brightnessOffset: number;
   /** When the driver last dismissed the current toast. */
@@ -60,13 +66,29 @@ export interface UiState {
   lastInputAt: number | null;
 }
 
+/**
+ * How engine time relates to the wall clock. Engine time (`event.at`, `state.now` and every
+ * timestamp kept in `HudState`) is monotonic: it starts at the wall clock when the server starts
+ * and then only counts elapsed time, so a stepped system clock (network time on a Pi without a
+ * real-time clock) never expires data or splits a trip. Where the absolute time matters — the
+ * clock widget, the sun, service dates, trip records, the phone's ETA — the core converts with
+ * `toWallTime` / `wallNow` (`state/selectors.ts`).
+ */
+export interface ClockState {
+  /** Wall-clock epoch ms − engine time, from the latest `clock/sync` (0 until then). */
+  wallOffsetMs: number;
+}
+
 export interface HudState {
-  /** Timestamp of the most recent event. */
+  /** Engine time of the most recent event (see {@link ClockState}). */
   now: number;
+  clock: ClockState;
   simulated: boolean;
   vehicle: VehicleState;
   context: ContextState;
   gear: GearState;
+  /** The shift light is flashing (latched with hysteresis, see `updateShiftFlash`). */
+  shiftFlash: boolean;
   fuel: FuelState;
   trip: TripState;
   odometer: OdometerState;

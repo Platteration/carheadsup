@@ -141,6 +141,7 @@ export function mockDiagnostics(): ApiDiagnostics {
     };
   };
   return {
+    now: at,
     link: {
       state: 'connected',
       adapter: 'OBDLink MX+ (STN2255)',

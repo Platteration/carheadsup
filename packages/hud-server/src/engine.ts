@@ -20,7 +20,7 @@ import type {
 } from '@carheadsup/core';
 import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
-import { HudTime } from './clock.ts';
+import { EngineClock, SYSTEM_MONOTONIC, monotonicView } from './clock.ts';
 
 /** Clock tick period (drives toast fades, staleness, trip end, brightness smoothing). */
 export const TICK_INTERVAL_MS = 100;
@@ -33,6 +33,11 @@ export const PERSIST_DELAY_MS = 2000;
 export const ODOMETER_PERSIST_INTERVAL_MS = 60_000;
 /** Repeated identical errors (e.g. a failing composer) are logged at most this often. */
 const ERROR_LOG_INTERVAL_MS = 10_000;
+/**
+ * The core is told the wall clock's offset from engine time again (`clock/sync`) once it has
+ * moved by more than this — a step of the system clock, or slow drift adding up.
+ */
+export const CLOCK_SYNC_TOLERANCE_MS = 2000;
 
 /** Where the engine's side effects go. Implemented by the app (phone link, stores). */
 export interface EngineOutputs {
@@ -51,7 +56,13 @@ export interface HudEngineOptions {
   persisted: PersistedStateWithTrip;
   simulated?: boolean;
   outputs: EngineOutputs;
+  /** The wall (system) clock, epoch ms. Default `Date.now`. */
   now?: Clock;
+  /**
+   * A monotonic ms counter that engine time follows. Default: `performance.now()`, or — when only
+   * `now` is given (tests with a fake clock) — `now` without its backward steps.
+   */
+  monotonic?: Clock;
   timers?: Timers;
   logger?: Logger;
   tickIntervalMs?: number;
@@ -86,11 +97,15 @@ export function maintenanceDueMessage(
  * The HUD's heart: owns the config and the `HudState`, feeds every event through the pure
  * reducer and performs the effects the core derives from each transition.
  *
- *  - `dispatch(event)` re-stamps `event.at` with the engine time ({@link HudTime}): the wall
- *    clock, but never going backwards and never stalling when the clock steps back (e.g. NTP
- *    on a Pi without RTC), so staleness and expiry keep working. Events dispatched from inside
- *    an effect handler are queued and processed in order. (A `phone/link` from a different
- *    phone clears the previous phone's route, road, call, media and hazards in the reducer.)
+ *  - `dispatch(event)` re-stamps `event.at` with the engine time ({@link EngineClock}): it starts
+ *    at the wall clock and then only counts elapsed monotonic time, so a stepped system clock
+ *    (network time on a Pi without a real-time clock, possibly hours or days mid-drive) neither
+ *    expires live data nor splits the trip in progress. The wall clock reaches the core as an
+ *    offset: a `clock/sync` event on `start()` and before any event once the offset has moved
+ *    by more than {@link CLOCK_SYNC_TOLERANCE_MS} (a `clock/sync` dispatched from outside just
+ *    asks for a fresh measurement). Events dispatched from inside an effect handler are queued
+ *    and processed in order. (A `phone/link` from a different phone clears the previous phone's
+ *    route, road, call, media and hazards in the reducer.)
  *  - A tick event is dispatched every {@link TICK_INTERVAL_MS}; frames are composed on their
  *    own timer at `server.frameRate` (not per event) and published to frame listeners.
  *  - Effects: call actions and trip/maintenance notifications go to the phone; completed trips
@@ -116,7 +131,9 @@ export class HudEngine {
   private readonly frameListeners = new Set<FrameListener>();
   private readonly queue: HudEvent[] = [];
   private draining = false;
-  private readonly time: HudTime;
+  private readonly time: EngineClock;
+  /** The wall-clock offset the core was last told (`clock/sync`). */
+  private syncedOffset = 0;
 
   private running = false;
   private stopped = false;
@@ -146,7 +163,11 @@ export class HudEngine {
     this.simulated = options.simulated ?? false;
     this.cfg = options.config;
 
-    this.time = new HudTime(options.now ?? SYSTEM_CLOCK);
+    const wall = options.now ?? SYSTEM_CLOCK;
+    const monotonic =
+      options.monotonic ?? (options.now === undefined ? SYSTEM_MONOTONIC : monotonicView(wall));
+    this.time = new EngineClock(wall, monotonic);
+    // Engine time starts at the wall clock: the initial state's offset of 0 is right.
     this.current = createInitialState(this.cfg, options.persisted, this.lastAt, {
       simulated: this.simulated,
     });
@@ -171,6 +192,16 @@ export class HudEngine {
     return this.latestFrame;
   }
 
+  /** Engine time now (monotonic epoch ms, see {@link EngineClock}); reads the clock. */
+  now(): number {
+    return this.time.read();
+  }
+
+  /** Engine time when the engine was created. */
+  get startedAt(): number {
+    return this.time.startedAt;
+  }
+
   /** Subscribe to composed frames. Returns the unsubscribe function. */
   onFrame(listener: FrameListener): () => void {
     this.frameListeners.add(listener);
@@ -179,10 +210,14 @@ export class HudEngine {
     };
   }
 
-  /** Start the tick and frame timers (and publish a first frame immediately). Idempotent. */
+  /**
+   * Tell the core where the wall clock stands (`clock/sync`), then start the tick and frame
+   * timers (and publish a first frame immediately). Idempotent.
+   */
   start(): void {
     if (this.running || this.stopped) return;
     this.running = true;
+    this.dispatch({ type: 'clock/sync', wallOffsetMs: 0, at: this.lastAt });
     this.publishFrame();
     this.scheduleTick();
     this.scheduleFrame();
@@ -206,7 +241,10 @@ export class HudEngine {
     return this.stopping;
   }
 
-  /** Feed an event through the reducer. `event.at` is replaced by the engine clock. */
+  /**
+   * Feed an event through the reducer. `event.at` is replaced by the engine clock; a
+   * `clock/sync` event's offset by the one measured now.
+   */
   dispatch(event: HudEvent): void {
     if (this.stopped) {
       this.logger.debug(`Engine: ignoring ${event.type} after stop`);
@@ -256,19 +294,48 @@ export class HudEngine {
     return this.time.current;
   }
 
-  /** Engine time for the next event (see {@link HudTime}). */
+  /** Engine time for the next event (see {@link EngineClock}). */
   private stamp(): number {
     return this.time.read();
   }
 
   private process(event: HudEvent): void {
-    const stamped: HudEvent = { ...event, at: this.stamp() };
+    const at = this.stamp();
+    if (event.type === 'clock/sync') {
+      this.syncClock(at, true);
+      return;
+    }
+    this.syncClock(at, false);
+    this.apply({ ...event, at });
+  }
+
+  /**
+   * Measure the wall clock's offset from engine time and pass it to the core when it moved by
+   * more than {@link CLOCK_SYNC_TOLERANCE_MS} since the last sync (or when `force`d).
+   */
+  private syncClock(at: number, force: boolean): void {
+    const wall = this.time.wall();
+    if (wall === null) return;
+    const offset = Math.round(wall - at);
+    const moved = offset - this.syncedOffset;
+    if (!force && Math.abs(moved) <= CLOCK_SYNC_TOLERANCE_MS) return;
+    if (Math.abs(moved) > CLOCK_SYNC_TOLERANCE_MS) {
+      this.logger.info(
+        `Engine: the system clock moved ${moved > 0 ? 'forward' : 'back'} by ${describeDuration(Math.abs(moved))}; timing is unaffected, the displayed time follows`,
+      );
+    }
+    this.syncedOffset = offset;
+    this.apply({ type: 'clock/sync', wallOffsetMs: offset, at });
+  }
+
+  private apply(stamped: HudEvent): void {
     const prev = this.current;
     let next: HudState;
     try {
       next = reduce(prev, stamped, this.cfg);
     } catch (err) {
-      this.logThrottled(`reduce:${event.type}`, `Engine: ${event.type} failed: ${describe(err)}`);
+      const { type } = stamped;
+      this.logThrottled(`reduce:${type}`, `Engine: ${type} failed: ${describe(err)}`);
       return;
     }
     this.current = next;
@@ -431,4 +498,16 @@ export class HudEngine {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** 3 d 4 h, 2 h 5 min, 12 min 3 s, 4.2 s. */
+export function describeDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86_400);
+  const h = Math.floor((s % 86_400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d} d ${h} h`;
+  if (h > 0) return `${h} h ${m} min`;
+  if (m > 0) return `${m} min ${s % 60} s`;
+  return `${(ms / 1000).toFixed(1)} s`;
 }

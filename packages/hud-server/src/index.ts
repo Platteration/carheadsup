@@ -5,6 +5,7 @@
 export { CONFIG_FILE, STATE_FILE, TRIPS_FILE, createHudServer } from './app.ts';
 export type { HudServer, HudServerOptions, HudServerTuning } from './app.ts';
 export {
+  CLOCK_SYNC_TOLERANCE_MS,
   HudEngine,
   ODOMETER_PERSIST_INTERVAL_MS,
   PERSIST_DELAY_MS,
@@ -12,6 +13,7 @@ export {
   maintenanceDueMessage,
 } from './engine.ts';
 export type { EngineOutputs, FrameListener, HudEngineOptions } from './engine.ts';
+export { EngineClock, SYSTEM_MONOTONIC } from './clock.ts';
 export { effectiveConfig, withSimTpmsPids } from './runtime-config.ts';
 export type { RuntimeOverrides } from './runtime-config.ts';
 export { phoneMessageToEvents } from './phone/translate.ts';

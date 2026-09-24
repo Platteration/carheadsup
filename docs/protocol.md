@@ -22,25 +22,30 @@ throughout: km/h, m, kPa, epoch milliseconds.
 
 ## Phone WebSocket (`/ws/phone`)
 
-**Protocol version: 1.**
+**Protocol version: 2** (version 1, which sent the pairing token in clear text and did not
+authenticate the HUD, is gone).
 
 ### Connection
 
 1. Open `ws://<hud>:8080/ws/phone` (find the HUD with [mDNS](#mdns-discovery) or use a
-   configured address). No HTTP authentication; the session is authenticated by its first
-   message.
-2. Send `hello` within **5 s**. The HUD answers `welcome` — or `error` and closes the socket.
-3. Right after `welcome`, the HUD sends `maintenance-due` if any service item is due.
-4. From then on the phone sends state updates whenever something changes; the HUD sends call
+   configured address). No HTTP authentication: phone and HUD
+   [authenticate each other](#authentication) in the first three messages.
+2. The HUD sends `challenge` at once: its identity and a fresh nonce.
+3. The phone answers with `hello` within **5 s**, proving that it knows the pairing token. The
+   HUD answers `welcome`, proving the same in return — or `error` and closes the socket.
+4. The phone checks the HUD's proof; until then it sends nothing else and ignores whatever the
+   HUD sends. Right after `welcome`, the HUD sends `maintenance-due` if any service item is due.
+5. From then on the phone sends state updates whenever something changes; the HUD sends call
    actions, finished trips and maintenance notices.
 
-There is **one active phone**. A newer session from the *same* phone (same `hello.device` and
-`hello.app`) replaces the older one (closed with 4000) without a disconnect in between. Another
-phone is refused while one is connected (`hello` answered with close 1013 "another phone is
-connected"), so two paired phones in one car never take the HUD from each other in turns; the
-connected phone keeps the HUD until it goes away (a vanished phone is dropped by the heartbeat
-below). When a *different* phone does come up, the HUD first drops what the previous one
-provided (route, road, hazards, media, call).
+There is **one active phone**. A newer session from the *same* phone (same `hello.deviceId`, a
+random id per app install — not the device name, which two phones of one model share) replaces
+the older one (closed with 4000) without a disconnect in between. Another phone is refused while
+one is connected (`hello` answered with close 1013 "another phone is connected"), so two paired
+phones in one car never take the HUD from each other in turns; the connected phone keeps the HUD
+until it goes away (a vanished phone is dropped by the heartbeat below). When a *different*
+phone does come up (another `deviceId`), the HUD first drops what the previous one provided
+(route, road, hazards, media, call).
 
 At most 8 connections may wait for their `hello` at once, and at most 2 from one address. A new
 connection is always accepted: beyond those limits the oldest waiting one is closed (1013), so
@@ -52,25 +57,93 @@ messages every 5 s and reconnects when the HUD is silent for 15 s. A phone that 
 The HUD stamps every message with its own clock on receipt. The phone's clock is used only for
 absolute times such as the ETA.
 
-### `hello` → `welcome`
+### `challenge` → `hello` → `welcome`
 
 ```json
-{ "t": "hello", "v": 1, "device": "Pixel 9", "app": "carheadsup-companion", "appVersion": "1.0.0", "token": "4f1c09ab" }
+{ "t": "challenge", "v": 2, "hudId": "AAECAwQFBgcICQoLDA0ODw", "nonce": "EBESExQVFhcYGRobHB0eHw" }
+```
+
+`hudId` is the HUD's identity: 16 random bytes as 22 base64url characters, made on the first
+start and kept in `<data dir>/hud-id` (a corrupt file is replaced by a new id, and paired phones
+then report "a different HUD"). It is also advertised over [mDNS](#mdns-discovery). `nonce` is 16
+fresh random bytes (22 base64url characters) per connection.
+
+```json
+{
+  "t": "hello", "v": 2, "device": "Pixel 9", "deviceId": "8PHy8_T19vf4-fr7_P3-_w",
+  "app": "carheadsup-companion", "appVersion": "1.0.0",
+  "nonce": "ICEiIyQlJicoKSorLC0uLw", "proof": "mm0V3w_MTQxN1Eo5QmrfJ3EpsfnnlUZYJPzZ0YPD62s"
+}
 ```
 
 | Field | Rules |
 | --- | --- |
-| `v` | Must be `1`; otherwise `error unsupported-version` and close 4002. |
-| `device`, `app` | Up to 100 characters (shown in logs). |
+| `v` | Must be `2`; otherwise `error unsupported-version` and close 4002 (also for a version-1 `hello`). |
+| `device`, `app` | Up to 100 characters (shown in logs and as the phone's name). |
+| `deviceId` | The phone's identity: exactly 22 base64url characters (`A–Z a–z 0–9 - _`), random per app install. |
 | `appVersion` | Up to 64 characters. |
-| `token` | Must equal `phone.pairingToken` when one is set (constant-time comparison); otherwise `error bad-token` and close 4001. Any value is accepted when no pairing token is configured. |
+| `nonce` | Exactly 22 base64url characters: 16 fresh random bytes per connection. |
+| `proof` | Exactly 43 base64url characters; must be the phone proof below for `phone.pairingToken` (compared in constant time), otherwise `error bad-token` and close 4001. |
 
 ```json
-{ "t": "welcome", "v": 1, "hudName": "My car", "hudVersion": "0.1.0", "readMessagesAloud": true }
+{
+  "t": "welcome", "v": 2, "hudName": "My car", "hudVersion": "0.1.0", "readMessagesAloud": true,
+  "hudId": "AAECAwQFBgcICQoLDA0ODw", "proof": "wIu7H--GvAeClpHJIEVrddKdvL1LPRWflY9h4CG8DMo"
+}
 ```
 
 `hudName` is `vehicle.name`; `readMessagesAloud` is `phone.readMessagesAloud` — the phone reads
-messages aloud only when this is true (and the user wants it on the phone).
+messages aloud only when this is true (and the user wants it on the phone). `hudId` repeats the
+challenge's; `proof` is the HUD proof below. (The examples are the first
+[test vector](#authentication), pairing token `K7fQ2mZrP4xW9sLt3HvNbC8e`.)
+
+### Authentication
+
+The pairing token (`phone.pairingToken`) never travels. Each side proves that it knows it with an
+HMAC over the other side's fresh nonce:
+
+```
+MAC(message)  = base64url( HMAC-SHA256( key = UTF-8 bytes of the pairing token,
+                                        data = UTF-8 bytes of message ) )      (no padding: 43 characters)
+phone proof   = MAC( "carheadsup-phone-v2|" + hudId + "|" + hudNonce + "|" + phoneNonce + "|" + deviceId )
+HUD proof     = MAC( "carheadsup-hud-v2|"   + hudId + "|" + phoneNonce + "|" + hudNonce + "|" + deviceId )
+```
+
+`hudNonce` is `challenge.nonce`, `phoneNonce` is `hello.nonce`. The fixed base64url formats keep
+the joined fields unambiguous, the two prefixes keep one side's proof from passing as the
+other's, and each nonce makes the other side's proof unusable on any other connection. Shared
+test vectors — including an empty token and a non-ASCII token longer than the 64-byte HMAC
+block — are in
+[`packages/core/test/protocol/phone-auth-vectors.json`](../packages/core/test/protocol/phone-auth-vectors.json);
+the HUD's and the companion's tests both assert them.
+
+**The companion app** (details in its [README](../companion-android/README.md#privacy)):
+
+- pins the `hudId` of the first HUD that proves the pairing token (per token: entering another
+  token starts a new pairing), and afterwards answers only that HUD's `challenge`. For any other
+  `hudId` it sends nothing at all — not even its proof, with which a rogue HUD could test token
+  guesses offline — and shows "a different HUD is answering", with a way to forget the old HUD;
+- checks the `welcome` proof before it counts as connected: before that it sends no location,
+  navigation, media, call or message data, makes no REST calls (they carry the API token), and
+  ignores `call-action` and everything else the HUD sends;
+- with automatic discovery, connects only to the paired HUD's advertisement (TXT `id`), or to
+  one without an id (the [static Avahi file](#mdns-discovery)), whose `challenge` is checked.
+
+**Without a pairing token** the HUD is *open*: both proofs are computed with the empty key, which
+anyone can do, so they prove nothing. The HUD accepts only proofs made with the empty key — a
+phone that holds a token is refused (`bad-token`) rather than silently trusting an open HUD. The
+companion shows such a HUD as unverified and connects only after the user confirms it, then
+pins its `hudId`; a spoofed HUD that copies that id is not detected. Set a pairing token.
+
+When `phone.pairingToken` changes, the HUD checks the connected phone's proof against the new
+token and disconnects it (`bad-token`, 4001) unless it still matches — also when the token is
+removed.
+
+What this does not do: the connection is not encrypted, so someone on the Wi-Fi can read the
+session, and a man-in-the-middle who relays both directions can alter it after the handshake
+(protect the Wi-Fi with WPA2). And someone who records a handshake (or impersonates the HUD before
+the first pairing) can test guesses of the pairing token offline: use a long random token (the
+settings app's *Generate* makes 24 characters, about 139 bits).
 
 ### Phone → HUD
 
@@ -189,7 +262,8 @@ The type has no content field, and a `message` carrying any key that looks like 
 
 **`input`** — the companion's remote control: `{ "t": "input", "action": "primary" }`, with the
 actions `primary`, `secondary`, `next-page`, `prev-page`, `toggle-blank`, `brightness-up`,
-`brightness-down` ([meaning](architecture.md#driver-input)).
+`brightness-down` ([meaning](architecture.md#driver-input): e.g. at a stop, `next-page` opens the
+diagnostics dashboard and `secondary` closes it).
 
 **`trips-request`** — ask for trips that ended after an epoch-ms time:
 `{ "t": "trips-request", "since": 1790000000000 }`. Answered with `trips` (newest first, at most
@@ -203,6 +277,7 @@ actions `primary`, `secondary`, `next-page`, `prev-page`, `toggle-blank`, `brigh
 
 | Message | When | Example |
 | --- | --- | --- |
+| `challenge` | at once, on every connection | see above |
 | `welcome` | after a valid `hello` | see above |
 | `error` | a message was refused | `{ "t": "error", "code": "bad-message", "message": "nav.distanceM: expected number >= 0" }` |
 | `call-action` | the driver accepted a ringing call (`accept`), or declined it or hung up a dialing or active call (`decline`) | `{ "t": "call-action", "callId": "call-1", "action": "accept" }` |
@@ -255,7 +330,7 @@ messages per second (bursts of up to 100); messages over the limit are dropped, 
 
 | `error.code` | Meaning |
 | --- | --- |
-| `bad-token` | Wrong pairing token (also sent when the token is changed while connected). |
+| `bad-token` | The `hello` proof does not match the pairing token (also sent when the token is changed or removed while connected). |
 | `bad-message` | The message failed validation, was not `hello` when it had to be, or was rate limited (messages, or `trips-request`). |
 | `unsupported-version` | `hello.v` is not the HUD's protocol version. |
 | `internal` | Reserved for server faults. |
@@ -265,8 +340,8 @@ messages per second (bursts of up to 100); messages over the limit are dropped, 
 | 1001 | The HUD is shutting down. |
 | 1008 | The phone did not read what the HUD sent (more than 1 MiB unsent). |
 | 1013 | Try again later: another phone is connected, or this connection waited for its `hello` while too many others did (the oldest waiting one is closed). |
-| 4000 | Replaced by a newer session from the same phone. The companion waits its maximum back-off before reconnecting. |
-| 4001 | Wrong pairing token (or it changed). The companion waits its maximum back-off before retrying. |
+| 4000 | Replaced by a newer session from the same phone (same `deviceId`). The companion waits its maximum back-off before reconnecting. |
+| 4001 | Wrong pairing token proof (or the token changed). The companion waits its maximum back-off before retrying. |
 | 4002 | Unsupported protocol version. |
 | 4003 | No valid `hello` as the first message within 5 s. |
 | 4004 | Too many invalid messages in a row. |
@@ -348,13 +423,18 @@ taken for live.
 
 Points a renderer of its own must know (the full contract is `types/frame.ts`):
 
+- `at` is the HUD's engine time: epoch ms that start at the system clock and then only count
+  elapsed time, so they never step when network time corrects the clock
+  ([details](architecture.md#engine-time-and-the-wall-clock)). Use it to tell that frames keep
+  coming, not as the time of day; the clock widget carries the wall-clock time.
 - `widgets` holds only what is to be drawn now, most important first within a zone; a widget
   whose data is stale or irrelevant is simply absent.
 - The nav widget's `iconPng` is non-null only when `maneuver.type` is `unknown`: draw the phone's
   icon then, and the HUD's own arrow for every known maneuver. `maneuver.instruction` is null
   while the car moves.
-- `diagnostics` is non-null only in the `parked` context and replaces the widget grid with the
-  full-screen dashboard (`DiagnosticsFrame`): `page` (`overview`, then `engine`, `fuel`,
+- `diagnostics` is non-null in the `parked` context, and in the `stopped` context once the
+  driver opened the dashboard with `next-page` / `prev-page` (until `secondary` or driving off
+  closes it); it replaces the widget grid with the full-screen dashboard (`DiagnosticsFrame`): `page` (`overview`, then `engine`, `fuel`,
   `electrical` — each only while it has live data — then `trouble-codes`, `trip`,
   `maintenance`), `pageIndex` / `pageCount` and `title`; `gauges` (signal, label, value in
   display units or null, unit, decimals, min, max, `status` `ok` / `warn` / `crit` /
@@ -367,7 +447,8 @@ Points a renderer of its own must know (the full contract is `types/frame.ts`):
 
 An external driver-assistance module reports blind-spot and forward-collision state as
 newline-delimited JSON in UDP datagrams to `<HUD address>:<sensors.adasUdpPort>` (the HUD listens
-on all interfaces; `null` disables it).
+on all IPv4 interfaces; `null` disables it), from an address listed in
+`sensors.adasAllowedSenders`.
 
 ```json
 {"t":"blind-spot","left":true,"right":false}
@@ -383,16 +464,28 @@ on all interfaces; `null` disables it).
 
 - Readings expire after **1 s** — repeat active states at 5–10 Hz.
 - The module counts as connected from its first valid message until **2 s** pass without one.
-- Each line ≤ 1024 characters; up to 8 lines per datagram; datagrams over 4 KiB and more than
-  50 datagrams per second are dropped. Invalid lines are skipped and logged (at most every 10 s).
+- Datagrams from an address not in `sensors.adasAllowedSenders` are dropped unread and never
+  connect the module; they are counted and logged at most every 10 s. An empty list accepts any
+  sender (the HUD logs a warning when the feed starts that way). IPv4-mapped IPv6 addresses
+  (`::ffff:10.42.0.50`) count as their IPv4 address.
+- Each line ≤ 1024 characters; up to 8 lines per datagram; datagrams over 4 KiB are dropped, and
+  so is anything beyond 50 datagrams per second from one sender — each sender address has its
+  own budget (the HUD tracks up to 64 senders, forgetting the one silent longest). Invalid lines
+  are skipped and logged (at most every 10 s).
 
-**Trust**: the feed has no authentication and no sender check. Any device that can reach the
-port — a passenger's phone on the HUD's Wi-Fi, for instance — can show blind-spot markers or a
-critical "BRAKE!" that cannot be dismissed, and a flood beyond the datagram limit above (one
-budget shared by all senders) makes the HUD drop the real module's messages. Keep the port off
-unless you use a module, and restrict it to the module with a firewall rule — e.g. with nftables
-(`sudo apt install nftables`), where 10.42.0.50 is the module's address (fix it on the module, or
-match its MAC address with `ether saddr` instead):
+**Trust**: the feed has no authentication; the only check is the sender's address. Give the
+module a static address and set `sensors.adasAllowedSenders` to it: datagrams from any other
+device on the network are then ignored, and a flood from one of them no longer drowns the module,
+which keeps its own datagram budget. With the list empty, any device that can reach the port — a
+passenger's phone on the HUD's Wi-Fi, for instance — can show blind-spot markers or a critical
+"BRAKE!" that cannot be dismissed, or hide a real warning.
+
+A source address is not proof of identity: a device on the same network can forge the module's
+address and would then be heard, and share its budget. Against that, put the module on a link of
+its own (a separate interface or VLAN), and keep the port off unless you use a module. A firewall
+rule in front of the port also spares the HUD the work of dropping a flood itself, and can match
+the module's MAC address (`ether saddr`) as well as its IP address — e.g. with nftables
+(`sudo apt install nftables`), where 10.42.0.50 is the module's address:
 
 ```sh
 sudo nft add table inet carheadsup
@@ -498,17 +591,20 @@ the file is never replaced by the defaults (nothing changed).
 
 `server.apiToken` must be printable ASCII (letters, digits, symbols and spaces, not only
 spaces): it travels in `Authorization` headers and `?token=` addresses, which carry nothing else,
-so any other token would lock every other device out. The pairing token travels inside the
-`hello` message and may be any text.
+so any other token would lock every other device out. The pairing token never travels (phone and
+HUD [prove it to each other](#authentication)) and may be any text up to 256 characters.
 
 ### Diagnostics
 
 `GET /api/diagnostics` — the OBD link, the malfunction indicator, the trouble codes with
 descriptions, the supported signals and the latest value of every signal (canonical units, with
-the time it was received):
+the time it was received). Every time is the HUD's wall-clock epoch ms, and `now` is the HUD's
+time of the answer on the same clock, so a sample's age is `now − at` whatever the client's own
+clock says:
 
 ```json
 {
+  "now": 1790190245400,
   "link": { "state": "connected", "adapter": "OBDLink MX+ (STN2255)", "protocol": "ISO 15765-4 (CAN 11/500)", "message": null, "since": 1790190236113 },
   "milOn": true,
   "dtcs": [
@@ -616,13 +712,18 @@ The HUD advertises itself with DNS-SD so the companion finds it without an addre
 
 - service type **`_carheadsup._tcp`**, port `server.port`;
 - instance name **"&lt;vehicle name&gt; HUD"** (e.g. "My car HUD");
-- TXT records **`v=1`** (the phone protocol version) and **`path=/ws/phone`**.
+- TXT records **`v=2`** (the phone protocol version), **`path=/ws/phone`** and **`id=<HUD id>`**
+  (the `hudId` of the [`challenge`](#challenge--hello--welcome)). A paired companion uses only the
+  advertisement with its HUD's id. The id is public and not a proof: the `challenge` and the
+  `welcome` proof decide.
 
 The server publishes this through `avahi-publish-service` (package `avahi-utils`) while
 `server.mdns` is on, and re-publishes when the vehicle name or the setting changes. Without
 `avahi-utils` it logs a hint and does not advertise; the static
 [`deploy/avahi/carheadsup.service`](../deploy/avahi/carheadsup.service) (named after the host)
-does the same job, and the installer puts it in place in that case. To check from a Linux
+does the same job, and the installer puts it in place in that case. That file cannot know the
+HUD's id, so it has no `id` record: the companion then learns the id from the `challenge` at the
+first pairing and pins it just the same. To check from a Linux
 machine on the same network:
 
 ```sh

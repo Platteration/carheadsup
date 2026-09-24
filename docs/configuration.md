@@ -96,9 +96,11 @@ inferred from the rpm/speed ratio against the configured or learned ratios, and 
 inferred. Learning needs a few minutes of steady driving in each gear, and learned gears are
 numbered only once there is an anchor: a launch from standstill (1st) on a manual, and on an
 automatic — which may never hold 1st long enough to learn it — the gear after the first upshift
-following a launch (2nd), seen twice. Until then, and for any gear above a gap in the learned
-ladder (a gear never driven steadily), the gear shows as unknown rather than as a wrong number.
-Changing `vehicle.transmission` forgets the learned ratios.
+following a launch (2nd), seen twice. An automatic's anchor is saved with the ratios
+(`state.json`), so gears show right after the next start. Until there is an anchor, and for any
+gear above a gap in the learned ladder (a gear never driven steadily), the gear shows as unknown
+rather than as a wrong number. Changing `vehicle.transmission` forgets the learned ratios and
+their anchor.
 
 ### obd
 
@@ -187,7 +189,12 @@ The thresholds of the [driving contexts](architecture.md#driving-contexts-and-ad
 | `display.context.highwayExitKph` | `65` | 10–250 | Leave `highway` below this. |
 | `display.context.stationaryKph` | `2` | 0.5–20 | Below this the car counts as stopped. |
 | `display.context.parkedAfterMs` | `120000` | 0–86400000 | Standing completely still with the engine running this long ⇒ `parked`. |
-| `display.context.engineOffParkedAfterMs` | `180000` | 0–86400000 | Standing completely still with the engine off this long ⇒ `parked`. Long enough that automatic start-stop does not open the dashboard at red lights (they often last 45–120 s); switching the ignition off is caught much sooner, because the ECU stops answering (`parked` 10 s after the last speed reading). The trade-off: with the ignition still on and the engine off (accessory mode), the dashboard — and clearing trouble codes, which needs `parked` — waits this long. Creeping along with the engine off (a hybrid in a jam) restarts the timer. |
+| `display.context.engineOffParkedAfterMs` | `180000` | 0–86400000 | Standing completely still with the engine off this long ⇒ `parked`. Long enough that automatic start-stop does not open the dashboard at red lights (they often last 45–120 s); switching the ignition off is caught much sooner, because the ECU stops answering (`parked` 10 s after the last speed reading). The trade-off: with the ignition still on and the engine off (accessory mode), clearing trouble codes, which needs `parked`, waits this long — the dashboard itself opens at once with the next-page button while stopped (see below). Creeping along with the engine off (a hybrid in a jam) restarts the timer. |
+
+While `stopped`, the driver can open the full diagnostics dashboard at once with `next-page` /
+`prev-page` (a button, the kiosk's arrow keys or the companion app's remote); further presses flip
+its pages, `secondary` closes it, and it closes by itself as soon as the car moves — it is never
+shown while moving. When `parked` it shows anyway.
 
 ### display (other)
 
@@ -203,7 +210,9 @@ The thresholds of the [driving contexts](architecture.md#driving-contexts-and-ad
 
 ### shiftLight
 
-A bar along the top that fills from `startRpm` to `shiftRpm` and flashes from `flashRpm`.
+A bar along the top that fills from `startRpm` to `shiftRpm` and flashes from `flashRpm`. Once
+flashing, it keeps flashing until the engine speed drops below `flashRpm` minus 2 % (at least
+100 rpm), so an engine held at the flash point does not flicker it.
 
 | Option | Default | Range | Notes |
 | --- | --- | --- | --- |
@@ -272,7 +281,7 @@ the phone.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `phone.pairingToken` | `""` | Shared secret the companion must present in its `hello`. Empty = any phone on the network may connect. Changing it disconnects a phone with the old one. |
+| `phone.pairingToken` | `""` | Shared secret phone and HUD prove to each other when the phone connects (it is never sent; [details](protocol.md#authentication)). Use a long random one (the settings app's *Generate*). Empty = the HUD is open: any phone on the network may connect, and the phone cannot verify the HUD (it asks the user to confirm it). Changing or removing it disconnects a phone paired with the old one. |
 | `phone.showMessageSender` | `true` | Show who sent a message (the content is never shown). |
 | `phone.readMessagesAloud` | `true` | Ask the phone to read messages aloud (sent in `welcome`). |
 | `phone.showMedia` | `true` | Song and artist toast on track change. |
@@ -287,9 +296,10 @@ the phone.
 | `sensors.lightSensorGain` | `1` | > 0 – 1000 | Multiplies the lux reading, to compensate for tinted glass or a cover. |
 | `sensors.buttons.primary` | `null` | GPIO 0–1023 | BCM number of the accept / OK button (hold = blank). |
 | `sensors.buttons.secondary` | `null` | | Decline / dismiss button. |
-| `sensors.buttons.next` | `null` | | Next dashboard page button. |
+| `sensors.buttons.next` | `null` | | Next dashboard page button; while stopped it opens the dashboard. |
 | `sensors.fallbackLocation` | `null` | `{ "lat": …, "lon": … }` | Location for sun-based brightness and night mode when the phone has not sent one. |
-| `sensors.adasUdpPort` | `null` | 1–65535 | UDP port for an [ADAS module](protocol.md#adas-udp-feed); `null` = off. Accepts datagrams from any device on the car's network — see the [trust note](protocol.md#adas-udp-feed). |
+| `sensors.adasUdpPort` | `null` | 1–65535 | UDP port for an [ADAS module](protocol.md#adas-udp-feed); `null` = off. Which devices may send to it: `adasAllowedSenders`, below. |
+| `sensors.adasAllowedSenders` | `[]` | ≤ 32 IPv4 / IPv6 addresses | The addresses the ADAS feed accepts datagrams from, e.g. `["10.42.0.50"]` — give the module a fixed address first. The feed listens on IPv4 only, so list the module's IPv4 address (IPv6 entries are valid but match nothing today). Addresses only: no host names, prefixes (`/24`), ports or `%zone` suffixes; each address once. Compared in canonical form, so `::ffff:10.42.0.50` is `10.42.0.50` and IPv6 case and zero-compression do not matter. Datagrams from anyone else are dropped and counted in a log warning (at most every 10 s). **Empty = any device on the car's network**, which can then raise or hide collision warnings; the HUD logs a warning when the feed starts that way and the settings app shows one. A change applies at once without reopening the port; removing an address that is sending ends its link immediately. Filtering by source address keeps out other devices on the Wi-Fi, not an attacker who forges the module's address — see the [trust note](protocol.md#adas-udp-feed). |
 
 Sensor changes apply without a restart; only the sources whose settings changed are restarted.
 Wiring: [hardware.md](hardware.md#sensors-buttons-and-wiring).
@@ -333,8 +343,9 @@ Widgets:
 | `boost` | Manifold pressure relative to the atmosphere | the car reports MAP (PID `0B`) |
 | `tripSummary` | Trip distance, time, economy, fuel, cost | a trip is in progress |
 
-When parked, the HUD page shows the full-screen diagnostics dashboard instead of the widget grid,
-so the `parked` column below matters only for the frame data (e.g. in the developer console).
+When parked — or stopped, once the driver opened it ([display.context](#displaycontext)) — the
+HUD page shows the full-screen diagnostics dashboard instead of the widget grid, so the `parked`
+column below matters only for the frame data (e.g. in the developer console).
 Alerts, toasts, the call card, the shift light and the blind-spot / collision overlays are drawn
 outside the grid by every layout.
 

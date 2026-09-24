@@ -1,4 +1,10 @@
-import { INPUT_ACTIONS, diagnosticDtcs, mergeConfig, parseConfig } from '@carheadsup/core';
+import {
+  INPUT_ACTIONS,
+  diagnosticDtcs,
+  mergeConfig,
+  parseConfig,
+  toWallTime,
+} from '@carheadsup/core';
 import type {
   ApiClearDtcsResult,
   ApiConfigResult,
@@ -9,6 +15,7 @@ import type {
   HudEvent,
   HudState,
   InputAction,
+  ObdLinkStatus,
   SignalId,
 } from '@carheadsup/core';
 import type { Clock, ClearDtcsOutcome } from '@carheadsup/obd';
@@ -34,8 +41,9 @@ export type ConfigChange = (current: HudConfig) => { config: HudConfig; errors: 
 export interface ApiDeps {
   version: string;
   simulated: boolean;
+  /** Engine time now (monotonic, see `HudEngine.now`): uptime and event stamps. */
   now: Clock;
-  /** Epoch ms when the server started (for `uptimeS`). */
+  /** Engine time when the server started (for `uptimeS`). */
   startedAt: number;
   engine: {
     readonly state: HudState;
@@ -75,18 +83,30 @@ function intParam(url: URL, name: string): number | null {
   return Number(raw.trim());
 }
 
-function diagnostics(state: HudState): ApiDiagnostics {
+/** The OBD link status with its `since` on the wall clock. */
+function linkStatus(state: HudState): ObdLinkStatus {
+  const { link } = state.vehicle;
+  return { ...link, since: toWallTime(state, link.since) };
+}
+
+/**
+ * Diagnostics with every time on the wall clock, `now` included: engine time `now` (read at the
+ * request) converted like the sample times, so ages (`now − at`) are exact.
+ */
+function diagnostics(state: HudState, now: number): ApiDiagnostics {
   const signals: ApiDiagnostics['signals'] = {};
   for (const [id, sample] of Object.entries(state.vehicle.signals)) {
     if (sample !== undefined && Number.isFinite(sample.value)) {
-      signals[id as SignalId] = { value: sample.value, at: sample.at };
+      signals[id as SignalId] = { value: sample.value, at: toWallTime(state, sample.at) };
     }
   }
+  const checkedAt = state.vehicle.dtcsCheckedAt;
   return {
-    link: { ...state.vehicle.link },
+    now: toWallTime(state, Math.max(now, state.now)),
+    link: linkStatus(state),
     milOn: state.vehicle.milOn,
     dtcs: diagnosticDtcs(state),
-    dtcsCheckedAt: state.vehicle.dtcsCheckedAt,
+    dtcsCheckedAt: checkedAt === null ? null : toWallTime(state, checkedAt),
     supported: state.vehicle.supported === null ? null : [...state.vehicle.supported],
     signals,
     vin: state.vehicle.vin,
@@ -111,7 +131,7 @@ export function createApiRouter(deps: ApiDeps): Router {
       version: deps.version,
       simulated: deps.simulated,
       uptimeS: Math.max(0, Math.floor((deps.now() - deps.startedAt) / 1000)),
-      obd: { ...state.vehicle.link },
+      obd: linkStatus(state),
       phoneConnected: state.phone.connected,
     };
     return ok(info);
@@ -133,7 +153,7 @@ export function createApiRouter(deps: ApiDeps): Router {
     );
   });
 
-  router.add('GET', '/api/diagnostics', () => ok(diagnostics(deps.engine.state)));
+  router.add('GET', '/api/diagnostics', () => ok(diagnostics(deps.engine.state, deps.now())));
 
   router.add('POST', '/api/diagnostics/clear-dtcs', async () => {
     const refusal = clearDtcsRefusal(deps.engine.state);

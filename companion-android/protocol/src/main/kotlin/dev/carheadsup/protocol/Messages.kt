@@ -15,8 +15,11 @@ import kotlinx.serialization.Serializable
  * optional-but-not-nullable (`nav.maneuver`, `ping.id`) are omitted instead when null.
  */
 
-/** Protocol version sent in `hello.v`; must match the HUD's `PROTOCOL_VERSION`. */
-public const val PROTOCOL_VERSION: Int = 1
+/**
+ * Protocol version of `challenge.v`, `hello.v` and `welcome.v`; must match the HUD's
+ * `PROTOCOL_VERSION`. Version 2 authenticates both sides (see [dev.carheadsup.protocol.auth]).
+ */
+public const val PROTOCOL_VERSION: Int = 2
 
 /** A turn-by-turn maneuver (core `Maneuver`). */
 @Serializable
@@ -62,16 +65,24 @@ public data class HazardItem(
 @Serializable
 public sealed interface PhoneToHud
 
-/** First message after connecting. The HUD answers with [HudWelcome] or [HudError]. */
+/**
+ * The answer to [HudChallenge]; the HUD answers with [HudWelcome] or [HudError]. Built by
+ * [dev.carheadsup.protocol.auth.HudHandshake]: the pairing token itself is never sent.
+ */
 @Serializable
 @SerialName("hello")
 public data class PhoneHello(
     val v: Int = PROTOCOL_VERSION,
+    /** Display name of the phone (not an identity). */
     val device: String,
+    /** This install's random identity (22 base64url characters). */
+    val deviceId: String,
     val app: String,
     val appVersion: String,
-    /** Must equal the HUD's `phone.pairingToken` when one is configured. */
-    val token: String,
+    /** This connection's random nonce (22 base64url characters). */
+    val nonce: String,
+    /** HMAC proof that the phone knows the pairing token (43 base64url characters). */
+    val proof: String,
 ) : PhoneToHud
 
 /** Turn-by-turn guidance state; `active = false` ends guidance. */
@@ -170,7 +181,21 @@ public data class PhonePing(@EncodeDefault(EncodeDefault.Mode.NEVER) val id: Lon
 @Serializable
 public sealed interface HudToPhone
 
-/** Accepted `hello`. */
+/**
+ * Sent by the HUD as soon as the socket is open: its identity and a fresh nonce. Missing fields
+ * decode as empty, which [dev.carheadsup.protocol.auth.HudHandshake] rejects.
+ */
+@Serializable
+@SerialName("challenge")
+public data class HudChallenge(
+    val v: Int = 0,
+    /** The HUD's persistent identity (22 base64url characters), pinned by the phone. */
+    val hudId: String = "",
+    /** This connection's random nonce (22 base64url characters). */
+    val nonce: String = "",
+) : HudToPhone
+
+/** Accepted `hello`. Trusted only once [proof] checks out ([dev.carheadsup.protocol.auth.HudHandshake]). */
 @Serializable
 @SerialName("welcome")
 public data class HudWelcome(
@@ -179,6 +204,10 @@ public data class HudWelcome(
     val hudVersion: String = "",
     /** Whether the phone should read messages aloud (the HUD's `phone.readMessagesAloud`). */
     val readMessagesAloud: Boolean = false,
+    /** Same as in [HudChallenge]. */
+    val hudId: String = "",
+    /** HMAC proof that the HUD knows the pairing token (43 base64url characters). */
+    val proof: String = "",
 ) : HudToPhone
 
 /** A rejected hello or message. `bad-token` and `unsupported-version` close the connection. */

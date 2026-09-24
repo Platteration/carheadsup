@@ -35,7 +35,7 @@ public sealed interface HudDecodeResult {
 /** Decodes frames received from the HUD. Never throws. */
 public object HudCodec {
     private val knownTypes =
-        setOf("welcome", "error", "call-action", "trips", "trip-completed", "maintenance-due", "pong")
+        setOf("challenge", "welcome", "error", "call-action", "trips", "trip-completed", "maintenance-due", "pong")
 
     public fun decode(raw: String): HudDecodeResult {
         val element =

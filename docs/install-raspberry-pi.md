@@ -342,7 +342,7 @@ through it. Changes apply immediately. At least:
 
    ```sh
    API_TOKEN=$(openssl rand -hex 16)
-   PAIRING=$(openssl rand -hex 4)
+   PAIRING=$(openssl rand -hex 12)
    curl -sS -X PATCH http://127.0.0.1:8080/api/config -H 'Content-Type: application/json' \
      -d "{\"server\":{\"apiToken\":\"$API_TOKEN\"},\"phone\":{\"pairingToken\":\"$PAIRING\"}}" \
      >/dev/null && echo "API token: $API_TOKEN  pairing code: $PAIRING"
@@ -512,7 +512,9 @@ renderer clients pass their token) or message content.
 | OBD never connects | `journalctl -u carheadsup` shows the reason. Ignition on? `/dev/rfcomm0` present (`systemctl status obd-rfcomm@<MAC>`)? Adapter paired *and* trusted? Another device (a phone app) connected to it? For USB: right `obd.serialPath` and `obd.baudRate`? Try `obd.protocol` = `"6"` (CAN 11-bit 500 kbit/s) instead of automatic on a modern car. |
 | "OBD LINK LOST" after switching off | Expected: the ECU stops answering; the HUD parks and keeps probing slowly. |
 | Phone does not find the HUD | Same Wi-Fi? `avahi-browse -rt _carheadsup._tcp` on the Pi lists the advertisement (install `avahi-utils`). Enter `10.42.0.1:8080` manually in the companion's *Setup*. |
-| Phone connects and is dropped at once | Pairing code mismatch: the log says "sent a wrong pairing token". |
+| Phone connects and is dropped at once | Pairing code mismatch: the log says "sent a wrong pairing token". The companion shows "wrong pairing code". |
+| Companion says "A different HUD is answering" | It is paired with another HUD id than this one's (`/var/lib/carheadsup/hud-id`): the Pi was replaced or its data directory reset. If this is your HUD, *Forget paired HUD* in the companion; it pairs again with the next HUD that proves the code. |
+| Companion asks "This is my HUD — connect" | The HUD has no pairing code, so the phone cannot verify it. Confirm only if it is yours; better, set a pairing code. |
 | Settings app asks for a token | `server.apiToken` is set: enter it (it is stored in that browser). |
 | Developer console from another device: "No feed", no live HUD | `server.apiToken` is set: enter it when the console asks, or open `/dev?token=<token>` once. |
 | Browser says "Unknown host name" | The HUD answers only to its IP address, `localhost`, `<hostname>` and `<hostname>.local` (protection against DNS rebinding). Use one of those, or add the name to `CARHEADSUP_ALLOWED_HOSTS` in `/etc/default/carheadsup`. |

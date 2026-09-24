@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
-import { PROTOCOL_VERSION } from '@carheadsup/core';
-import type { HudEvent, TripRecord } from '@carheadsup/core';
+import { PROTOCOL_VERSION, isAuthId } from '@carheadsup/core';
+import type { HudConfig, HudEvent, TripRecord } from '@carheadsup/core';
 import { describe, expect, it } from 'vitest';
 import type { WebSocket } from 'ws';
+import { hudProof } from '../../src/phone/auth.ts';
 import {
   MAX_PENDING_SESSIONS,
   MAX_PHONE_BACKLOG_BYTES,
@@ -10,7 +11,8 @@ import {
   PhoneChannel,
 } from '../../src/ws/phone-channel.ts';
 import { FakeClock, memoryLogger } from '../sensors/fakes.ts';
-import { testConfig } from '../helpers.ts';
+import { answerChallenge, testConfig, testDeviceId } from '../helpers.ts';
+import type { TestPhone } from '../helpers.ts';
 
 /** Just enough of a `ws` WebSocket for the channel. */
 class FakeSocket extends EventEmitter {
@@ -44,13 +46,28 @@ class FakeSocket extends EventEmitter {
   ofType(t: string): Array<Record<string, unknown>> {
     return this.sent.filter((m) => m['t'] === t);
   }
+
+  /** The challenge the HUD sent on connect. */
+  get challenge(): Record<string, unknown> {
+    const challenge = this.ofType('challenge')[0];
+    if (challenge === undefined) throw new Error('no challenge sent');
+    return challenge;
+  }
+
+  /** Answer the challenge as `phone` (a name, or a full identity). */
+  sayHello(phone: string | TestPhone = {}): Record<string, unknown> {
+    const hello = answerChallenge(
+      this.challenge,
+      typeof phone === 'string' ? { device: phone } : phone,
+    );
+    this.receive(hello);
+    return hello;
+  }
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
-function hello(device: string, token = ''): Record<string, unknown> {
-  return { t: 'hello', v: PROTOCOL_VERSION, device, app: 'carheadsup', appVersion: '1', token };
-}
+const HUD_ID = 'AAECAwQFBgcICQoLDA0ODw';
 
 function trip(n: number): TripRecord {
   return {
@@ -76,8 +93,10 @@ function setup(options: { pairingToken?: string } = {}) {
   const clock = new FakeClock();
   const events: HudEvent[] = [];
   const phoneChanges: boolean[] = [];
-  const config = testConfig({ phone: { pairingToken: options.pairingToken ?? '' } });
+  let config = testConfig({ phone: { pairingToken: options.pairingToken ?? '' } });
+  const logger = memoryLogger();
   const channel = new PhoneChannel({
+    hudId: HUD_ID,
     dispatch: (event) => events.push(event),
     getConfig: () => config,
     tripsEndedAfter: (_since, limit) =>
@@ -87,7 +106,7 @@ function setup(options: { pairingToken?: string } = {}) {
     version: 'test',
     now: clock.now,
     timers: clock,
-    logger: memoryLogger(),
+    logger,
   });
   const connect = (address: string): FakeSocket => {
     const socket = new FakeSocket();
@@ -98,8 +117,136 @@ function setup(options: { pairingToken?: string } = {}) {
     events
       .filter((e): e is Extract<HudEvent, { type: 'phone/link' }> => e.type === 'phone/link')
       .map((e) => ({ connected: e.connected, device: e.deviceName }));
-  return { clock, channel, events, phoneChanges, connect, links };
+  const changeConfig = (next: HudConfig): void => {
+    config = next;
+    channel.updateConfig(next);
+  };
+  return { clock, channel, events, phoneChanges, connect, links, changeConfig, logger };
 }
+
+describe('PhoneChannel: mutual authentication', () => {
+  it('challenges every connection at once with its HUD id and a fresh nonce', () => {
+    const { connect } = setup();
+    const [a, b] = [connect('10.42.0.23'), connect('10.42.0.24')];
+    expect(a.sent).toEqual([
+      { t: 'challenge', v: PROTOCOL_VERSION, hudId: HUD_ID, nonce: expect.any(String) },
+    ]);
+    expect(isAuthId(String(a.challenge['nonce']))).toBe(true);
+    expect(b.challenge['nonce']).not.toBe(a.challenge['nonce']);
+  });
+
+  it('welcomes a phone that proves the pairing token, and proves it back', async () => {
+    const { connect, channel } = setup({ pairingToken: 's3cret' });
+    const phone = connect('10.42.0.23');
+    const hello = phone.sayHello({ device: 'Pixel', token: 's3cret' });
+    await flush();
+    const [welcome] = phone.ofType('welcome');
+    const input = {
+      hudId: HUD_ID,
+      hudNonce: String(phone.challenge['nonce']),
+      phoneNonce: String(hello['nonce']),
+      deviceId: String(hello['deviceId']),
+    };
+    expect(welcome).toMatchObject({ v: PROTOCOL_VERSION, hudId: HUD_ID });
+    expect(welcome?.['proof']).toBe(hudProof('s3cret', input));
+    expect(welcome?.['proof']).not.toBe(hudProof('', input));
+    expect(channel.connected).toBe(true);
+  });
+
+  it('refuses a proof made with another token (bad-token, 4001), sending nothing else', async () => {
+    const { connect, channel, events } = setup({ pairingToken: 's3cret' });
+    const phone = connect('10.42.0.23');
+    phone.sayHello({ device: 'Pixel', token: 'guess' });
+    await flush();
+    expect(phone.sent.map((m) => m['t'])).toEqual(['challenge', 'error']);
+    expect(phone.ofType('error')[0]).toMatchObject({ code: 'bad-token' });
+    expect(phone.closeCode).toBe(PHONE_CLOSE.badToken);
+    expect(channel.connected).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  it("refuses a proof recorded on another connection (the HUD's nonce differs)", async () => {
+    const { connect } = setup({ pairingToken: 's3cret' });
+    const first = connect('10.42.0.23');
+    const recorded = answerChallenge(first.challenge, { device: 'Pixel', token: 's3cret' });
+    const replay = connect('10.42.0.66');
+    replay.receive(recorded);
+    await flush();
+    expect(replay.ofType('error')[0]).toMatchObject({ code: 'bad-token' });
+    expect(replay.closeCode).toBe(PHONE_CLOSE.badToken);
+    // A proof bound to another phone's id does not pass either.
+    const other = connect('10.42.0.67');
+    const hello = answerChallenge(other.challenge, { device: 'Pixel', token: 's3cret' });
+    other.receive({ ...hello, deviceId: testDeviceId('someone else') });
+    await flush();
+    expect(other.closeCode).toBe(PHONE_CLOSE.badToken);
+  });
+
+  it('without a pairing token, accepts proofs made with the empty key only', async () => {
+    const { connect } = setup();
+    const open = connect('10.42.0.23');
+    open.sayHello({ device: 'Pixel' });
+    const keyed = connect('10.42.0.24');
+    keyed.sayHello({ device: 'Galaxy', token: 'old code' });
+    await flush();
+    expect(open.ofType('welcome')).toHaveLength(1);
+    // A phone still holding a code gets told, rather than trusting an open HUD blindly.
+    expect(keyed.ofType('error')[0]).toMatchObject({ code: 'bad-token' });
+    expect(keyed.closeCode).toBe(PHONE_CLOSE.badToken);
+  });
+
+  it('never puts the token or a proof into its logs or error messages', async () => {
+    const TOKEN = 'Kx7pQ2mZr9TxW4bHc8NpV3sL';
+    const { connect, changeConfig, logger } = setup({ pairingToken: TOKEN });
+    const good = connect('10.42.0.23');
+    const hello = good.sayHello({ device: 'Pixel', token: TOKEN });
+    const wrong = connect('10.42.0.24');
+    const guess = wrong.sayHello({ device: 'Galaxy', token: `${TOKEN}x` });
+    // An outdated (v1) phone still sends the token itself.
+    const v1 = connect('10.42.0.25');
+    v1.receive({ t: 'hello', v: 1, device: 'Old', app: 'a', appVersion: '1', token: TOKEN });
+    await flush();
+    changeConfig(testConfig({ phone: { pairingToken: 'a new code' } }));
+    await flush();
+    expect(good.closeCode).toBe(PHONE_CLOSE.badToken);
+    const errors = [good, wrong, v1].flatMap((socket) =>
+      socket.ofType('error').map((m) => JSON.stringify(m)),
+    );
+    const secrets = [TOKEN, 'a new code', String(hello['proof']), String(guess['proof'])];
+    for (const text of [...logger.lines(), ...errors]) {
+      for (const secret of secrets) expect(text).not.toContain(secret);
+    }
+    expect(logger.lines('warn').join('\n')).toMatch(/Galaxy from 10\.42\.0\.24 sent a wrong/);
+  });
+
+  it('refuses a hello of another protocol version, v1 included', async () => {
+    const { connect } = setup();
+    const v1 = connect('10.42.0.23');
+    v1.receive({ t: 'hello', v: 1, device: 'Pixel', app: 'a', appVersion: '1', token: '' });
+    const v3 = connect('10.42.0.24');
+    v3.sayHello({ device: 'Pixel', v: PROTOCOL_VERSION + 1 });
+    await flush();
+    for (const socket of [v1, v3]) {
+      expect(socket.ofType('error')[0]).toMatchObject({ code: 'unsupported-version' });
+      expect(socket.closeCode).toBe(PHONE_CLOSE.unsupportedVersion);
+    }
+  });
+
+  it('checks the connected phone against a changed pairing token', async () => {
+    const { connect, channel, changeConfig } = setup({ pairingToken: 'one' });
+    const phone = connect('10.42.0.23');
+    phone.sayHello({ device: 'Pixel', token: 'one' });
+    await flush();
+    changeConfig(testConfig({ phone: { pairingToken: 'one', readMessagesAloud: false } }));
+    expect(phone.closeCode).toBeNull();
+    // Removing the code opens the HUD: the phone proved a code, so it is sent away as well.
+    changeConfig(testConfig({ phone: { pairingToken: '' } }));
+    await flush();
+    expect(phone.ofType('error')[0]).toMatchObject({ code: 'bad-token' });
+    expect(phone.closeCode).toBe(PHONE_CLOSE.badToken);
+    expect(channel.connected).toBe(false);
+  });
+});
 
 describe('PhoneChannel: connections waiting for their hello', () => {
   it('lets the paired phone in while idle connections from elsewhere fill every slot', async () => {
@@ -110,7 +257,7 @@ describe('PhoneChannel: connections waiting for their hello', () => {
     const phone = connect('10.42.0.23');
     await flush();
     expect(phone.closeCode).toBeNull();
-    phone.receive(hello('Pixel', 's3cret'));
+    phone.sayHello({ device: 'Pixel', token: 's3cret' });
     await flush();
     expect(phone.ofType('welcome')).toHaveLength(1);
     expect(channel.connected).toBe(true);
@@ -130,7 +277,7 @@ describe('PhoneChannel: connections waiting for their hello', () => {
     connect('10.42.0.23');
     connect('10.42.0.23');
     const phone = connect('10.42.0.23');
-    phone.receive(hello('Pixel'));
+    phone.sayHello('Pixel');
     await flush();
     expect(phone.ofType('welcome')).toHaveLength(1);
   });
@@ -140,9 +287,9 @@ describe('PhoneChannel: one phone at a time', () => {
   it('refuses a different phone while one is connected, without touching its session', async () => {
     const { connect, links, channel } = setup();
     const driver = connect('10.42.0.23');
-    driver.receive(hello('Driver Pixel'));
+    driver.sayHello('Driver Pixel');
     const passenger = connect('10.42.0.24');
-    passenger.receive(hello('Passenger iPhone'));
+    passenger.sayHello('Passenger iPhone');
     await flush();
     expect(passenger.ofType('welcome')).toHaveLength(0);
     expect(passenger.closeCode).toBe(PHONE_CLOSE.busy);
@@ -152,19 +299,44 @@ describe('PhoneChannel: one phone at a time', () => {
     driver.close(1000);
     await flush();
     const again = connect('10.42.0.24');
-    again.receive(hello('Passenger iPhone'));
+    again.sayHello('Passenger iPhone');
     await flush();
     expect(again.ofType('welcome')).toHaveLength(1);
     expect(channel.connected).toBe(true);
     expect(links().at(-1)).toEqual({ connected: true, device: 'Passenger iPhone' });
   });
 
+  it('tells two phones with the same name apart by their device id', async () => {
+    const { connect, links, events } = setup();
+    const driver = connect('10.42.0.23');
+    driver.sayHello({ device: 'Pixel 9', deviceId: testDeviceId('driver') });
+    const passenger = connect('10.42.0.24');
+    passenger.sayHello({ device: 'Pixel 9', deviceId: testDeviceId('passenger') });
+    await flush();
+    // Not a reconnect of the driver's phone: refused, the driver keeps the HUD.
+    expect(passenger.closeCode).toBe(PHONE_CLOSE.busy);
+    expect(driver.closeCode).toBeNull();
+    expect(links()).toEqual([{ connected: true, device: 'Pixel 9' }]);
+    expect(events[0]).toMatchObject({ type: 'phone/link', deviceId: testDeviceId('driver') });
+  });
+
+  it('recognises its own phone under a new name', async () => {
+    const { connect } = setup();
+    const old = connect('10.42.0.23');
+    old.sayHello({ device: 'Pixel 9', deviceId: testDeviceId('driver') });
+    const renamed = connect('10.42.0.23');
+    renamed.sayHello({ device: "Anna's Pixel", deviceId: testDeviceId('driver') });
+    await flush();
+    expect(old.closeCode).toBe(PHONE_CLOSE.replaced);
+    expect(renamed.ofType('welcome')).toHaveLength(1);
+  });
+
   it('lets the same phone replace its own older session seamlessly', async () => {
     const { connect, links, phoneChanges } = setup();
     const old = connect('10.42.0.23');
-    old.receive(hello('Pixel'));
+    old.sayHello('Pixel');
     const fresh = connect('10.42.0.23');
-    fresh.receive(hello('Pixel'));
+    fresh.sayHello('Pixel');
     await flush();
     expect(old.closeCode).toBe(PHONE_CLOSE.replaced);
     expect(fresh.ofType('welcome')).toHaveLength(1);
@@ -183,7 +355,7 @@ describe('PhoneChannel: a phone that does not read', () => {
   it('closes a session whose unsent backlog exceeds the limit', async () => {
     const { connect, channel } = setup();
     const phone = connect('10.42.0.23');
-    phone.receive(hello('Pixel'));
+    phone.sayHello('Pixel');
     await flush();
     phone.bufferedAmount = MAX_PHONE_BACKLOG_BYTES + 1;
     phone.receive({ t: 'ping', id: 1 });
@@ -196,7 +368,7 @@ describe('PhoneChannel: a phone that does not read', () => {
   it('answers only a few trips-requests in a row', async () => {
     const { connect, clock } = setup();
     const phone = connect('10.42.0.23');
-    phone.receive(hello('Pixel'));
+    phone.sayHello('Pixel');
     for (let i = 0; i < 50; i += 1) phone.receive({ t: 'trips-request', since: 0 });
     await flush();
     expect(phone.ofType('trips')).toHaveLength(3);

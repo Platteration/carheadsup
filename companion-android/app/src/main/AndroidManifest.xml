@@ -71,6 +71,17 @@
             android:label="@string/hud_settings_title"
             android:parentActivityName=".ui.MainActivity" />
 
+        <!-- Hands exported files (trips CSV) to the share sheet on Android 9 and older. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.exports"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/export_paths" />
+        </provider>
+
         <service
             android:name=".service.HudConnectionService"
             android:exported="false"

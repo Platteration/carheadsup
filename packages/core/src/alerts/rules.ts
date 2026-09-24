@@ -5,6 +5,7 @@ import type { SignalId, SignalMap } from '../types/signals.ts';
 import type { HudState } from '../types/state.ts';
 import { lookupDtc } from '../obd/dtc-lookup.ts';
 import {
+  collisionLevel,
   freshSignal,
   freshSupplyVoltage,
   isAdasFresh,
@@ -379,11 +380,18 @@ export function iceRiskRule({ state, config, now, previous }: RuleContext): Aler
 // ---------------------------------------------------------------------------------------------
 // Forward collision
 
+/**
+ * 'BRAKE!' (critical) while the module warns — held for 1 s after its last warning, see
+ * `collisionLevel` — and 'VEHICLE AHEAD' while it cautions. The time to collision is shown only
+ * from a fresh reading of the level shown.
+ */
 export function forwardCollisionRule({ state }: RuleContext): AlertSpec[] {
   const { adas } = state;
-  if (adas.collision === 'none' || !isAdasFresh(state, adas.collisionUpdatedAt)) return NONE;
-  const ttc = adas.ttcSeconds;
-  const critical = adas.collision === 'warning';
+  const level = collisionLevel(state);
+  if (level === 'none') return NONE;
+  const current = adas.collision === level && isAdasFresh(state, adas.collisionUpdatedAt);
+  const ttc = current ? adas.ttcSeconds : null;
+  const critical = level === 'warning';
   return [
     {
       key: 'forward-collision',

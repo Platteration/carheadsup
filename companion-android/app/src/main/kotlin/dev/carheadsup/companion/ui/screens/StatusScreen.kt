@@ -39,6 +39,7 @@ import dev.carheadsup.companion.ui.PermissionGroup
 import dev.carheadsup.companion.ui.Permissions
 import dev.carheadsup.companion.ui.theme.StatusColors
 import dev.carheadsup.protocol.HudErrorCode
+import dev.carheadsup.protocol.auth.TrustProblem
 
 /** Connection status, service control and the permission checklist. */
 @Composable
@@ -71,6 +72,7 @@ fun StatusScreen(viewModel: MainViewModel) {
     ) {
         SectionCard(stringResource(R.string.section_hud)) {
             ConnectionSummary(status, running)
+            TrustActions(status, onConfirm = viewModel::confirmOpenHud, onForget = viewModel::forgetPairedHud)
             if (startRefused) Text(stringResource(R.string.service_start_refused), color = StatusColors.error)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (running) {
@@ -173,9 +175,14 @@ private fun ConnectionSummary(status: LinkStatus, serviceRunning: Boolean) {
             is LinkStatus.Connecting -> stringResource(R.string.status_connecting, status.endpoint.display()) to
                 StatusColors.warning
 
-            is LinkStatus.Connected ->
-                stringResource(R.string.status_connected, status.hudName.ifBlank { status.endpoint.display() }) to
-                    StatusColors.ok
+            is LinkStatus.Connected -> {
+                val name = status.hudName.ifBlank { status.endpoint.display() }
+                if (status.authenticated) {
+                    stringResource(R.string.status_connected, name) to StatusColors.ok
+                } else {
+                    stringResource(R.string.status_connected_unverified, name) to StatusColors.warning
+                }
+            }
 
             is LinkStatus.Waiting -> {
                 val seconds = ((status.retryAtElapsedMs - now) / 1000).coerceAtLeast(0)
@@ -190,6 +197,29 @@ private fun ConnectionSummary(status: LinkStatus, serviceRunning: Boolean) {
                         status.message
                     }
                 stringResource(R.string.status_refused, reason) to StatusColors.error
+            }
+
+            is LinkStatus.Untrusted -> {
+                val at = status.endpoint.display()
+                when (val problem = status.problem) {
+                    is TrustProblem.DifferentHud ->
+                        stringResource(
+                            R.string.status_untrusted_different_hud,
+                            at,
+                            shortHudId(problem.answeringHudId),
+                            shortHudId(problem.pairedHudId),
+                        ) to StatusColors.error
+
+                    is TrustProblem.UnconfirmedOpenHud ->
+                        stringResource(R.string.status_untrusted_open_hud, at, shortHudId(problem.hudId)) to
+                            StatusColors.warning
+
+                    TrustProblem.BadProof -> stringResource(R.string.status_untrusted_bad_proof, at) to
+                        StatusColors.error
+
+                    is TrustProblem.ProtocolViolation ->
+                        stringResource(R.string.status_untrusted_protocol, at, problem.detail) to StatusColors.error
+                }
             }
         }
     Text(text, style = MaterialTheme.typography.bodyLarge, color = color)
@@ -208,6 +238,27 @@ private fun ConnectionSummary(status: LinkStatus, serviceRunning: Boolean) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/** What the user can do about a HUD the app does not trust. */
+@Composable
+private fun TrustActions(status: LinkStatus, onConfirm: (String) -> Unit, onForget: () -> Unit) {
+    val problem = (status as? LinkStatus.Untrusted)?.problem ?: return
+    when (problem) {
+        is TrustProblem.UnconfirmedOpenHud ->
+            Button(onClick = { onConfirm(problem.hudId) }) { Text(stringResource(R.string.action_confirm_open_hud)) }
+
+        is TrustProblem.DifferentHud -> {
+            Text(
+                stringResource(R.string.status_forget_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onForget) { Text(stringResource(R.string.action_forget_paired_hud)) }
+        }
+
+        TrustProblem.BadProof, is TrustProblem.ProtocolViolation -> Unit
     }
 }
 

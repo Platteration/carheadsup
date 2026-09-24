@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { compileFormula } from '../obd/formula.ts';
+import { normalizeIpAddress } from './ip.ts';
 import { DRIVING_CONTEXTS } from '../types/config.ts';
 import type { HudConfig, WidgetId, Zone } from '../types/config.ts';
 import { SIGNAL_IDS } from '../types/signals.ts';
@@ -485,6 +486,26 @@ const phoneSchema = z.object({
 
 const gpioSchema = int(0, 1023).nullable();
 
+/** Most addresses `sensors.adasAllowedSenders` may list. */
+export const MAX_ADAS_ALLOWED_SENDERS = 32;
+
+/**
+ * One IP address literal (see `normalizeIpAddress`): no host names, which would need a DNS the
+ * HUD cannot trust, and no prefixes, ports or zone indices. Duplicates are compared canonically,
+ * so `::ffff:10.42.0.50` repeats `10.42.0.50`.
+ */
+const adasAllowedSendersSchema = z
+  .array(
+    z
+      .string()
+      .refine(
+        (text) => normalizeIpAddress(text) !== null,
+        'expected an IPv4 or IPv6 address such as 10.42.0.50',
+      ),
+  )
+  .max(MAX_ADAS_ALLOWED_SENDERS)
+  .superRefine(uniqueBy((address) => normalizeIpAddress(address) ?? address, null, 'address'));
+
 const sensorsSchema = z.object({
   lightSensor: z.enum(['none', 'bh1750', 'veml7700', 'tsl2591']),
   gestureSensor: z.enum(['none', 'apds9960']),
@@ -502,6 +523,7 @@ const sensorsSchema = z.object({
   ]),
   fallbackLocation: z.object({ lat: num(-90, 90), lon: num(-180, 180) }).nullable(),
   adasUdpPort: int(1, 65_535).nullable(),
+  adasAllowedSenders: adasAllowedSendersSchema,
 });
 
 const serverSchema = z.object({

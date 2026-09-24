@@ -28,6 +28,7 @@ import dev.carheadsup.protocol.api.DisplayUnits
 import dev.carheadsup.protocol.api.FuelEconomyUnit
 import dev.carheadsup.protocol.api.TripFormatter
 import dev.carheadsup.protocol.api.UnitSystem
+import dev.carheadsup.protocol.auth.HudPin
 import dev.carheadsup.protocol.link.HudEndpoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,7 +61,13 @@ class AppGraph(private val app: Application) {
     val listenerConnected = MutableStateFlow(false)
 
     val localNetwork = LocalNetwork(app)
-    val discovery = HudDiscovery(app)
+
+    /** Once paired, only the paired HUD's advertisement is used (see [HudPin.acceptsAdvertisement]). */
+    val discovery =
+        HudDiscovery(app) { advertisedId ->
+            val current = settings.value
+            HudPin.acceptsAdvertisement(current.hudPin, current.pairingToken, advertisedId)
+        }
 
     /** WebSocket client: no read timeout (the heartbeat detects dead links), transport pings as a backstop. */
     private val socketClient =
@@ -103,7 +110,9 @@ class AppGraph(private val app: Application) {
             hub = hub,
             settings = settings,
             deviceName = deviceName(),
+            deviceId = settingsStore.deviceId,
             appVersion = BuildConfig.VERSION_NAME,
+            onPinned = { pin -> settingsStore.update { it.copy(hudPin = pin) } },
             onConnected = ::onConnected,
             onMessage = ::onHudMessage,
         )
@@ -122,8 +131,11 @@ class AppGraph(private val app: Application) {
 
     val messageRelay = MessageRelay(hub, link.status, settings, ::messageReader)
 
-    /** The HUD to talk to for REST: the manual address, else the last or discovered one. */
-    fun currentEndpoint(): HudEndpoint? = settings.value.manualEndpoint ?: link.lastEndpoint ?: discovery.endpoint.value
+    /**
+     * The HUD to talk to for REST and the settings page: only where a HUD has proven itself (or
+     * was confirmed by the user) — these carry the API token. Null until then.
+     */
+    fun currentEndpoint(): HudEndpoint? = link.trustedEndpoint
 
     @Synchronized
     fun messageReader(): MessageReader = reader ?: MessageReader(app).also { reader = it }

@@ -185,6 +185,7 @@ class WireShapeSyncTest {
     @Test
     fun `HUD to phone messages and records match the contract field by field`() {
         val protocol = source("protocol.ts")
+        assertReceives(HudChallenge.serializer(), tsInterface(protocol, "HudChallenge"))
         assertReceives(HudWelcome.serializer(), tsInterface(protocol, "HudWelcome"))
         assertReceives(HudError.serializer(), tsInterface(protocol, "HudError"))
         assertReceives(HudCallAction.serializer(), tsInterface(protocol, "HudCallAction"))

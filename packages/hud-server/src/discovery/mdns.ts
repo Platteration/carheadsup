@@ -1,7 +1,11 @@
 /**
  * mDNS / DNS-SD advertisement through Avahi's `avahi-publish-service` (package avahi-utils):
  *
- *   avahi-publish-service -s "<vehicle name> HUD" _carheadsup._tcp <port> v=<protocol> path=/ws/phone
+ *   avahi-publish-service -s "<vehicle name> HUD" _carheadsup._tcp <port> v=<protocol> \
+ *     path=/ws/phone id=<HUD id>
+ *
+ * The `id` lets a phone that has pinned this HUD skip other HUDs without connecting to them (it
+ * checks the id again in the `challenge`; the static service file cannot know it).
  *
  * The tool keeps the record registered for as long as it runs, so it is supervised and restarted
  * with backoff if it exits (e.g. avahi-daemon restarting). Without avahi-utils the HUD logs a
@@ -46,7 +50,7 @@ export function mdnsInstanceName(vehicleName: string): string {
 }
 
 /** Arguments for avahi-publish-service. */
-export function avahiPublishArgs(config: HudConfig): string[] {
+export function avahiPublishArgs(config: HudConfig, hudId: string): string[] {
   return [
     '-s',
     mdnsInstanceName(config.vehicle.name),
@@ -54,6 +58,7 @@ export function avahiPublishArgs(config: HudConfig): string[] {
     String(config.server.port),
     `v=${PROTOCOL_VERSION}`,
     `path=${MDNS_PHONE_PATH}`,
+    `id=${hudId}`,
   ];
 }
 
@@ -67,11 +72,13 @@ export interface MdnsIo {
 let missingLogged = false;
 
 /**
- * Advertise the HUD as `_carheadsup._tcp` (TXT: v=<protocol version>, path=/ws/phone) so the
- * companion app can find it. Returns null when advertising is disabled or unavailable.
+ * Advertise the HUD as `_carheadsup._tcp` (TXT: v=<protocol version>, path=/ws/phone,
+ * id=<HUD id>) so the companion app can find it. Returns null when advertising is disabled or
+ * unavailable.
  */
 export function advertiseHud(
   config: HudConfig,
+  hudId: string,
   deps: RuntimeDeps,
   io: MdnsIo = {},
 ): Service | null {
@@ -87,7 +94,7 @@ export function advertiseHud(
     logMissing();
     return null;
   }
-  const args = avahiPublishArgs(config);
+  const args = avahiPublishArgs(config, hudId);
   const supervisor = new ProcessSupervisor({
     label: 'mDNS',
     command: AVAHI_PUBLISH,

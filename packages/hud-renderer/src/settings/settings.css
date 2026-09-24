@@ -1420,6 +1420,29 @@ code {
   margin-top: 12px;
 }
 
+/* Address allow-list (ADAS senders) */
+
+.address-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.address-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.address-list__item code {
+  overflow-wrap: anywhere;
+}
+
 /* ------------------------------------------------------------------------------------------ */
 /* HUD previews, layout and keystone */
 

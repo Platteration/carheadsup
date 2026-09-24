@@ -179,12 +179,24 @@ describe('the simulated HUD through the demo drive', () => {
     const message = inStep('arriving').find((s) => s.frame.toast?.kind === 'message');
     expect(message?.frame.toast?.title).toBe('Robin Park');
 
-    // Parked with the engine off: back to the parked dashboard before the next loop starts.
+    // Standing with the engine off: the simulated phone's remote opens the dashboard at once —
+    // the car is only 'stopped' (start-stop protection keeps it from 'parked' for minutes).
     const parked = inStep('parked');
     expect(parked.length).toBeGreaterThan(0);
-    const dashboard = parked.filter((s) => s.frame.context === 'parked');
-    expect(dashboard.length).toBeGreaterThan(5 * 15);
+    expect(parked.every((s) => s.frame.context === 'stopped')).toBe(true);
+    const opened = parked.findIndex((s) => s.frame.diagnostics !== null);
+    expect(opened).toBeGreaterThanOrEqual(0);
+    expect(parked[opened]!.t - parked[0]!.t).toBeLessThan(1);
+    const dashboard = parked.slice(opened);
+    expect(dashboard.length).toBeGreaterThan(30 * 15);
     expect(dashboard.every((s) => s.frame.diagnostics !== null)).toBe(true);
+    expect(dashboard[0]!.frame.diagnostics?.page).toBe('overview');
+    // It stays up while the engine restarts, and closes as the car drives off.
+    const next = samples.filter((s) => s.t > LOOP_S);
+    const firstMove = next.findIndex((s) => s.frame.context === 'city');
+    expect(firstMove).toBeGreaterThan(0);
+    expect(next.slice(0, firstMove).every((s) => s.frame.diagnostics !== null)).toBe(true);
+    expect(next[firstMove]!.frame.diagnostics).toBeNull();
 
     // The next loop drives off again with fresh guidance from the start of the route.
     const again = samples.filter((s) => s.t > LOOP_S && s.frame.context === 'city');

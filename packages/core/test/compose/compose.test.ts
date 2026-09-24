@@ -274,6 +274,26 @@ describe('shift light', () => {
     expect(h.frame().shiftLight).toBeNull();
   });
 
+  it('keeps flashing while rpm hovers just below the flash point (hysteresis)', () => {
+    const h = connected(config);
+    h.run(T0 + 2000, { speed: 60, rpm: 6000 });
+    const flashes = (rpm: number): boolean | undefined => {
+      h.samples(h.now + 100, { speed: 60, rpm });
+      return h.frame().shiftLight?.flash;
+    };
+    expect(flashes(6299)).toBe(false);
+    expect(flashes(6300)).toBe(true);
+    expect(flashes(6250)).toBe(true);
+    expect(flashes(6180)).toBe(true);
+    expect(flashes(6299)).toBe(true);
+    expect(flashes(6170)).toBe(false); // below 6300 − 126
+    expect(flashes(6299)).toBe(false);
+    // Stale rpm resets the latch.
+    expect(flashes(6300)).toBe(true);
+    h.tick(h.now + 3000);
+    expect(h.state.shiftFlash).toBe(false);
+  });
+
   it('is off when parked or disabled', () => {
     const h = connected(config);
     h.samples(T0 + 100, { speed: 0, rpm: 6000 });
@@ -304,6 +324,49 @@ describe('ADAS', () => {
     expect(h.frame()).toMatchObject({
       blindSpot: { left: false, right: false },
       collision: 'none',
+    });
+  });
+
+  it('holds a warning for 1 s after the module last reported it', () => {
+    const h = connected();
+    h.send({ type: 'adas/link', connected: true, at: T0 });
+    h.send({ type: 'adas/collision', level: 'warning', ttcSeconds: 0.9, at: T0 + 100 });
+    // The module flickers between warning and caution, then says all clear.
+    h.send({ type: 'adas/collision', level: 'caution', ttcSeconds: 1.6, at: T0 + 200 });
+    expect(h.frame().collision).toBe('warning');
+    expect(h.frame().alerts[0]).toMatchObject({ title: 'BRAKE!', detail: null });
+    h.send({ type: 'adas/collision', level: 'warning', ttcSeconds: 0.8, at: T0 + 300 });
+    h.send({ type: 'adas/collision', level: 'none', ttcSeconds: null, at: T0 + 400 });
+    expect(h.frame().collision).toBe('warning');
+    h.tick(T0 + 1300);
+    expect(h.frame().collision).toBe('warning');
+    expect(h.frame().alerts.map((a) => a.title)).toEqual(['BRAKE!']);
+    h.tick(T0 + 1301);
+    expect(h.frame().collision).toBe('none');
+    expect(h.frame().alerts).toEqual([]);
+  });
+
+  it('holds a warning through a module disconnect, then drops it', () => {
+    const h = connected();
+    h.send({ type: 'adas/link', connected: true, at: T0 });
+    h.send({ type: 'adas/collision', level: 'warning', ttcSeconds: 0.9, at: T0 + 100 });
+    h.send({ type: 'adas/link', connected: false, at: T0 + 150 });
+    expect(h.frame().collision).toBe('warning');
+    h.tick(T0 + 1101);
+    expect(h.frame().collision).toBe('none');
+  });
+
+  it('shows a caution after the hold when the module still cautions', () => {
+    const h = connected();
+    h.send({ type: 'adas/link', connected: true, at: T0 });
+    h.send({ type: 'adas/collision', level: 'warning', ttcSeconds: 0.9, at: T0 + 100 });
+    for (let at = T0 + 300; at <= T0 + 1500; at += 200) {
+      h.send({ type: 'adas/collision', level: 'caution', ttcSeconds: 2, at });
+    }
+    expect(h.frame().collision).toBe('caution');
+    expect(h.frame().alerts[0]).toMatchObject({
+      title: 'VEHICLE AHEAD',
+      detail: 'Impact in 2.0 s',
     });
   });
 

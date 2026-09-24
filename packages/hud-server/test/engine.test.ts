@@ -9,12 +9,19 @@ import type {
 } from '@carheadsup/core';
 import { SYSTEM_TIMERS } from '@carheadsup/obd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HudEngine, maintenanceDueMessage } from '../src/engine.ts';
+import {
+  CLOCK_SYNC_TOLERANCE_MS,
+  HudEngine,
+  describeDuration,
+  maintenanceDueMessage,
+} from '../src/engine.ts';
 import type { EngineOutputs } from '../src/engine.ts';
 import { MemoryLogger, testConfig } from './helpers.ts';
 
 const T0 = Date.UTC(2026, 8, 23, 8, 0, 0);
 const DAY = 86_400_000;
+/** Long enough for a requested write (2 s coalescing) to happen. */
+const PERSIST_WAIT_MS = 2500;
 
 class RecordingOutputs implements EngineOutputs {
   readonly phone: HudToPhone[] = [];
@@ -49,6 +56,7 @@ function makeEngine(
     config?: DeepPartial<HudConfig>;
     persisted?: Partial<PersistedState>;
     now?: () => number;
+    monotonic?: () => number;
   } = {},
 ): Harness {
   const outputs = new RecordingOutputs();
@@ -59,6 +67,7 @@ function makeEngine(
     outputs,
     logger,
     now: options.now ?? (() => Date.now()),
+    ...(options.monotonic !== undefined ? { monotonic: options.monotonic } : {}),
     timers: SYSTEM_TIMERS,
   });
   return { engine, outputs, logger };
@@ -72,6 +81,36 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/**
+ * A system clock that network time can step: `wall` is the (fake) Date clock plus `step`, while
+ * the monotonic clock only follows the fake timers.
+ */
+function steppableClock() {
+  const clock = { step: 0 };
+  return {
+    clock,
+    now: () => Date.now() + clock.step,
+    monotonic: () => Date.now(),
+  };
+}
+
+/** Speed and rpm every 200 ms for `ms`, as the OBD link delivers them. */
+function driveFor(engine: HudEngine, ms: number, speed = 50, rpm = 1800): void {
+  for (let t = 0; t < ms; t += 200) {
+    vi.advanceTimersByTime(200);
+    engine.dispatch({
+      type: 'obd/samples',
+      samples: [
+        { signal: 'speed', value: speed },
+        { signal: 'rpm', value: rpm },
+      ],
+      at: 0,
+    });
+  }
+}
+
+const widgetOf = (frame: HudFrame, id: string) => frame.widgets.find((w) => w.id === id);
+
 describe('HudEngine time', () => {
   it('re-stamps events with its own clock', () => {
     const { engine } = makeEngine();
@@ -79,61 +118,180 @@ describe('HudEngine time', () => {
     engine.dispatch({ type: 'obd/samples', samples: [{ signal: 'speed', value: 42 }], at: 1 });
     expect(engine.state.now).toBe(T0 + 1234);
     expect(engine.state.vehicle.signals.speed).toEqual({ value: 42, at: T0 + 1234 });
+    expect(engine.now()).toBe(T0 + 1234);
+    expect(engine.startedAt).toBe(T0);
   });
 
-  it('never moves time backwards when the clock steps back', () => {
+  it('counts elapsed time: a step of the system clock only moves the wall-clock offset', () => {
+    const { clock, now, monotonic } = steppableClock();
+    const { engine } = makeEngine({ now, monotonic });
+    engine.start();
+    expect(engine.state.clock.wallOffsetMs).toBe(0);
+    vi.advanceTimersByTime(1000);
+    clock.step = 3 * DAY; // network time arrives
+    vi.advanceTimersByTime(1000);
+    expect(engine.state.now).toBe(T0 + 2000);
+    expect(engine.state.clock.wallOffsetMs).toBe(3 * DAY);
+    clock.step = 3 * DAY - 90_000; // and later steps back a little
+    vi.advanceTimersByTime(1000);
+    expect(engine.state.now).toBe(T0 + 3000);
+    expect(engine.state.clock.wallOffsetMs).toBe(3 * DAY - 90_000);
+  });
+
+  it('syncs on start and once the offset has moved by more than 2 s, and logs steps', () => {
+    const { clock, now, monotonic } = steppableClock();
+    const { engine, logger } = makeEngine({ now, monotonic });
+    clock.step = 700; // the wall clock read at start differs a little: synced at start
+    engine.start();
+    expect(engine.state.clock.wallOffsetMs).toBe(700);
+    clock.step = 700 + CLOCK_SYNC_TOLERANCE_MS; // slow drift within the tolerance: kept
+    vi.advanceTimersByTime(500);
+    expect(engine.state.clock.wallOffsetMs).toBe(700);
+    expect(logger.text('info')).not.toContain('system clock');
+    clock.step = 700 + CLOCK_SYNC_TOLERANCE_MS + 1;
+    vi.advanceTimersByTime(100);
+    expect(engine.state.clock.wallOffsetMs).toBe(701 + CLOCK_SYNC_TOLERANCE_MS);
+    clock.step = -2 * 3_600_000;
+    vi.advanceTimersByTime(100);
+    expect(logger.text('info')).toContain('the system clock moved back by 2 h 0 min');
+    // A clock/sync from outside only asks for a fresh measurement.
+    engine.dispatch({ type: 'clock/sync', wallOffsetMs: 12345, at: 0 });
+    expect(engine.state.clock.wallOffsetMs).toBe(-2 * 3_600_000);
+  });
+
+  it('keeps a drive going through network time stepping the clock days forward mid-drive', async () => {
+    const { clock, now, monotonic } = steppableClock();
+    const { engine, outputs } = makeEngine({
+      now,
+      monotonic,
+      config: { trip: { endAfterEngineOffMs: 60_000 } },
+    });
+    engine.start();
+    engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    engine.dispatch({ type: 'phone/link', connected: true, deviceName: 'Pixel', at: 0 });
+    engine.dispatch({
+      type: 'road/update',
+      road: {
+        speedLimitKph: 50,
+        unlimited: false,
+        source: 'osm',
+        roadName: null,
+        roadClass: null,
+        updatedAt: 0,
+      },
+      at: 0,
+    });
+    driveFor(engine, 60_000);
+    const startedAt = engine.state.trip.active?.startedAt;
+    expect(startedAt).toBe(T0 + 200);
+
+    clock.step = 3 * DAY + 5 * 3_600_000;
+    driveFor(engine, 10_000);
+    const frame = engine.frame;
+    // Nothing expired at once, nothing split: engine time did not jump.
+    expect(frame.context).toBe('city');
+    expect(widgetOf(frame, 'speed')).toMatchObject({ value: 50 });
+    expect(widgetOf(frame, 'speedLimit')).toMatchObject({ value: 50 });
+    expect(engine.state.trip.active?.startedAt).toBe(startedAt);
+    expect(engine.state.trip.completedCount).toBe(0);
+    // Only the absolute time moved.
+    expect(widgetOf(frame, 'clock')).toMatchObject({ epochMs: frame.at + clock.step });
+    await vi.advanceTimersByTimeAsync(PERSIST_WAIT_MS);
+    expect(outputs.saved.at(-1)?.activeTrip?.startedAt).toBe(T0 + 200 + clock.step);
+
+    // The trip ends normally; its record carries the corrected wall-clock times.
+    driveFor(engine, 1000, 0, 0);
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(outputs.trips).toHaveLength(1);
+    const trip = outputs.trips[0]!;
+    expect(trip.startedAt).toBe(T0 + 200 + clock.step);
+    // 70 s of driving (and the rpm's 2 s of freshness): the step itself does not count.
+    expect(trip.durationS).toBeGreaterThanOrEqual(70);
+    expect(trip.durationS).toBeLessThanOrEqual(73);
+    expect(Math.abs(trip.endedAt - trip.startedAt - trip.durationS * 1000)).toBeLessThan(500);
+    await engine.stop();
+  });
+
+  it('keeps a drive going when the clock steps back mid-drive', () => {
+    const { clock, now, monotonic } = steppableClock();
+    const { engine } = makeEngine({ now, monotonic });
+    engine.start();
+    engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    engine.dispatch({ type: 'adas/link', connected: true, at: 0 });
+    driveFor(engine, 30_000);
+    clock.step = -10 * 60_000;
+    driveFor(engine, 10_000);
+    expect(engine.frame.context).toBe('city');
+    expect(widgetOf(engine.frame, 'speed')).toMatchObject({ value: 50 });
+    expect(engine.state.trip.completedCount).toBe(0);
+    expect(engine.state.now).toBe(T0 + 40_000);
+    // …and data that stops arriving still expires on time.
+    engine.dispatch({ type: 'adas/collision', level: 'warning', ttcSeconds: 1.2, at: 0 });
+    vi.advanceTimersByTime(100);
+    expect(engine.frame.alerts.map((a) => a.title)).toContain('BRAKE!');
+    vi.advanceTimersByTime(3000);
+    expect(engine.frame.alerts.map((a) => a.title)).not.toContain('BRAKE!');
+    expect(widgetOf(engine.frame, 'speed')).toBeUndefined();
+  });
+
+  it('boots with a wrong clock, then follows network time for service dates', async () => {
+    // No real-time clock: the Pi boots 40 days behind; the oil was changed 355 days ago.
+    const { clock, now, monotonic } = steppableClock();
+    clock.step = -40 * DAY;
+    const { engine, outputs } = makeEngine({
+      now,
+      monotonic,
+      persisted: {
+        maintenanceRecords: [{ itemId: 'oil', odometerKm: null, at: T0 - 355 * DAY }],
+      },
+    });
+    engine.start();
+    const oil = () => engine.state.maintenance.status.find((s) => s.itemId === 'oil');
+    expect(oil()).toMatchObject({ status: 'ok', remainingDays: 50 });
+    expect(outputs.phone).toEqual([]);
+    clock.step = 0; // network time via the phone's hotspot
+    vi.advanceTimersByTime(100);
+    expect(oil()).toMatchObject({ status: 'due-soon', remainingDays: 10 });
+    expect(outputs.phone).toEqual([
+      {
+        t: 'maintenance-due',
+        items: [expect.objectContaining({ itemId: 'oil', status: 'due-soon' }) as unknown],
+      },
+    ]);
+    engine.dispatch({ type: 'maintenance/done', itemId: 'oil', odometerKm: null, at: 0 });
+    expect(engine.state.maintenance.records[0]?.at).toBe(Date.now());
+    await engine.stop();
+  });
+
+  it('ignores a non-finite clock reading', () => {
+    let wall = T0 + 500;
+    const { engine } = makeEngine({ now: () => wall });
+    wall = Number.NaN;
+    engine.dispatch({ type: 'tick', at: 0 });
+    expect(engine.state.now).toBe(T0 + 500);
+    expect(engine.state.clock.wallOffsetMs).toBe(0);
+    let mono = 0;
+    const other = makeEngine({ now: () => T0, monotonic: () => mono }).engine;
+    mono = Number.NaN;
+    other.dispatch({ type: 'tick', at: 0 });
+    expect(other.state.now).toBe(T0);
+    mono = 250;
+    other.dispatch({ type: 'tick', at: 0 });
+    expect(other.state.now).toBe(T0 + 250);
+  });
+
+  it('never moves backwards on a fake clock without a monotonic one', () => {
     const { engine } = makeEngine();
     vi.setSystemTime(T0 + 10_000);
     engine.dispatch({ type: 'tick', at: 0 });
     vi.setSystemTime(T0 + 2_000);
-    engine.dispatch({
-      type: 'obd/samples',
-      samples: [{ signal: 'rpm', value: 900 }],
-      at: T0 + 50_000,
-    });
+    engine.dispatch({ type: 'tick', at: 0 });
     expect(engine.state.now).toBe(T0 + 10_000);
-    expect(engine.state.vehicle.signals.rpm?.at).toBe(T0 + 10_000);
-    // Time keeps counting from there (at 99 % while it is ahead of the wall clock) rather than
-    // freezing until the wall clock is back at T0 + 10 s.
+    // It counts on from there; the offset follows the wall clock.
     vi.setSystemTime(T0 + 3_000);
     engine.dispatch({ type: 'tick', at: 0 });
-    expect(engine.state.now).toBe(T0 + 10_990);
-  });
-
-  it('lets stale data expire when the wall clock steps back', () => {
-    const { engine } = makeEngine();
-    engine.start();
-    engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
-    engine.dispatch({ type: 'adas/link', connected: true, at: 0 });
-    engine.dispatch({ type: 'adas/collision', level: 'warning', ttcSeconds: 1.2, at: 0 });
-    engine.dispatch({ type: 'obd/samples', samples: [{ signal: 'speed', value: 88 }], at: 0 });
-    vi.advanceTimersByTime(200);
-    expect(engine.frame.alerts.map((a) => a.title)).toContain('BRAKE!');
-    expect(engine.state.vehicle.signals.speed?.value).toBe(88);
-    const speedAt = engine.state.vehicle.signals.speed?.at ?? 0;
-
-    // NTP steps the clock back a minute; then both sources go silent.
-    vi.setSystemTime(Date.now() - 60_000);
-    vi.advanceTimersByTime(3000);
-    expect(engine.state.now - speedAt).toBeGreaterThan(2900);
-    expect(engine.frame.alerts.map((a) => a.title)).not.toContain('BRAKE!');
-    expect(engine.frame.collision).toBe('none');
-    expect(JSON.stringify(engine.frame.widgets)).not.toContain('88');
-  });
-
-  it('follows a forward step of the wall clock at once', () => {
-    const { engine } = makeEngine();
-    vi.setSystemTime(T0 + 3_600_000);
-    engine.dispatch({ type: 'tick', at: 0 });
-    expect(engine.state.now).toBe(T0 + 3_600_000);
-  });
-
-  it('ignores a non-finite clock reading', () => {
-    let clock = T0 + 500;
-    const { engine } = makeEngine({ now: () => clock });
-    clock = Number.NaN;
-    engine.dispatch({ type: 'tick', at: 0 });
-    expect(engine.state.now).toBe(T0 + 500);
+    expect(engine.state.now).toBe(T0 + 11_000);
+    expect(engine.state.clock.wallOffsetMs).toBe(-8000);
   });
 
   it('ticks every 100 ms once started, and stops ticking on stop()', async () => {
@@ -144,6 +302,13 @@ describe('HudEngine time', () => {
     await engine.stop();
     vi.advanceTimersByTime(1000);
     expect(engine.state.now).toBe(T0 + 1000);
+  });
+
+  it('describes clock steps readably', () => {
+    expect(describeDuration(4200)).toBe('4.2 s');
+    expect(describeDuration(12 * 60_000 + 3000)).toBe('12 min 3 s');
+    expect(describeDuration(2 * 3_600_000 + 5 * 60_000)).toBe('2 h 5 min');
+    expect(describeDuration(3 * DAY + 4 * 3_600_000)).toBe('3 d 4 h');
   });
 });
 
@@ -508,6 +673,82 @@ describe('HudEngine trip in progress', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(second.outputs.trips).toHaveLength(0);
     expect(second.engine.state.trip.current?.distanceKm).toBeGreaterThan(8.2);
+    await second.engine.stop();
+  });
+
+  it('resumes the trip after a restart when network time had corrected the clock mid-drive', async () => {
+    // The Pi boots two days behind; network time corrects it ten minutes into the drive.
+    const { clock, now, monotonic } = steppableClock();
+    clock.step = -2 * DAY;
+    const first = makeEngine({ now, monotonic });
+    first.engine.start();
+    first.engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    driveFor(first.engine, 5 * 60_000);
+    clock.step = 0;
+    driveFor(first.engine, 5 * 60_000);
+    driveFor(first.engine, 400, 0, 0);
+    await first.engine.stop();
+    const saved = first.outputs.saved.at(-1);
+    // Saved on the corrected wall clock (engine time started two days behind).
+    expect(saved?.activeTrip?.startedAt).toBe(T0 + 200);
+
+    // A short stop: the next start's clock is right from the beginning, 20 s later.
+    vi.setSystemTime(Date.now() + 20_000);
+    const second = makeEngine({ persisted: saved });
+    second.engine.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(second.outputs.trips).toHaveLength(0);
+    expect(second.engine.state.trip.current?.startedAt).toBe(T0 + 200);
+    expect(second.engine.state.trip.current?.distanceKm).toBeGreaterThan(8.2);
+    await second.engine.stop();
+  });
+
+  it('splits the resumed trip when network time shows the car was off for a day (fake-hwclock)', async () => {
+    const first = makeEngine();
+    first.engine.start();
+    drive(first.engine);
+    await first.engine.stop();
+    const saved = first.outputs.saved.at(-1);
+    // The next day, a Pi without a real-time clock boots with the time saved at shutdown (a
+    // minute on): the trip looks like it goes on.
+    const { clock, now, monotonic } = steppableClock();
+    vi.setSystemTime(Date.now() + DAY);
+    clock.step = -DAY + 60_000;
+    const second = makeEngine({ persisted: saved, now, monotonic });
+    second.engine.start();
+    second.engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    driveFor(second.engine, 60_000);
+    expect(second.outputs.trips).toHaveLength(0);
+    // The phone's hotspot comes up and network time corrects the clock.
+    clock.step = 0;
+    driveFor(second.engine, 1000);
+    expect(second.outputs.trips).toHaveLength(1);
+    expect(second.outputs.trips[0]).toMatchObject({ startedAt: T0 + 200 });
+    expect(second.outputs.trips[0]!.endedAt).toBeLessThan(T0 + 700_000);
+    expect(second.outputs.trips[0]!.distanceKm).toBeLessThan(8.5);
+    // Today's drive goes on as a trip of its own, dated today.
+    expect(second.engine.state.trip.current?.startedAt).toBeGreaterThan(T0 + DAY);
+    expect(second.engine.state.trip.current?.distanceKm).toBeLessThan(1);
+    await second.engine.stop();
+    expect(second.outputs.saved.at(-1)?.activeTrip?.startedAt).toBeGreaterThan(T0 + DAY);
+  });
+
+  it('completes a trip saved "in the future" of the next start’s clock', async () => {
+    const first = makeEngine();
+    first.engine.start();
+    drive(first.engine);
+    await first.engine.stop();
+    const saved = first.outputs.saved.at(-1);
+    // Unclean power cut on a Pi without a real-time clock: it boots with an hour-old time.
+    const { clock, now, monotonic } = steppableClock();
+    clock.step = -3_600_000;
+    const second = makeEngine({ persisted: saved, now, monotonic });
+    second.engine.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(second.outputs.trips).toHaveLength(1);
+    expect(second.outputs.trips[0]).toMatchObject({ startedAt: T0 + 200 });
+    expect(second.outputs.trips[0]!.distanceKm).toBeGreaterThan(8.2);
+    expect(second.engine.state.trip.active).toBeNull();
     await second.engine.stop();
   });
 

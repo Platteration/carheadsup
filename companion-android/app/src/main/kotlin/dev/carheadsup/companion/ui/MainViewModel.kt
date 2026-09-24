@@ -14,6 +14,7 @@ import dev.carheadsup.protocol.api.DisplayUnits
 import dev.carheadsup.protocol.api.MaintenanceItemStatus
 import dev.carheadsup.protocol.api.TripFormatter
 import dev.carheadsup.protocol.api.TripRecord
+import dev.carheadsup.protocol.auth.HudPin
 import dev.carheadsup.protocol.link.HudEndpoint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -83,6 +84,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun reconnect() = graph.link.reconnectNow()
 
+    /**
+     * The user confirms that the HUD without pairing token that answered ([hudId]) is theirs:
+     * pin it and connect. Ignored once a pairing token is set (the HUD must then prove itself).
+     */
+    fun confirmOpenHud(hudId: String) {
+        graph.settingsStore.update { if (it.pairingToken.isEmpty()) it.copy(hudPin = HudPin.of(hudId, "")) else it }
+        graph.link.reconnectNow()
+    }
+
+    /**
+     * Forget the paired HUD (e.g. it was replaced or reset): the next HUD that proves the pairing
+     * token — or, without one, that the user confirms — becomes the paired one.
+     */
+    fun forgetPairedHud() {
+        graph.settingsStore.update { it.copy(hudPin = null) }
+        graph.link.reconnectNow()
+    }
+
     /** A remote-control button: over the WebSocket when connected, else via `POST /api/input`. */
     fun sendInput(action: InputAction) {
         remoteErrorState.value = null
@@ -131,6 +150,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** The HUD's settings page, or null when its address is unknown. */
-    fun settingsUrl(): String? = graph.currentEndpoint()?.settingsUrl
+    /**
+     * The HUD's settings page, or null until a HUD has proven itself (it receives the API token).
+     * The trusted address only changes along with the link status.
+     */
+    val settingsUrl: StateFlow<String?> =
+        linkStatus
+            .map { graph.currentEndpoint()?.settingsUrl }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, graph.currentEndpoint()?.settingsUrl)
 }

@@ -28,11 +28,13 @@ const PNG =
 
 const hello = {
   t: 'hello',
-  v: 1,
+  v: 2,
   device: 'Pixel 9',
+  deviceId: '8PHy8_T19vf4-fr7_P3-_w',
   app: 'carheadsup',
   appVersion: '1.0.0',
-  token: 'secret',
+  nonce: 'ICEiIyQlJicoKSorLC0uLw',
+  proof: 'oOT-0Sh3dAYXUuXMaUSyTFWcNdCrfQz_WCIjHGqzHqM',
 };
 const nav = {
   t: 'nav',
@@ -169,12 +171,27 @@ describe('parsePhoneMessage — hello', () => {
     expect(ok(parsePhoneMessage(json({ ...hello, extra: 'x' })))).toEqual(hello);
   });
 
+  it('drops a v1 pairing token: the token never travels in v2', () => {
+    expect(ok(parsePhoneMessage(json({ ...hello, token: 'secret' })))).not.toHaveProperty('token');
+  });
+
   it.each([
-    [{ token: undefined }, 'hello.token: required'],
+    [{ proof: undefined }, 'hello.proof: required'],
+    [{ deviceId: undefined }, 'hello.deviceId: required'],
+    [{ nonce: undefined }, 'hello.nonce: required'],
     [{ v: 1.5 }, 'hello.v: expected integer, got 1.5'],
     [{ v: '1' }, 'hello.v: expected number, got string'],
     [{ device: 'd'.repeat(101) }, 'hello.device: expected at most 100 characters'],
-    [{ token: 't'.repeat(257) }, 'hello.token: expected at most 256 characters'],
+    // Identities, nonces and proofs are base64url of a fixed length: nothing else can reach
+    // the proof message, whose fields are joined with "|".
+    [{ deviceId: 'Pixel 9' }, 'hello.deviceId: expected 22 base64url characters'],
+    [{ deviceId: `${'A'.repeat(21)}|` }, 'hello.deviceId: expected 22 base64url characters'],
+    [{ deviceId: 'A'.repeat(23) }, 'hello.deviceId: expected 22 base64url characters'],
+    [{ nonce: `${'A'.repeat(21)}=` }, 'hello.nonce: expected 22 base64url characters'],
+    [{ nonce: `${'A'.repeat(21)}+` }, 'hello.nonce: expected 22 base64url characters'],
+    [{ proof: 'A'.repeat(42) }, 'hello.proof: expected 43 base64url characters'],
+    [{ proof: `${'A'.repeat(43)}=` }, 'hello.proof: expected 43 base64url characters'],
+    [{ proof: `${'A'.repeat(42)}/` }, 'hello.proof: expected 43 base64url characters'],
   ])('rejects %j', (override, error) => {
     expect(err(parsePhoneMessage(json({ ...hello, ...override })))).toBe(error);
   });

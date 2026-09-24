@@ -203,7 +203,7 @@ function eventStream(seed: number): (at: number) => HudEvent {
       };
     }
     if (roll < 0.6) return { type: 'tick', at };
-    const kind = Math.floor(rand() * 22);
+    const kind = Math.floor(rand() * 23);
     switch (kind) {
       case 0:
         return {
@@ -335,6 +335,13 @@ function eventStream(seed: number): (at: number) => HudEvent {
           odometerKm: chance(rand, 0.1) ? -5 : between(rand, 0, 300_000),
           at,
         };
+      case 21:
+        // Network time stepping the wall clock (hours, days, back a little), or junk.
+        return {
+          type: 'clock/sync',
+          wallOffsetMs: pick(rand, [0, 3_600_000, -90_000, 3 * 86_400_000, Number.NaN]),
+          at,
+        };
       default:
         return { type: 'config', config: pick(rand, CONFIGS), at };
     }
@@ -403,7 +410,11 @@ function assertValidFrame(frame: HudFrame, state: HudState, config: HudConfig): 
   expect(['none', 'caution', 'warning']).toContain(frame.collision);
 
   if (frame.diagnostics !== null) {
-    expect(frame.context).toBe('parked');
+    // Parked, or stopped with the dashboard opened by the driver; never while moving.
+    if (frame.context !== 'parked') {
+      expect(frame.context).toBe('stopped');
+      expect(state.ui.dashboardRequested).toBe(true);
+    }
     expect(frame.diagnostics.pageIndex).toBeGreaterThanOrEqual(0);
     expect(frame.diagnostics.pageIndex).toBeLessThan(frame.diagnostics.pageCount);
   } else if (!frame.blanked) {
@@ -424,6 +435,8 @@ function assertValidState(state: HudState, prev: HudState): void {
   expect(new Set(keys).size).toBe(keys.length);
   expect(state.messages.length).toBeLessThanOrEqual(5);
   expect(Math.abs(state.ui.brightnessOffset)).toBeLessThanOrEqual(0.5);
+  expect(Number.isFinite(state.clock.wallOffsetMs)).toBe(true);
+  if (state.ui.dashboardRequested) expect(state.context.context).toBe('stopped');
   expect(state.odometer.integratedKm).toBeGreaterThanOrEqual(prev.odometer.integratedKm);
 }
 
@@ -446,6 +459,7 @@ function record(frame: HudFrame, effects: HudEffect[]): void {
   if (frame.toast !== null) coverage.add(`toast:${frame.toast.kind}`);
   if (frame.call !== null) coverage.add(`call:${frame.call.state}`);
   if (frame.diagnostics !== null) coverage.add(`page:${frame.diagnostics.page}`);
+  if (frame.diagnostics !== null && frame.context === 'stopped') coverage.add('dashboard:stopped');
   if (frame.shiftLight !== null) coverage.add('shiftLight');
   if (frame.collision !== 'none') coverage.add('collision');
 }
@@ -527,6 +541,7 @@ describe('random event streams', () => {
       'blanked',
       'shiftLight',
       'collision',
+      'dashboard:stopped',
     ];
     expect([...coverage]).toEqual(expect.arrayContaining(required));
   });

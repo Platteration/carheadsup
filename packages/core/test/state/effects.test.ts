@@ -184,6 +184,37 @@ describe('deriveEffects — persist', () => {
     expect(deriveEffects(next, same, event, config)).toEqual([]);
   });
 
+  it('persists when the gear-numbering anchor changes', () => {
+    const config = makeConfig();
+    const h = new Harness(config);
+    const prev = h.state;
+    const anchor = { transmission: 'automatic' as const, secondGearRpmPerKph: 71.5 };
+    const next = { ...prev, gear: { ...prev.gear, anchor } };
+    const event: HudEvent = { type: 'tick', at: T0 };
+    expect(deriveEffects(prev, next, event, config)).toEqual([{ type: 'persist' }]);
+    const same = { ...next, gear: { ...next.gear, anchor: { ...anchor } } };
+    expect(deriveEffects(next, same, event, config)).toEqual([]);
+    const moved = {
+      ...next,
+      gear: { ...next.gear, anchor: { ...anchor, secondGearRpmPerKph: 72 } },
+    };
+    expect(deriveEffects(next, moved, event, config)).toEqual([{ type: 'persist' }]);
+  });
+
+  it('persists a clock step only while a trip is in progress', () => {
+    const config = makeConfig();
+    const idle = new Harness(config);
+    const sync: HudEvent = { type: 'clock/sync', wallOffsetMs: 3_600_000, at: T0 };
+    const synced = reduce(idle.state, sync, config);
+    expect(deriveEffects(idle.state, synced, sync, config)).toEqual([]);
+    const driving = new Harness(config);
+    driving.obdConnected(T0);
+    driving.run(T0 + 2000, { speed: 30, rpm: 1500 });
+    const later: HudEvent = { ...sync, at: driving.now };
+    const next = reduce(driving.state, later, config);
+    expect(deriveEffects(driving.state, next, later, config)).toEqual([{ type: 'persist' }]);
+  });
+
   it('emits nothing for an uneventful tick', () => {
     const h = new Harness(makeConfig(), persisted({ odometerKm: 10 }));
     const next = reduce(h.state, { type: 'tick', at: T0 + 1000 }, h.config);

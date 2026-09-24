@@ -25,10 +25,16 @@
     <string name="status_searching">Looking for the HUD on this Wi-Fi…</string>
     <string name="status_connecting">Connecting to %1$s…</string>
     <string name="status_connected">Connected to %1$s</string>
+    <string name="status_connected_unverified">Connected to %1$s — not paired: without a pairing code nothing proves this is your HUD</string>
     <string name="status_waiting">Disconnected: %1$s</string>
     <string name="status_waiting_countdown">Disconnected (%1$s), retrying in %2$d s</string>
     <string name="status_refused">The HUD refused the connection: %1$s</string>
-    <string name="status_bad_token">wrong pairing token (see Setup)</string>
+    <string name="status_bad_token">wrong pairing code (see Setup)</string>
+    <string name="status_untrusted_different_hud">A different HUD is answering at %1$s (%2$s…, not your paired HUD %3$s…). Nothing was sent to it.</string>
+    <string name="status_untrusted_open_hud">The HUD at %1$s (%2$s…) has no pairing code, so the app cannot verify that it is yours. Connect only if it is — better, set a pairing code (HUD settings → Phone) and enter it in Setup.</string>
+    <string name="status_untrusted_bad_proof">The HUD at %1$s could not prove that it knows your pairing code. Nothing was sent to it. Check the code in Setup.</string>
+    <string name="status_untrusted_protocol">The HUD at %1$s broke the handshake (%2$s). Nothing was sent to it.</string>
+    <string name="status_forget_hint">Replaced or reset your HUD? Forget the paired one: the next HUD that proves your pairing code becomes the paired HUD.</string>
     <string name="status_rtt">%1$d ms</string>
     <string name="status_read_aloud_on">Messages are read aloud on the phone</string>
     <string name="status_read_aloud_off">Messages are not read aloud (HUD or app setting)</string>
@@ -44,6 +50,8 @@
     <string name="action_refresh">Refresh</string>
     <string name="action_sync_trips">Sync trips</string>
     <string name="action_open_hud_settings">Open HUD settings</string>
+    <string name="action_confirm_open_hud">This is my HUD — connect</string>
+    <string name="action_forget_paired_hud">Forget paired HUD</string>
     <string name="granted">OK</string>
 
     <!-- Permissions -->
@@ -92,8 +100,12 @@
     <string name="setting_discovery_found">Found at %1$s</string>
     <string name="setting_address">HUD address (host:port)</string>
     <string name="setting_address_invalid">Enter an address like 192.168.4.1 or hud.local:8080</string>
-    <string name="setting_pairing_token">Pairing token</string>
-    <string name="setting_pairing_token_description">As set in the HUD\'s phone settings; empty if none</string>
+    <string name="setting_pairing_token">Pairing code</string>
+    <string name="setting_pairing_token_description">As set in the HUD\'s settings (Phone → Pairing code). It is never sent: phone and HUD prove to each other that they know it.</string>
+    <string name="setup_paired">Paired with HUD %1$s…</string>
+    <string name="setup_confirmed_open">Confirmed HUD %1$s… (no pairing code: not verified)</string>
+    <string name="setup_not_paired">Not paired yet: the first HUD that proves this code is remembered.</string>
+    <string name="setup_no_pairing_code">No pairing code: nothing proves which HUD answers, so you confirm it on the Status tab. Set a code on the HUD instead.</string>
     <string name="setting_api_token">API token</string>
     <string name="setting_api_token_description">For trips, maintenance and the settings page; empty if the HUD has none</string>
     <string name="setting_read_aloud">Read messages aloud</string>
@@ -105,12 +117,16 @@
     <string name="setting_cameras">Speed camera warnings</string>
     <string name="setting_cameras_description">Mapped cameras ahead. Off by default: such warnings are illegal while driving in some countries (e.g. Germany, Switzerland). Check local law before turning them on.</string>
     <string name="hud_settings_description">Layouts, units, alerts and projection are configured on the HUD itself.</string>
-    <string name="hud_address_unknown">The HUD\'s address is not known yet: connect first or enter it above.</string>
+    <string name="export_saved">Saved to Downloads: %1$s</string>
+    <string name="hud_address_unknown">Connect to your HUD first: the settings page only opens on a HUD that has proven itself (it receives the API token).</string>
     <string name="about_version">carheadsup companion %1$s</string>
 
     <!-- Notifications -->
     <string name="channel_link">HUD connection</string>
     <string name="channel_link_description">Shown while the app keeps the connection to the HUD</string>
+    <string name="notification_different_hud">A different HUD is answering — nothing was sent. Open the app.</string>
+    <string name="notification_open_hud">A HUD without pairing code is waiting for your confirmation</string>
+    <string name="notification_unverified_hud">The HUD could not prove the pairing code — nothing was sent</string>
     <string name="channel_trips">Trips</string>
     <string name="channel_trips_description">A summary when the HUD logs a trip</string>
     <string name="channel_maintenance">Maintenance</string>

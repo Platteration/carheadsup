@@ -4,11 +4,18 @@
  *   {"t":"collision","level":"warning","ttcSeconds":1.4}
  *   {"t":"heartbeat"}
  * Each line is validated with `parseAdasMessage`. The module counts as connected from its first
- * valid message until 2 s pass without one. Oversize datagrams are dropped and the datagram
- * rate is capped, so a misbehaving (or hostile) device on the car network cannot flood the HUD.
+ * valid message until 2 s pass without one.
+ *
+ * Only senders listed in `sensors.adasAllowedSenders` are heard (an empty list accepts anyone,
+ * with a warning); other datagrams are dropped unread, counted and reported at most every 10 s.
+ * Each sender has its own datagram budget, so a flood from one device cannot starve another,
+ * and oversize datagrams are dropped. The source address of a UDP datagram is not proof of who
+ * sent it (anyone on the same network segment can forge it), so the list keeps out mistakes and
+ * casual meddling, not a determined attacker.
  */
 import { createSocket, type RemoteInfo } from 'node:dgram';
 import {
+  normalizeIpAddress,
   parseAdasMessage,
   type AdasMessage,
   type HudConfig,
@@ -23,8 +30,14 @@ export const ADAS_SILENCE_MS = 2000;
 export const ADAS_MAX_DATAGRAM_BYTES = 4096;
 /** At most this many messages are taken from one datagram. */
 export const ADAS_MAX_LINES_PER_DATAGRAM = 8;
-/** Sustained datagram rate accepted (bursts up to the same number). */
+/** Sustained datagram rate accepted from each sender (bursts up to the same number). */
 export const ADAS_MAX_DATAGRAMS_PER_S = 50;
+/**
+ * Senders whose datagram budget is tracked; beyond this the one silent for longest is forgotten
+ * (and starts afresh if it returns). With an allow-list this is never reached (the schema caps
+ * the list at 32); it bounds memory when any sender is accepted.
+ */
+export const ADAS_MAX_TRACKED_SENDERS = 64;
 /** Minimum interval between repeated warnings about bad traffic. */
 const WARN_INTERVAL_MS = 10_000;
 const BIND_RETRY_MS = 10_000;
@@ -42,6 +55,51 @@ export interface UdpSocketLike {
 export type UdpSocketFactory = () => UdpSocketLike;
 
 export const defaultUdpSocketFactory: UdpSocketFactory = () => createSocket({ type: 'udp4' });
+
+/**
+ * The allow-list form of a datagram's source address: canonical (see `normalizeIpAddress`, so a
+ * dual-stack socket's `::ffff:10.42.0.50` is `10.42.0.50`), without the zone index Node appends
+ * to link-local IPv6 addresses (`fe80::1%wlan0`).
+ */
+function senderKey(address: string): string {
+  const zone = address.indexOf('%');
+  const bare = zone === -1 ? address : address.slice(0, zone);
+  return normalizeIpAddress(bare) ?? bare;
+}
+
+/** `sensors.adasAllowedSenders` in canonical form; `null` = any sender. */
+type SenderFilter = ReadonlySet<string> | null;
+
+function senderFilter(list: readonly string[]): SenderFilter {
+  // A non-empty list whose entries all fail to parse (the schema prevents it) accepts no one:
+  // an unreadable list must not open the feed to everybody.
+  if (list.length === 0) return null;
+  const allowed = new Set<string>();
+  for (const entry of list) {
+    const address = normalizeIpAddress(entry);
+    if (address !== null) allowed.add(address);
+  }
+  return allowed;
+}
+
+function sameFilter(a: SenderFilter, b: SenderFilter): boolean {
+  if (a === null || b === null) return a === b;
+  return a.size === b.size && [...a].every((address) => b.has(address));
+}
+
+/** Whether `next` refuses a sender that `previous` accepted. */
+function narrows(previous: SenderFilter, next: SenderFilter): boolean {
+  if (next === null) return false;
+  if (previous === null) return true;
+  return [...previous].some((address) => !next.has(address));
+}
+
+function describeFilter(filter: ReadonlySet<string>): string {
+  return filter.size === 0 ? 'no valid address' : [...filter].join(', ');
+}
+
+const ANY_SENDER_WARNING =
+  "ADAS feed: accepting datagrams from any device on the network, so anyone on the car's Wi-Fi can raise or hide collision warnings; list the module's address in sensors.adasAllowedSenders";
 
 /** HUD events for one validated ADAS message (heartbeats only keep the link alive). */
 export function adasMessageToEvents(message: AdasMessage, at: number): HudEvent[] {
@@ -72,6 +130,7 @@ export class AdasUdpSource implements EventSource {
   readonly name = 'adas-udp';
   private readonly options: AdasUdpSourceOptions;
   private port: number | null;
+  private senders: SenderFilter;
   private ctx: SourceContext | null = null;
   private log: OnceLogger | null = null;
   private socket: UdpSocketLike | null = null;
@@ -79,14 +138,18 @@ export class AdasUdpSource implements EventSource {
   private connected = false;
   private silenceTimer: unknown = null;
   private retryTimer: unknown = null;
-  private bucket: TokenBucket | null = null;
+  /** Datagram budget per sender, least recently seen first. */
+  private readonly buckets = new Map<string, TokenBucket>();
   private dropped = 0;
   private invalid = 0;
   private lastWarnAt = -Infinity;
+  private rejected = 0;
+  private lastRejectWarnAt = -Infinity;
 
   constructor(config: HudConfig, options: AdasUdpSourceOptions) {
     this.options = options;
     this.port = config.sensors.adasUdpPort;
+    this.senders = senderFilter(config.sensors.adasAllowedSenders);
   }
 
   /** The bound UDP port (useful with port 0), or null when not listening. */
@@ -103,7 +166,7 @@ export class AdasUdpSource implements EventSource {
     if (this.ctx !== null) return;
     this.ctx = ctx;
     this.log = new OnceLogger(ctx.logger);
-    this.bucket = new TokenBucket(ADAS_MAX_DATAGRAMS_PER_S, ADAS_MAX_DATAGRAMS_PER_S, ctx.now);
+    this.buckets.clear();
     await this.listen();
   }
 
@@ -117,13 +180,31 @@ export class AdasUdpSource implements EventSource {
     this.retryTimer = null;
     this.silenceTimer = null;
     this.connected = false;
+    this.buckets.clear();
     await this.closeSocket();
   }
 
-  /** Only a port change rebinds the socket. */
+  /**
+   * Only a port change rebinds the socket. A new sender list applies at once; if it refuses a
+   * sender the old one accepted, the link restarts, so readings from a device no longer allowed
+   * stop counting now rather than when they expire (an allowed module reconnects with its next
+   * message).
+   */
   async updateConfig(config: HudConfig): Promise<void> {
+    const senders = senderFilter(config.sensors.adasAllowedSenders);
+    const previous = this.senders;
+    const sendersChanged = !sameFilter(previous, senders);
+    if (sendersChanged) {
+      this.senders = senders;
+      for (const sender of [...this.buckets.keys()]) {
+        if (!this.accepts(sender)) this.buckets.delete(sender);
+      }
+    }
     const port = config.sensors.adasUdpPort;
-    if (port === this.port) return;
+    if (port === this.port) {
+      if (sendersChanged) this.applySenders(narrows(previous, senders));
+      return;
+    }
     this.port = port;
     const ctx = this.ctx;
     if (ctx === null) return;
@@ -194,20 +275,68 @@ export class AdasUdpSource implements EventSource {
     }
     this.bound = true;
     this.log?.reset('bind');
-    ctx.logger.info(`ADAS feed: listening on UDP ${bindAddress}:${this.boundPort ?? port}`);
+    const listening = `ADAS feed: listening on UDP ${bindAddress}:${this.boundPort ?? port}`;
+    const senders = this.senders;
+    if (senders === null) {
+      ctx.logger.info(listening);
+      this.log?.warn('any-sender', ANY_SENDER_WARNING);
+    } else {
+      ctx.logger.info(`${listening}, accepting only ${describeFilter(senders)}`);
+    }
+  }
+
+  private accepts(sender: string): boolean {
+    return this.senders === null || this.senders.has(sender);
+  }
+
+  /** Apply a changed sender list to the running feed (same port). */
+  private applySenders(narrowed: boolean): void {
+    const ctx = this.ctx;
+    if (ctx === null) return;
+    if (narrowed) this.markSilent();
+    if (!this.bound) return; // listen() reports the list once the port is open
+    const senders = this.senders;
+    if (senders === null) {
+      this.log?.warn('any-sender', ANY_SENDER_WARNING);
+    } else {
+      this.log?.reset('any-sender');
+      ctx.logger.info(`ADAS feed: now accepting only ${describeFilter(senders)}`);
+    }
+  }
+
+  /** The sender's datagram budget, created (forgetting the longest-silent sender) if new. */
+  private bucketFor(ctx: SourceContext, sender: string): TokenBucket {
+    let bucket = this.buckets.get(sender);
+    if (bucket === undefined) {
+      if (this.buckets.size >= ADAS_MAX_TRACKED_SENDERS) {
+        const oldest = this.buckets.keys().next();
+        if (oldest.done !== true) this.buckets.delete(oldest.value);
+      }
+      bucket = new TokenBucket(ADAS_MAX_DATAGRAMS_PER_S, ADAS_MAX_DATAGRAMS_PER_S, ctx.now);
+    } else {
+      this.buckets.delete(sender); // re-inserted below as the most recently seen
+    }
+    this.buckets.set(sender, bucket);
+    return bucket;
   }
 
   private onDatagram(socket: UdpSocketLike, msg: Buffer, rinfo: RemoteInfo): void {
     const ctx = this.ctx;
     if (ctx === null || socket !== this.socket) return;
-    if (!(this.bucket?.take() ?? false)) {
+    const sender = senderKey(rinfo.address);
+    if (!this.accepts(sender)) {
+      this.rejected += 1;
+      this.warnRejected(ctx, sender);
+      return;
+    }
+    if (!this.bucketFor(ctx, sender).take()) {
       this.dropped += 1;
-      this.warnTraffic(ctx, `rate limit exceeded`);
+      this.warnTraffic(ctx, `rate limit exceeded by ${sender}`);
       return;
     }
     if (msg.length > ADAS_MAX_DATAGRAM_BYTES) {
       this.dropped += 1;
-      this.warnTraffic(ctx, `oversize datagram (${msg.length} bytes) from ${rinfo.address}`);
+      this.warnTraffic(ctx, `oversize datagram (${msg.length} bytes) from ${sender}`);
       return;
     }
     const lines = msg
@@ -220,14 +349,14 @@ export class AdasUdpSource implements EventSource {
       const parsed = parseAdasMessage(line);
       if (!parsed.ok) {
         this.invalid += 1;
-        this.warnTraffic(ctx, `invalid message from ${rinfo.address}: ${parsed.error}`);
+        this.warnTraffic(ctx, `invalid message from ${sender}: ${parsed.error}`);
         continue;
       }
       valid += 1;
       const at = ctx.now();
       if (!this.connected) {
         this.connected = true;
-        ctx.logger.info(`ADAS feed: module connected (${rinfo.address})`);
+        ctx.logger.info(`ADAS feed: module connected (${sender})`);
         ctx.emit({ type: 'adas/link', connected: true, at });
       }
       for (const event of adasMessageToEvents(parsed.value, at)) ctx.emit(event);
@@ -263,13 +392,24 @@ export class AdasUdpSource implements EventSource {
   /** Warn about bad traffic at most every 10 s, with counts of what was dropped since. */
   private warnTraffic(ctx: SourceContext, detail: string): void {
     const now = ctx.now();
-    if (now - this.lastWarnAt < WARN_INTERVAL_MS) return;
+    if (Math.abs(now - this.lastWarnAt) < WARN_INTERVAL_MS) return; // abs: a clock stepped back
     this.lastWarnAt = now;
     ctx.logger.warn(
       `ADAS feed: ${detail} (dropped ${this.dropped}, invalid ${this.invalid} since the last warning)`,
     );
     this.dropped = 0;
     this.invalid = 0;
+  }
+
+  /** Report datagrams from senders not on the list at most every 10 s, with a count. */
+  private warnRejected(ctx: SourceContext, sender: string): void {
+    const now = ctx.now();
+    if (Math.abs(now - this.lastRejectWarnAt) < WARN_INTERVAL_MS) return;
+    this.lastRejectWarnAt = now;
+    ctx.logger.warn(
+      `ADAS feed: ignoring datagrams from ${sender}, which is not in sensors.adasAllowedSenders (${this.rejected} ignored since the last warning)`,
+    );
+    this.rejected = 0;
   }
 
   private async closeSocket(): Promise<void> {

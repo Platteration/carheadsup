@@ -35,6 +35,7 @@ import type {
 } from './sources/types.ts';
 import { SerialQueue, ensureDirectory } from './store/atomic.ts';
 import { ConfigStore, ConfigUnavailableError, serializeConfig } from './store/config-store.ts';
+import { HUD_ID_FILE, loadHudId } from './store/hud-id.ts';
 import { PersistStore } from './store/persist-store.ts';
 import { TripStore } from './store/trip-store.ts';
 import { PhoneChannel } from './ws/phone-channel.ts';
@@ -66,7 +67,10 @@ export interface HudServerTuning {
 }
 
 export interface HudServerOptions {
-  /** Directory for config.json (by default), state.json and trips.jsonl. Created if missing. */
+  /**
+   * Directory for config.json (by default), state.json, trips.jsonl and hud-id (the HUD's
+   * identity for the phone link). Created if missing.
+   */
   dataDir: string;
   /** Config file; default `<dataDir>/config.json`. */
   configPath?: string;
@@ -86,14 +90,20 @@ export interface HudServerOptions {
    * other `Host` is refused (DNS-rebinding protection).
    */
   allowedHosts?: readonly string[];
+  /** The wall (system) clock. Default `Date.now`. */
   now?: Clock;
+  /**
+   * The monotonic clock the engine's time follows (see `EngineClock`). Default
+   * `performance.now()`, or `now` without its backward steps when only `now` is given.
+   */
+  monotonic?: Clock;
   timers?: Timers;
   logger?: Logger;
   // Injection seams for the pluggable modules (tests pass fakes).
   createSimulation?: (config: HudConfig, deps: RuntimeDeps) => Simulation;
   createSensorSources?: (config: HudConfig) => EventSource[];
   createFrameSinks?: (options: FrameSinkOptions, deps: RuntimeDeps) => FrameSink[];
-  advertiseHud?: (config: HudConfig, deps: RuntimeDeps) => Service | null;
+  advertiseHud?: (config: HudConfig, hudId: string, deps: RuntimeDeps) => Service | null;
   createObdService?: ObdServiceFactory;
   tuning?: HudServerTuning;
 }
@@ -163,6 +173,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
   let httpServer: Server | null = null;
   let boundPort: number | null = null;
   let mdns: Service | null = null;
+  /** The HUD's identity on the phone link (challenge, welcome, mDNS TXT `id`). */
+  let hudId: string | null = null;
   let sources: EventSource[] = [];
   const startedSources: EventSource[] = [];
   /** Per source: its config updates run one at a time; `next` is the latest not yet applied. */
@@ -198,11 +210,11 @@ export function createHudServer(options: HudServerOptions): HudServer {
   }
 
   function advertise(config: HudConfig): void {
-    if (stopping !== null) return;
+    if (stopping !== null || hudId === null) return;
     const advertiseHud = options.advertiseHud ?? defaultAdvertiseHud;
     try {
       const port = boundPort ?? config.server.port;
-      mdns = advertiseHud({ ...config, server: { ...config.server, port } }, deps);
+      mdns = advertiseHud({ ...config, server: { ...config.server, port } }, hudId, deps);
     } catch (err) {
       mdns = null;
       logger.warn(`mDNS: advertising failed: ${describe(err)}`);
@@ -356,11 +368,13 @@ export function createHudServer(options: HudServerOptions): HudServer {
   async function doStart(): Promise<{ port: number }> {
     await ensureDirectory(dataDir);
     await ensureDirectory(dirname(configPath));
-    const [loaded, persisted] = await Promise.all([
+    const [loaded, persisted, id] = await Promise.all([
       configStore.load(),
       persistStore.load(),
+      loadHudId(join(dataDir, HUD_ID_FILE), logger),
       tripStore.load(),
     ]);
+    hudId = id;
     stored = loaded.config;
     effective = effectiveConfig(loaded.config, overrides);
     const config = effective;
@@ -374,6 +388,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
       persisted,
       simulated,
       now,
+      ...(options.monotonic !== undefined ? { monotonic: options.monotonic } : {}),
       timers,
       logger,
       outputs: {
@@ -416,6 +431,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
     }
 
     phone = new PhoneChannel({
+      hudId: id,
       dispatch: (event) => hudEngine.dispatch(event),
       getConfig: currentEffective,
       tripsEndedAfter: (since, limit) => tripStore.endedAfter(since, limit),
@@ -423,7 +439,10 @@ export function createHudServer(options: HudServerOptions): HudServer {
       // With the simulator, a real phone takes precedence over the simulated one.
       onPhoneChange: (connected) => simulation?.setRealPhoneConnected(connected),
       version: HUD_VERSION,
-      now,
+      // Engine time, not the wall clock: the phone's payloads are stamped with it (a call first
+      // seen mid-call keeps that stamp as its start, which a stepped wall clock would skew), and
+      // its rate limits keep working across a clock step.
+      now: () => hudEngine.now(),
       timers,
       logger,
       ...(tuning.helloTimeoutMs !== undefined ? { helloTimeoutMs: tuning.helloTimeoutMs } : {}),
@@ -472,12 +491,12 @@ export function createHudServer(options: HudServerOptions): HudServer {
     });
 
     const sim = simulation;
-    const startedAt = now();
     const api = createApiRouter({
       version: HUD_VERSION,
       simulated,
-      now,
-      startedAt,
+      // Engine time: uptime is not thrown off by network time stepping the system clock.
+      now: () => hudEngine.now(),
+      startedAt: hudEngine.startedAt,
       engine: hudEngine,
       getConfig: () => stored ?? config,
       updateConfig,

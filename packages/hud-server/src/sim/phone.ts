@@ -10,6 +10,9 @@
  *    declines it first) and ends 20 s after pickup.
  *  - highway: speed limits 120/100 and a fixed speed camera in the 100 zone.
  *  - arriving: a message notification (sender only); guidance ends at the destination.
+ *  - parked: the driver presses the companion app's remote "next page" button (an `input`
+ *    message), which opens the diagnostics dashboard at once — the HUD would otherwise show it
+ *    only after minutes with the engine off (start-stop protection).
  *
  * Speed limits follow the road segment under the car (re-sent every 30 s, like the companion);
  * a new track plays every 45 s. Manual triggers from the dev console work at any time.
@@ -45,6 +48,11 @@ import {
 export type SimPhoneEvent = NonNullable<SimControl['phone']>;
 
 export const SIM_PHONE_DEVICE = 'Simulated phone';
+/**
+ * The simulated phone's `deviceId`: never a real phone's (those are 22 base64url characters),
+ * so a real phone taking over is always a different phone.
+ */
+export const SIM_PHONE_DEVICE_ID = 'simulated-phone';
 export const SIM_PHONE_APP_VERSION = 'simulator';
 export const SIM_NAV_SOURCE = 'simulator';
 
@@ -303,6 +311,7 @@ export class SimPhone implements EventSource {
         break;
       case 'parked':
         if (this.navActive) this.endNav();
+        this.send({ t: 'input', action: 'next-page' });
         break;
       default:
         break;
@@ -605,6 +614,7 @@ export class SimPhone implements EventSource {
       type: 'phone/link',
       connected,
       deviceName: SIM_PHONE_DEVICE,
+      deviceId: SIM_PHONE_DEVICE_ID,
       appVersion: SIM_PHONE_APP_VERSION,
       at: ctx.now(),
     });

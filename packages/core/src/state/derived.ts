@@ -16,6 +16,7 @@ import {
   freshSpeedKph,
   isEngineRunning,
   isObdLinkUp,
+  wallNow,
 } from './selectors.ts';
 
 /**
@@ -86,6 +87,7 @@ export function advanceTrip(state: HudState, config: HudConfig): HudState['trip'
       fuelRateLph: rpmFresh ? state.fuel.readings.rateLph : null,
       odometerKm: state.odometer.km,
       linkUp: isObdLinkUp(state),
+      wallOffsetMs: state.clock.wallOffsetMs,
     },
     config.trip,
     { fuelPricePerL: config.vehicle.fuelPricePerL, currency: config.units.currency },
@@ -94,14 +96,16 @@ export function advanceTrip(state: HudState, config: HudConfig): HudState['trip'
 
 /**
  * Advance auto-brightness / night mode: a light-sensor reading counts while ≤ 5 s old; the sun
- * elevation comes from the phone's location, else the configured fallback location.
+ * elevation (at the wall-clock time) comes from the phone's location, else the configured
+ * fallback location.
  */
 export function advanceBrightness(state: HudState, config: HudConfig): BrightnessState {
   const { env, now } = state;
   const lux =
     env.lux !== null && env.luxAt !== null && now - env.luxAt <= LUX_FRESH_MS ? env.lux : null;
   const location = env.location ?? config.sensors.fallbackLocation;
-  const sun = location === null ? null : sunElevationDeg(location.lat, location.lon, now);
+  const sun =
+    location === null ? null : sunElevationDeg(location.lat, location.lon, wallNow(state));
   return updateBrightness(
     env.brightness,
     { at: now, lux, sunElevationDeg: sun },
@@ -109,10 +113,18 @@ export function advanceBrightness(state: HudState, config: HudConfig): Brightnes
   );
 }
 
-/** Recompute maintenance status now (keeping the previous array when nothing changed). */
+/**
+ * Recompute maintenance status now (keeping the previous array when nothing changed). Service
+ * dates are wall-clock times; `checkedAt` is engine time (it paces the rechecks).
+ */
 export function refreshMaintenance(state: HudState, config: HudConfig): MaintenanceState {
   const prev = state.maintenance;
-  const status = maintenanceStatus(config.maintenance, prev.records, state.odometer.km, state.now);
+  const status = maintenanceStatus(
+    config.maintenance,
+    prev.records,
+    state.odometer.km,
+    wallNow(state),
+  );
   return {
     ...prev,
     status: sameStatus(prev.status, status) ? prev.status : status,

@@ -9,6 +9,7 @@ contract between all of them.
 - [Packages](#packages)
 - [Data flow](#data-flow)
 - [Purity and replayability](#purity-and-replayability)
+- [Engine time and the wall clock](#engine-time-and-the-wall-clock)
 - [Staleness safety](#staleness-safety)
 - [Driving contexts and adaptive clutter](#driving-contexts-and-adaptive-clutter)
 - [Alerts](#alerts)
@@ -41,7 +42,7 @@ flowchart LR
     phone["phone channel<br/>nav, road, hazards, media,<br/>call, message, location"]
     sensors["sensors<br/>sensor/light, adas/*"]
     input["buttons, gestures,<br/>keyboard, phone remote<br/>input"]
-    clock["engine timer<br/>tick (100 ms)"]
+    clock["engine timer<br/>tick (100 ms),<br/>clock/sync"]
     api["REST API<br/>config, maintenance/done,<br/>odometer/set"]
   end
   sources -->|"HudEvent"| reduce["reduce(state, event, config)"]
@@ -57,24 +58,20 @@ flowchart LR
 1. **Inputs become events.** The OBD service emits one `obd/samples` event per polling cycle with
    all values in canonical units (km/h, °C, kPa, V, L/h …). The phone channel validates each
    message and translates it (`phone/translate.ts`). Sensors, buttons and the ADAS feed emit their
-   own events; the engine emits a `tick` every 100 ms; config changes arrive as a `config` event.
+   own events; the engine emits a `tick` every 100 ms and a `clock/sync` when the system clock
+   moves ([below](#engine-time-and-the-wall-clock)); config changes arrive as a `config` event.
 2. **The engine stamps and reduces.** `HudEngine.dispatch` replaces `event.at` with the engine
-   time and runs `reduce(state, event, config)`. The engine time follows the system clock but
-   never goes backwards and never stands still: the clock of a Pi can be stepped by network time
-   — forwards on a Pi without a real-time clock, backwards on one whose clock ran fast — and a
-   frozen time would stop staleness, toasts, alert timers and trip ends, leaving old values on
-   screen as if they were live. A forward step is followed at once; after a backward step the
-   engine time keeps running and converges on the system clock by running slightly slow
-   (`hud-server/src/clock.ts`). Events dispatched while an effect is being handled are queued and
-   processed in order.
+   time — monotonic, see [Engine time and the wall clock](#engine-time-and-the-wall-clock) — and
+   runs `reduce(state, event, config)`. Events dispatched while an effect is being handled are
+   queued and processed in order.
 3. **Effects.** `deriveEffects(prev, next, event, config)` decides what should happen outside the
    core: tell the phone to accept or decline a call, save and push a finished trip, push due
    maintenance items, persist the state. The server performs them; the core never does I/O.
 4. **Frames.** On its own timer (`server.frameRate`, 15 fps by default) the engine runs
    `composeFrame(state, config)` and publishes the `HudFrame`: visible widgets with their zones,
-   alerts, toast, call card, shift light, blind-spot and collision state, the parked dashboard and
-   the theme (night, brightness), all converted to the driver's units and rounded. The renderer
-   does no business logic and no unit conversion; it draws the frame.
+   alerts, toast, call card, shift light, blind-spot and collision state, the diagnostics
+   dashboard and the theme (night, brightness), all converted to the driver's units and rounded.
+   The renderer does no business logic and no unit conversion; it draws the frame.
 
 The frame is composed per timer tick rather than per event, so a burst of OBD samples costs one
 frame, and the frame rate is independent of how often the car answers.
@@ -84,7 +81,8 @@ frame, and the frame rate is independent of how often the car answers.
 `packages/core` follows strict rules (see [CLAUDE.md](../CLAUDE.md)):
 
 - no `Date.now()`, `Math.random()`, timers, network, filesystem or `console`;
-- time comes only from event timestamps (`event.at`, copied to `state.now`);
+- time comes only from event timestamps (`event.at`, copied to `state.now`), plus the
+  wall-clock offset of the latest `clock/sync` event;
 - state is plain JSON-serialisable data, and functions return new objects.
 
 Same events in, same frames out. Tests use this to replay whole drives:
@@ -96,6 +94,47 @@ real reducer, effects and composer and checks the frames and effects along the w
 never throws or mutates its input and that every frame is well-formed. The simulator exercises
 the same code paths as a real car: it sits behind an emulated ELM327 adapter and a simulated
 phone that sends real protocol messages.
+
+## Engine time and the wall clock
+
+The system clock of a Pi can be stepped by network time: by hours or days on a Pi without a
+real-time clock, which boots with the time `fake-hwclock` saved and syncs once the phone's
+hotspot is up — often mid-drive — and backwards on one whose clock ran fast. If the core measured
+time with that clock, a forward step would expire the phone's route, the speed limit and every
+sample at once and split the trip in progress, and a backward step would keep stale values on
+screen as if they were live.
+
+So there are two clocks:
+
+- **Engine time** (`event.at`, `state.now` and every timestamp kept in `HudState`) starts at the
+  system clock when the server starts and from then on counts elapsed time on a monotonic clock
+  (`EngineClock`, `hud-server/src/clock.ts`). It never steps, never goes backwards and never
+  stands still. Everything relative uses it: staleness, toasts, dwell and parking timers, alert
+  persistence, call timers, trip durations and trip ends, and `HudFrame.at` (the renderer's
+  "frames keep coming" check).
+- **The wall clock** reaches the core as an offset: the engine dispatches
+  `{ type: 'clock/sync', wallOffsetMs, at }` (system clock − engine time) on start and before
+  the next event once the offset has moved by more than 2 s, and logs the step. The reducer keeps
+  it in `state.clock` and converts (`toWallTime`, `wallNow`) only where the absolute time
+  matters: the clock widget; the sun (night mode); service records and due dates; the ETA's
+  remaining minutes (the phone's ETA is wall-clock time); trip records — start, end and id, so
+  the trip log, its CSV export and the phone get wall-clock times; the trip in progress as saved
+  in `state.json`; and the times in REST responses (`/api/diagnostics` also carries the HUD's
+  `now`, so the settings app ages samples on the HUD's clock, whatever the phone's says). A sync
+  re-derives maintenance status and night mode at once.
+
+A trip that network time corrects mid-drive therefore goes on, and its record carries the
+corrected start time. The trip in progress is saved with wall-clock times, since engine time
+starts afresh with every start, and compared with the new start's clock: it is completed after
+a long break and continued after a short one. One saved *later* than the new start's clock —
+an unclean power cut on a Pi without a real-time clock, which then boots with an older saved
+time — is completed at the first update, since the length of the break is unknown. The start's
+clock can also be behind without showing it: such a Pi boots with the time `fake-hwclock` saved
+at shutdown, so every break looks short and the trip is continued. The core therefore keeps the
+trip as restored, and what was driven since the start as a trip of its own
+(`TripState.resumed`), until the trip ends: if a `clock/sync` then shows that the break was long
+after all, the trip from before the restart is completed with its saved times and today's drive
+goes on as a new trip (`reconcileResumedTrip`).
 
 ## Staleness safety
 
@@ -117,7 +156,7 @@ Other data has its own lifetime:
 | Data | Rule |
 | --- | --- |
 | The whole HUD | The kiosk page blanks everything but a small "no signal" dot when the frame time has not advanced for 1 s (two frame intervals at a frame rate below 2, at most 2.5 s) or the socket is closed; after (re)connecting it waits for a second, newer frame, so a server's cached frame is never taken for live (`hud-renderer/src/common/staleness.ts`). |
-| Blind-spot and collision state | Ignored 1 s after the module's last report; the module counts as disconnected after 2 s of silence. |
+| Blind-spot and collision state | Ignored 1 s after the module's last report; the module counts as disconnected after 2 s of silence. A collision *warning* is held for 1 s after the module last reported one, whatever it reports meanwhile, so it cannot flicker. |
 | Light-sensor reading | Stops driving the brightness after 5 s; the sun position (or the last level) takes over. |
 | Speed limit | Shown only while the phone is connected, and dropped when the phone has not re-sent the road for 75 s (it does every 30 s while it has location fixes). |
 | Route, road, hazards, media, call | Kept for 30 s after the phone disconnects (a Wi-Fi hiccup should not wipe the route), then dropped — at once when a *different* phone connects. A ringing or dialing call is dropped at the disconnect, and a call card without a phone has no controls. |
@@ -162,6 +201,10 @@ and comes back to a silent ECU leaves the moving layout up until the next drive.
 When parked, the frame also carries the diagnostics dashboard — pages *overview*, *engine*,
 *fuel*, *electrical* (each only with live data), *trouble codes*, *trip* and *maintenance* —
 which the renderer shows full screen. The `next-page` / `prev-page` inputs flip through it.
+Since `parked` takes 3 minutes with the engine off, the driver can also open it while `stopped`:
+the first `next-page` / `prev-page` shows it at once (`UiState.dashboardRequested`), further ones
+flip pages, `secondary` closes it, and it closes by itself as soon as the car moves — the
+dashboard is never shown while moving.
 
 ## Alerts
 
@@ -171,7 +214,7 @@ a stable key (e.g. `check-engine:P0420`), a severity (`info` < `caution` < `warn
 
 | Kind | Raised when | Severity |
 | --- | --- | --- |
-| `forward-collision` | The ADAS module reports a collision risk (fresh reading). | `caution` "VEHICLE AHEAD", `critical` "BRAKE!" |
+| `forward-collision` | The ADAS module reports a collision risk (fresh reading); "BRAKE!" stays at least 1 s after the module's last warning. | `caution` "VEHICLE AHEAD", `critical` "BRAKE!" |
 | `coolant` | Coolant ≥ `coolantHighC` (110 °C); cleared `coolantHysteresisC` below. | `warning` "ENGINE HOT", `critical` "OVERHEATING – STOP" at ≥ `coolantCriticalC` (118 °C) |
 | `voltage` | Engine running and ≤ `voltageLowRunningV` for 60 s; engine off and ≤ `voltageLowOffV` for 10 s; ≥ `voltageHighV` for 10 s. | `warning` "CHARGING FAULT", `caution` "BATTERY LOW", `warning` "OVERVOLTAGE" |
 | `check-engine` | One alert per trouble code. | From the DTC database for stored and permanent codes; `info` while a code is only pending |
@@ -202,8 +245,8 @@ All controls map to the same seven actions (`InputAction` in `core/src/types/eve
 | Action | Meaning | Gesture | GPIO button | Kiosk keyboard |
 | --- | --- | --- | --- | --- |
 | `primary` | Accept the ringing call; otherwise acknowledge the top alert | swipe right | primary (short press) | Enter, Space |
-| `secondary` | Decline or hang up the call; otherwise dismiss the toast, else the top alert | swipe left | secondary | Escape, Backspace |
-| `next-page` / `prev-page` | Flip the parked dashboard | — | next | → / ← |
+| `secondary` | Decline or hang up the call; otherwise close a dashboard opened while stopped, else dismiss the toast, else the top alert | swipe left | secondary | Escape, Backspace |
+| `next-page` / `prev-page` | Flip the dashboard's pages; while stopped, open the dashboard | — | next | → / ← |
 | `toggle-blank` | Blank / unblank the HUD | — | hold primary ≥ 0.8 s | B |
 | `brightness-up` / `brightness-down` | Trim the brightness by ±0.1 (up to ±0.5) | swipe up / down | — | + / − |
 
@@ -237,7 +280,7 @@ them.
 A config change through the API is validated, saved atomically and pushed to every component
 without a restart: the engine, the OBD service (reconnects if the link settings changed), the
 sensor sources (only those whose settings changed restart), the renderer (`display` message), the
-phone channel (disconnects a phone whose pairing token no longer matches) and mDNS. Only a new
+phone channel (disconnects a phone whose proof no longer matches the pairing token) and mDNS. Only a new
 `server.port` or `server.host` needs a restart.
 
 Failures stay local: the OBD service reconnects with a back-off that doubles up to 30 s; the
@@ -252,15 +295,18 @@ default `~/.local/share/carheadsup`, and its `sim` subdirectory with `--sim`) ho
 | File | Contents | Written |
 | --- | --- | --- |
 | `config.json` | The configuration (unless `--config` points elsewhere). Pretty-printed and hand-editable; if the server has to correct it on load, the original is kept as `config.json.bak`. | On every change from the API |
-| `state.json` | Odometer, learned gear ratios, long-run average consumption, service records, and the trip in progress (`PersistedState.activeTrip`). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends; first thing on shutdown |
+| `state.json` | Odometer, learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, and the trip in progress (`PersistedState.activeTrip`, with wall-clock times). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
 | `trips.jsonl` | One completed trip per line, oldest first; at most 5,000 trips (the oldest are dropped). | Appended when a trip ends |
+| `hud-id` | The HUD's identity on the phone link (22 base64url characters), which paired phones pin. A corrupt file is moved to `hud-id.corrupt` and replaced; phones then report a different HUD until paired again. | Once, on the first start |
 
 A trip normally ends only after `trip.endAfterEngineOffMs` (5 min) without the engine or the
 OBD link, but a Pi behind an ignition-sensed power controller shuts down seconds after the
 ignition. So the trip in progress is kept in `state.json`, and at the next start it is either
 closed — with its last activity as the end time, then saved to `trips.jsonl` and pushed to the
 phone if one is connected (a phone can also ask for missed trips with `trips-request`) — when
-the HUD was off longer than that, or continued after a shorter break.
+the HUD was off longer than that, or continued after a shorter break. Its times are saved on the
+wall clock and it is closed as well when it was saved later than the new start's clock (see
+[Engine time and the wall clock](#engine-time-and-the-wall-clock)).
 
 The Pi loses power whenever the ignition goes off, so every write is crash-safe: whole files are
 written to a temporary file, `fsync`ed and renamed over the original, then the directory is
@@ -278,9 +324,17 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
   pass it as a Bearer header or `?token=`. With no token, anyone on the car's network can use the
   API — set one unless the Wi-Fi is yours alone. Changing the token disconnects remote clients
   that no longer match.
-- **Pairing token.** The phone socket (`/ws/phone`) is authenticated by its first message:
-  `hello.token` must equal `phone.pairingToken` when one is set. Tokens are compared in constant
-  time (both sides hashed with SHA-256 first).
+- **Mutual phone authentication.** On `/ws/phone` the HUD and the companion prove to each other
+  that they know `phone.pairingToken`, which itself never crosses the Wi-Fi: the HUD sends a
+  `challenge` with its identity (`hudId`, kept in the data directory) and a fresh nonce; the
+  phone answers with an HMAC-SHA256 over it, the HUD with one over the phone's nonce (compared in
+  constant time; [details](protocol.md#authentication)). The companion pins the `hudId` of the
+  first HUD that proves the token and afterwards sends nothing — no data, no proof, no REST call
+  with the API token — to any other HUD, nor to its own HUD before its proof checks out; it
+  ignores call actions until then. Phones are told apart by a random per-install `deviceId`, not
+  their name. Without a pairing token the HUD is *open*: any phone can connect, and the phone
+  cannot verify the HUD, so the companion asks the user to confirm it — the settings app flags
+  this and offers to generate a token.
 - **Cross-site protection.** State-changing API requests and all WebSocket upgrades are refused
   when a browser says they come from another site (`Origin` / `Sec-Fetch-Site`), so a web page
   visited on the phone cannot drive the HUD's API.
@@ -297,28 +351,36 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
 - **Input limits.** JSON bodies ≤ 256 KiB; phone messages ≤ 128 Ki characters, validated
   strictly (length-capped strings, no control characters, finite in-range numbers, known enum
   values); the phone socket is rate limited to 50 messages/s (burst 100) and closed when the
-  phone stops reading (1 MiB unsent); the ADAS feed to 50 datagrams/s of at most 4 KiB.
-  Details in [protocol.md](protocol.md).
+  phone stops reading (1 MiB unsent); the ADAS feed to 50 datagrams/s of at most 4 KiB per
+  sender. Details in [protocol.md](protocol.md).
 - **Connection limits.** Other devices get at most 32 TCP connections each and 128 in total
   (more are closed at once), 10 s to send request headers and 30 s for a whole request; at most
   4 renderer sockets each and 16 in total (`503`); at most 2 phone connections each (8 in total)
   waiting for their `hello`, the oldest being closed for a newcomer. The Pi itself is never
   limited, so idle or slow connections cannot starve the HUD of file descriptors or lock the
   paired phone out.
-- **The ADAS feed is not authenticated.** When `sensors.adasUdpPort` is set, the HUD accepts
-  valid datagrams from any device that can reach that port — anyone on the car's Wi-Fi can
-  raise a critical "BRAKE!" alert, and a flood beyond the (shared) 50 datagrams/s limit drowns
-  the real module's messages. Leave it off unless you use a module, and then keep that port to
-  the module ([protocol.md](protocol.md#adas-udp-feed)).
+- **The ADAS feed is checked by sender address only.** When `sensors.adasUdpPort` is set, the
+  HUD takes datagrams only from the addresses in `sensors.adasAllowedSenders` (compared in
+  canonical form, IPv4-mapped IPv6 included); others are dropped unread, counted and logged at
+  most every 10 s, and never mark the module connected. Each sender has its own 50 datagrams/s
+  budget (up to 64 senders tracked), so a flood from another device cannot starve the module.
+  With the list empty — the default — anyone on the car's Wi-Fi can raise a critical "BRAKE!"
+  alert or hide one; the HUD logs a warning when it opens the port that way, and the settings app
+  shows one. A source address can be forged by a device on the same network, so the list keeps
+  out other devices, not a determined attacker: leave the port off unless you use a module, and
+  give the module a link of its own if that matters ([protocol.md](protocol.md#adas-udp-feed)).
 - **No message content.** The `message` type has no content field and a message carrying
   anything that looks like content (`body`, `text`, `snippet` …) is rejected.
 - **Least privilege on the Pi.** The service runs as the unprivileged `carheadsup` user with a
   hardened systemd unit; the kiosk browser runs as a separate user; config and data are private
   to the service ([install guide](install-raspberry-pi.md)).
 
-Not covered: the HUD speaks plain HTTP and WebSocket, so tokens cross the Wi-Fi in clear text.
-Use WPA2 with a strong passphrase on the hotspot. Anyone with physical access to the Pi (or its
-SD card) has everything.
+Not covered: the HUD speaks plain HTTP and WebSocket. The API token crosses the Wi-Fi in clear
+text, and the phone session, though mutually authenticated, is not encrypted: someone on the
+network can read it, and a man-in-the-middle who relays it can alter it after the handshake.
+Someone who records a phone handshake can test pairing-token guesses offline, so use a long
+random token (*Generate*). Use WPA2 with a strong passphrase on the hotspot. Anyone with
+physical access to the Pi (or its SD card) has everything.
 
 ## Performance
 

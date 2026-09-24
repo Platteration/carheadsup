@@ -46,6 +46,9 @@ internal fun rememberElapsedRealtime(): Long {
     return now
 }
 
+/** The first characters of a HUD id: enough to tell two HUDs apart on screen. */
+internal fun shortHudId(hudId: String): String = hudId.take(8)
+
 /** Starts [intent], trying [fallback] if no app handles it; false when neither works. */
 internal fun Context.startSafely(intent: Intent, fallback: Intent? = null): Boolean = try {
     startActivity(intent)

@@ -14,20 +14,36 @@ import type { TripRecord } from './records.ts';
  *
  * Timestamps on the phone link are the phone's epoch ms; the HUD re-stamps on receipt
  * and uses the phone's clock only for absolute values such as ETA.
+ *
+ * The phone link starts with a mutual proof of the pairing token (`phone.pairingToken`), which
+ * itself never travels: HUD `challenge` → phone `hello` (with the phone's proof) → HUD
+ * `welcome` (with the HUD's proof). The proof messages are built by `protocol/phone-auth.ts`.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Phone → HUD
 
+/** The phone's answer to `challenge`. The HUD answers with `welcome`, or `error` and a close. */
 export interface PhoneHello {
   t: 'hello';
   v: number;
+  /** Display name of the phone (logs, the HUD's phone status). Not an identity. */
   device: string;
+  /**
+   * The phone's identity: a random id made once per app install, 22 base64url characters
+   * (16 bytes). A newer session with the same id replaces the older one.
+   */
+  deviceId: string;
   app: string;
   appVersion: string;
-  /** Must equal `phone.pairingToken` when one is configured. */
-  token: string;
+  /** Fresh random nonce of this connection: 22 base64url characters (16 bytes). */
+  nonce: string;
+  /**
+   * base64url (43 characters, no padding) of HMAC-SHA256 keyed with the UTF-8 bytes of the
+   * pairing token over `phoneProofMessage(…)`: proves the phone knows the token.
+   */
+  proof: string;
 }
 
 export interface PhoneNav {
@@ -132,6 +148,20 @@ export type PhoneToHud =
 // ---------------------------------------------------------------------------
 // HUD → Phone
 
+/** Sent by the HUD as soon as a phone connects, before anything else. */
+export interface HudChallenge {
+  t: 'challenge';
+  v: number;
+  /**
+   * The HUD's identity: 22 base64url characters (16 random bytes) made on first start and kept
+   * in the data directory; also advertised as the mDNS TXT record `id`. The phone pins it.
+   */
+  hudId: string;
+  /** Fresh random nonce of this connection: 22 base64url characters (16 bytes). */
+  nonce: string;
+}
+
+/** Accepted `hello`. The phone trusts the HUD only once `proof` checks out. */
 export interface HudWelcome {
   t: 'welcome';
   v: number;
@@ -139,6 +169,13 @@ export interface HudWelcome {
   hudVersion: string;
   /** Whether the phone should read messages aloud (from `phone.readMessagesAloud`). */
   readMessagesAloud: boolean;
+  /** Same as in `challenge`. */
+  hudId: string;
+  /**
+   * base64url (43 characters) of HMAC-SHA256 keyed with the pairing token over
+   * `hudProofMessage(…)`: proves the HUD knows the token.
+   */
+  proof: string;
 }
 
 export interface HudError {
@@ -181,7 +218,14 @@ export interface Pong {
 }
 
 export type HudToPhone =
-  HudWelcome | HudError | HudCallAction | HudTrips | HudTripCompleted | HudMaintenanceDue | Pong;
+  | HudChallenge
+  | HudWelcome
+  | HudError
+  | HudCallAction
+  | HudTrips
+  | HudTripCompleted
+  | HudMaintenanceDue
+  | Pong;
 
 // ---------------------------------------------------------------------------
 // Server → Renderer

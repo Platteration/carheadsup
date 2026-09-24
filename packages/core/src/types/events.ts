@@ -11,7 +11,10 @@ export type InputAction =
   | 'primary'
   /** Decline call / dismiss the top alert or toast. */
   | 'secondary'
-  /** Cycle parked-dashboard pages. */
+  /**
+   * Cycle the dashboard's pages. While stopped (not yet parked) the first press opens the
+   * dashboard instead (see `UiState.dashboardRequested`).
+   */
   | 'next-page'
   | 'prev-page'
   /** Blank / unblank the whole HUD. */
@@ -37,6 +40,12 @@ export const INPUT_ACTIONS: readonly InputAction[] = [
 export type HudEvent =
   /** Clock tick — drives time-based behaviour (toast fades, staleness, trip end). */
   | { type: 'tick'; at: number }
+  /**
+   * Where the wall clock stands relative to engine time: wall-clock epoch ms − `at`. The server
+   * sends it on start and whenever the difference drifts (e.g. network time stepped the system
+   * clock); see `ClockState`.
+   */
+  | { type: 'clock/sync'; wallOffsetMs: number; at: number }
   | { type: 'config'; config: HudConfig; at: number }
 
   // OBD-II
@@ -65,6 +74,11 @@ export type HudEvent =
       type: 'phone/link';
       connected: boolean;
       deviceName?: string | null;
+      /**
+       * The phone's identity (`hello.deviceId`), which tells two phones with the same name
+       * apart. Absent: unchanged (or, without one on either side, the name identifies the phone).
+       */
+      deviceId?: string | null;
       appVersion?: string | null;
       at: number;
     }

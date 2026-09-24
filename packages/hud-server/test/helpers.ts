@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_CONFIG, parseConfig } from '@carheadsup/core';
+import { DEFAULT_CONFIG, PROTOCOL_VERSION, parseConfig } from '@carheadsup/core';
 import type {
   DeepPartial,
   HudConfig,
@@ -19,6 +20,7 @@ import { WebSocket } from 'ws';
 import { createHudServer } from '../src/app.ts';
 import type { HudServer, HudServerOptions } from '../src/app.ts';
 import type { ObdServiceLike } from '../src/obd/obd-link.ts';
+import { phoneProof, randomAuthId } from '../src/phone/auth.ts';
 import type { EventSource, RuntimeDeps, Simulation, SourceContext } from '../src/sources/types.ts';
 
 /** A fresh temporary directory, removed by the returned cleanup. */
@@ -360,6 +362,69 @@ export class TestSocket {
 
   private wake(): void {
     for (const waiter of this.waiters.splice(0)) waiter();
+  }
+}
+
+/** A stable, valid `deviceId` for a test phone name (same name, same phone). */
+export function testDeviceId(name: string): string {
+  return createHash('sha256').update(name).digest('base64url').slice(0, 22);
+}
+
+/** Who a test phone is and what it claims in its `hello`. */
+export interface TestPhone {
+  device?: string;
+  /** Default: `testDeviceId(device)`. */
+  deviceId?: string;
+  /** The pairing token the phone knows (default ''). */
+  token?: string;
+  app?: string;
+  appVersion?: string;
+  v?: number;
+}
+
+/**
+ * The `hello` a phone that knows `phone.token` sends in answer to `challenge` (a received
+ * `challenge` message), with a fresh nonce and a valid proof.
+ */
+export function answerChallenge(
+  challenge: Record<string, unknown>,
+  phone: TestPhone = {},
+): Record<string, unknown> {
+  const device = phone.device ?? 'Pixel 9';
+  const deviceId = phone.deviceId ?? testDeviceId(device);
+  const nonce = randomAuthId();
+  const proof = phoneProof(phone.token ?? '', {
+    hudId: String(challenge['hudId']),
+    hudNonce: String(challenge['nonce']),
+    phoneNonce: nonce,
+    deviceId,
+  });
+  return {
+    t: 'hello',
+    v: phone.v ?? PROTOCOL_VERSION,
+    device,
+    deviceId,
+    app: phone.app ?? 'carheadsup',
+    appVersion: phone.appVersion ?? '1.2.3',
+    nonce,
+    proof,
+  };
+}
+
+/** Open `/ws/phone`, answer the challenge as `phone` and wait for the `welcome`. */
+export async function connectTestPhone(
+  wsBase: string,
+  phone: TestPhone = {},
+  options?: ConstructorParameters<typeof WebSocket>[2],
+): Promise<{ socket: TestSocket; welcome: Record<string, unknown> }> {
+  const socket = new TestSocket(`${wsBase}/ws/phone`, options);
+  try {
+    await socket.opened;
+    socket.send(answerChallenge(await socket.nextOfType('challenge'), phone));
+    return { socket, welcome: await socket.nextOfType('welcome') };
+  } catch (err) {
+    socket.close();
+    throw err;
   }
 }
 

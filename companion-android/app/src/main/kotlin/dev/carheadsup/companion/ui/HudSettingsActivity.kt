@@ -22,7 +22,9 @@ import dev.carheadsup.protocol.link.HudEndpoint
 /**
  * The HUD's own settings app (`http://<hud>/settings`, served by the HUD) in a WebView, so the
  * driver can configure layouts, units, alerts and projection from the phone. Navigation stays on
- * the HUD; other links open in the browser.
+ * the HUD; other links open in the browser. It is only opened for a HUD that has proven itself
+ * (`HudLink.trustedEndpoint`), since it receives the API token. Files the page generates (the
+ * trips CSV) are saved through [FileExportBridge].
  */
 class HudSettingsActivity : ComponentActivity() {
     private lateinit var webView: WebView
@@ -47,6 +49,8 @@ class HudSettingsActivity : ComponentActivity() {
                 settings.domStorageEnabled = true
                 settings.allowFileAccess = false
                 settings.allowContentAccess = false
+                // A WebView drops the page's blob: downloads; the page hands files to this instead.
+                addJavascriptInterface(FileExportBridge(this@HudSettingsActivity), FileExportBridge.JS_NAME)
                 webViewClient =
                     object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {

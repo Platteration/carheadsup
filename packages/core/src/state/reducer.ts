@@ -1,9 +1,16 @@
 import { evaluateAlerts } from '../alerts/engine.ts';
 import { createBrightnessState } from '../display/brightness.ts';
 import { createContextState } from '../display/context.ts';
+import { updateShiftFlash } from '../display/shift-light.ts';
 import { createMaintenanceState, recordService } from '../maintenance/maintenance.ts';
 import type { ActiveTrip } from '../trip/trip.ts';
-import { createTripState, restoreActiveTrip, resumeTripState } from '../trip/trip.ts';
+import {
+  createTripState,
+  reconcileResumedTrip,
+  restoreActiveTrip,
+  resumeTripState,
+  shiftActiveTrip,
+} from '../trip/trip.ts';
 import type { HudConfig } from '../types/config.ts';
 import type { HudEvent } from '../types/events.ts';
 import type { PersistedState } from '../types/records.ts';
@@ -14,6 +21,7 @@ import { createGearState } from '../vehicle/gear.ts';
 import { followPage } from './dashboard.ts';
 import { advanceBrightness, refreshMaintenance } from './derived.ts';
 import { applyInput } from './input.ts';
+import { freshSignal, wallNow } from './selectors.ts';
 import {
   applyCall,
   applyHazards,
@@ -45,23 +53,32 @@ export type PersistedStateWithTrip = Omit<PersistedState, 'activeTrip'> & {
 };
 
 /**
- * Initial state: odometer (as an estimate), learned gear ratios, the long-run fuel average and
+ * Initial state at engine time `now`: odometer (as an estimate), learned gear ratios with their
+ * numbering anchor (if learned on the configured transmission), the long-run fuel average and
  * maintenance records are seeded from `persisted`, as is the trip in progress when it was saved
  * (so powering down at ignition off does not lose it: the first tick after a longer power-down
- * completes it, a short blip continues it); the OBD link is 'disconnected' and everything else
- * is empty. Maintenance status and alerts are
- * derived immediately, so the first frame is consistent with the persisted data.
+ * completes it, a short blip continues it, and one saved "in the future" of this start's clock
+ * is completed — see `resumeTripState`); the OBD link is 'disconnected' and everything else is
+ * empty. Maintenance status and alerts are derived immediately, so the first frame is consistent
+ * with the persisted data.
+ *
+ * `wallOffsetMs` (default 0: engine time starts at the wall clock) converts the saved trip's
+ * wall-clock times to engine time.
  */
 export function createInitialState(
   config: HudConfig,
   persisted: PersistedStateWithTrip,
   now: number,
-  options?: { simulated?: boolean },
+  options?: { simulated?: boolean; wallOffsetMs?: number },
 ): HudState {
   const odometerKm = validKm(persisted.odometerKm);
-  const activeTrip = restoreActiveTrip(persisted.activeTrip, now);
+  const offset = options?.wallOffsetMs;
+  const wallOffsetMs = offset !== undefined && Number.isFinite(offset) ? offset : 0;
+  const saved = restoreActiveTrip(persisted.activeTrip);
+  const activeTrip = saved === null ? null : shiftActiveTrip(saved, -wallOffsetMs);
   const state: HudState = {
     now,
+    clock: { wallOffsetMs },
     simulated: options?.simulated ?? false,
     vehicle: {
       link: { state: 'disconnected', adapter: null, protocol: null, message: null, since: now },
@@ -73,15 +90,22 @@ export function createInitialState(
       vin: null,
     },
     context: createContextState(now),
-    gear: createGearState(persisted.learnedGearRatios),
+    gear: createGearState(
+      persisted.learnedGearRatios,
+      persisted.gearAnchor,
+      config.vehicle.transmission,
+    ),
+    shiftFlash: false,
     fuel: createFuelState(persisted.avgLPer100km),
     trip:
       activeTrip === null
         ? createTripState()
-        : resumeTripState(activeTrip, {
-            fuelPricePerL: config.vehicle.fuelPricePerL,
-            currency: config.units.currency,
-          }),
+        : resumeTripState(
+            activeTrip,
+            { fuelPricePerL: config.vehicle.fuelPricePerL, currency: config.units.currency },
+            now,
+            wallOffsetMs,
+          ),
     odometer: {
       km: odometerKm,
       source: odometerKm === null ? null : 'estimated',
@@ -96,7 +120,7 @@ export function createInitialState(
     media: null,
     call: null,
     messages: [],
-    phone: { connected: false, deviceName: null, appVersion: null, since: now },
+    phone: { connected: false, deviceName: null, deviceId: null, appVersion: null, since: now },
     adas: {
       moduleConnected: false,
       blindSpotLeft: false,
@@ -105,6 +129,7 @@ export function createInitialState(
       collision: 'none',
       ttcSeconds: null,
       collisionUpdatedAt: null,
+      collisionWarningAt: null,
     },
     env: {
       lux: null,
@@ -113,7 +138,14 @@ export function createInitialState(
       brightness: createBrightnessState(config.display.brightness),
     },
     alerts: [],
-    ui: { blanked: false, page: 0, brightnessOffset: 0, toastDismissedAt: null, lastInputAt: null },
+    ui: {
+      blanked: false,
+      page: 0,
+      dashboardRequested: false,
+      brightnessOffset: 0,
+      toastDismissedAt: null,
+      lastInputAt: null,
+    },
   };
   const withStatus: HudState = { ...state, maintenance: refreshMaintenance(state, config) };
   return { ...withStatus, alerts: evaluateAlerts(withStatus, config) };
@@ -123,18 +155,19 @@ export function createInitialState(
  * The single pure state transition. Never mutates `state`; never reads the clock
  * (time comes from `event.at`); never performs I/O.
  *
- * `event.at` is epoch ms and should advance like a monotonic clock: every duration —
- * staleness, grace periods, trip ends, call timers — is measured with it. A time that stalls
- * (e.g. a wall clock held after stepping backwards) would make data that stopped arriving look
- * live, so the server's engine time keeps counting through backward steps. Forward steps are
- * passed through, because the clock widget, night mode, trip timestamps and day-based
- * maintenance need the real time (a Pi without an RTC jumps forward when NTP syncs): such a
- * step expires time-limited data at once and may end the trip in progress — the safe direction.
+ * `event.at` is engine time: epoch ms that advance like a monotonic clock and never step with
+ * the system clock (see `ClockState`). Every duration — staleness, grace periods, dwell timers,
+ * trip ends, call timers — is measured with it, so a clock stepped by network time neither
+ * expires live data nor keeps stale data alive, and never splits a trip. The wall clock arrives
+ * as an offset (`clock/sync`) and is used only where the absolute time matters: the clock widget,
+ * the sun (night mode), service dates, trip records and the phone's ETA.
  *
  * `state.now` never moves backwards: an event stamped earlier than the previous one is applied
  * at `state.now`. A 'config' event applies (and evaluates alerts against) its own config.
- * Alerts are re-evaluated after every event, and the parked dashboard stays on the page the
- * driver chose while pages come and go. Unknown event types (from a newer peer) are ignored.
+ * Alerts and the shift-light flash latch are re-evaluated after every event, a dashboard the
+ * driver opened while stopped closes once the vehicle is no longer stopped, and the dashboard
+ * stays on the page the driver chose while pages come and go. Unknown event types (from a newer
+ * peer) are ignored.
  */
 export function reduce(state: HudState, event: HudEvent, config: HudConfig): HudState {
   const at = Number.isFinite(event.at) ? Math.max(state.now, event.at) : state.now;
@@ -144,15 +177,30 @@ export function reduce(state: HudState, event: HudEvent, config: HudConfig): Hud
   const applied = apply(timed, event, config);
   const paging =
     event.type === 'input' && (event.action === 'next-page' || event.action === 'prev-page');
-  const next = paging ? applied : followPage(state, applied);
+  const paged = paging ? applied : followPage(state, applied);
+  const next = advanceShiftFlash(closeDashboardUnlessStopped(paged), effectiveConfig);
   const alerts = evaluateAlerts(next, effectiveConfig);
   return alerts === next.alerts ? next : { ...next, alerts };
+}
+
+/** A dashboard opened while stopped closes when the vehicle moves (or becomes parked). */
+function closeDashboardUnlessStopped(state: HudState): HudState {
+  return state.ui.dashboardRequested && state.context.context !== 'stopped'
+    ? { ...state, ui: { ...state.ui, dashboardRequested: false } }
+    : state;
+}
+
+function advanceShiftFlash(state: HudState, config: HudConfig): HudState {
+  const flash = updateShiftFlash(state.shiftFlash, freshSignal(state, 'rpm'), config.shiftLight);
+  return flash === state.shiftFlash ? state : { ...state, shiftFlash: flash };
 }
 
 function apply(state: HudState, event: HudEvent, config: HudConfig): HudState {
   switch (event.type) {
     case 'tick':
       return applyTick(state, config);
+    case 'clock/sync':
+      return applyClockSync(state, event.wallOffsetMs, config);
     case 'config':
       return applyConfig(state, event.config, config);
 
@@ -214,6 +262,7 @@ function apply(state: HudState, event: HudEvent, config: HudConfig): HudState {
           collision: event.level,
           ttcSeconds: event.ttcSeconds,
           collisionUpdatedAt: state.now,
+          collisionWarningAt: event.level === 'warning' ? state.now : state.adas.collisionWarningAt,
         },
       };
 
@@ -234,9 +283,33 @@ function apply(state: HudState, event: HudEvent, config: HudConfig): HudState {
 }
 
 /**
+ * The wall clock moved relative to engine time (or this is the first sync): re-derive what
+ * depends on the absolute time — maintenance status (service dates) and night mode (the sun).
+ * Everything measured in engine time — staleness, timers, the trip in progress — is unaffected,
+ * except that a trip resumed after a restart is split again when the sync shows that the break
+ * was long after all (`reconcileResumedTrip`: a start-up clock that was behind).
+ */
+function applyClockSync(state: HudState, wallOffsetMs: number, config: HudConfig): HudState {
+  if (!Number.isFinite(wallOffsetMs) || wallOffsetMs === state.clock.wallOffsetMs) return state;
+  const synced: HudState = {
+    ...state,
+    clock: { wallOffsetMs },
+    trip: reconcileResumedTrip(state.trip, wallOffsetMs, config.trip, {
+      fuelPricePerL: config.vehicle.fuelPricePerL,
+      currency: config.units.currency,
+    }),
+  };
+  return {
+    ...synced,
+    maintenance: refreshMaintenance(synced, config),
+    env: { ...synced.env, brightness: advanceBrightness(synced, config) },
+  };
+}
+
+/**
  * A new config: re-derive what depends on it (maintenance schedule, brightness mode/curve). Gear
- * ratios learned for another kind of transmission are forgotten (their numbering was anchored
- * differently), which also persists the reset.
+ * ratios learned for another kind of transmission are forgotten with their numbering anchor
+ * (numbering is anchored differently), which also persists the reset.
  */
 function applyConfig(state: HudState, config: HudConfig, previous: HudConfig): HudState {
   const transmissionChanged = config.vehicle.transmission !== previous.vehicle.transmission;
@@ -249,8 +322,8 @@ function applyConfig(state: HudState, config: HudConfig, previous: HudConfig): H
 }
 
 /**
- * Record a service for a configured item (unknown ids are ignored). Without an explicit
- * odometer reading the current best-known odometer is used.
+ * Record a service for a configured item (unknown ids are ignored), dated with the wall-clock
+ * time. Without an explicit odometer reading the current best-known odometer is used.
  */
 function applyMaintenanceDone(
   state: HudState,
@@ -263,7 +336,7 @@ function applyMaintenanceDone(
   const km = validKm(odometerKm) ?? (current === null ? null : roundTo(current, 1));
   const recorded: HudState = {
     ...state,
-    maintenance: recordService(state.maintenance, itemId, km, state.now),
+    maintenance: recordService(state.maintenance, itemId, km, wallNow(state)),
   };
   return { ...recorded, maintenance: refreshMaintenance(recorded, config) };
 }
@@ -278,11 +351,12 @@ function applyOdometerSet(state: HudState, odometerKm: number, config: HudConfig
 
 /**
  * The trip in progress (as `extractPersisted` includes it, for `createInitialState` to resume),
- * or null. A fresh, JSON-safe copy.
+ * or null. A fresh, JSON-safe copy with wall-clock times: engine time starts afresh with every
+ * start of the server.
  */
 export function extractActiveTrip(state: HudState): ActiveTrip | null {
-  const trip = state.trip.active;
-  return trip === null ? null : restoreActiveTrip(trip, Number.POSITIVE_INFINITY);
+  const trip = state.trip.active === null ? null : restoreActiveTrip(state.trip.active);
+  return trip === null ? null : shiftActiveTrip(trip, state.clock.wallOffsetMs);
 }
 
 /**
@@ -295,6 +369,10 @@ export function extractPersisted(state: HudState): PersistedState {
   return {
     odometerKm: km === null || !Number.isFinite(km) ? null : roundTo(km, 3),
     learnedGearRatios: state.gear.learnedRatios === null ? null : [...state.gear.learnedRatios],
+    gearAnchor:
+      state.gear.learnedRatios === null || state.gear.anchor === null
+        ? null
+        : { ...state.gear.anchor },
     avgLPer100km: avg === null || !Number.isFinite(avg) ? null : roundTo(avg, 3),
     maintenanceRecords: state.maintenance.records.map((r) => ({ ...r })),
     activeTrip: extractActiveTrip(state),

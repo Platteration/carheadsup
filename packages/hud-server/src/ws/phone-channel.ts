@@ -1,5 +1,6 @@
 import { PROTOCOL_VERSION, parsePhoneMessage } from '@carheadsup/core';
 import type {
+  HudChallenge,
   HudConfig,
   HudError,
   HudEvent,
@@ -7,12 +8,13 @@ import type {
   HudToPhone,
   HudWelcome,
   PhoneHello,
+  PhoneProofInput,
   PhoneToHud,
   TripRecord,
 } from '@carheadsup/core';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
 import type { RawData, WebSocket } from 'ws';
-import { secretsEqual } from '../http/auth.ts';
+import { hudProof, phoneProof, proofsEqual, randomAuthId } from '../phone/auth.ts';
 import { phoneMessageToEvents } from '../phone/translate.ts';
 import { TokenBucket } from './rate-limit.ts';
 import { closeAll, closeSocket, rawDataToString, sendJson } from './sockets.ts';
@@ -22,9 +24,9 @@ import { closeAll, closeSocket, rawDataToString, sendJson } from './sockets.ts';
  * the accompanying `error` message; the codes make logs and tests unambiguous.
  */
 export const PHONE_CLOSE = {
-  /** A newer session from the same phone replaced this one. */
+  /** A newer session from the same phone (same `deviceId`) replaced this one. */
   replaced: 4000,
-  /** Wrong pairing token (also when the token is changed while connected). */
+  /** The phone's proof does not match the pairing token (also when the token changes). */
   badToken: 4001,
   /** Protocol version mismatch. */
   unsupportedVersion: 4002,
@@ -59,6 +61,8 @@ export const TRIPS_REQUEST_PER_S = 0.2;
 export const TRIPS_REQUEST_BURST = 3;
 
 export interface PhoneChannelOptions {
+  /** The HUD's identity, sent in every `challenge` and `welcome` (see `store/hud-id.ts`). */
+  hudId: string;
   /** Feed events into the engine. */
   dispatch(event: HudEvent): void;
   /** Effective config (vehicle name, pairing token, readMessagesAloud). */
@@ -87,6 +91,8 @@ interface Session {
   readonly id: number;
   readonly ws: WebSocket;
   readonly remoteAddress: string;
+  /** The nonce of this connection's `challenge`. */
+  readonly hudNonce: string;
   phase: 'hello' | 'active' | 'closed';
   helloTimer: unknown;
   readonly bucket: TokenBucket;
@@ -94,21 +100,23 @@ interface Session {
   /** Currently dropping messages over the rate limit (notified once per episode). */
   throttled: boolean;
   invalidStreak: number;
+  /** The accepted hello (its proof was checked). */
   hello: PhoneHello | null;
 }
 
 /**
- * `/ws/phone`: the companion app's session protocol.
+ * `/ws/phone`: the companion app's session protocol (v2, mutually authenticated).
  *
- *  - The first message must be a valid `hello` within {@link HELLO_TIMEOUT_MS}. A different
- *    protocol version gets `error unsupported-version`; a wrong pairing token (when
- *    `phone.pairingToken` is set, compared in constant time) gets `error bad-token` and close
- *    4001. Otherwise the HUD answers `welcome`, the phone counts as connected (`phone/link`) and
- *    due maintenance items are pushed.
- *  - There is one active phone. A newer session from the same phone (same `device` and `app`)
- *    replaces the older one (close 4000 "replaced") without a disconnect in between; another
- *    phone is refused (close 1013) while one is connected, so two paired phones never take the
- *    HUD from each other in turns.
+ *  - On connect the HUD sends `challenge` (its id and a fresh nonce). The first message must be
+ *    a valid `hello` within {@link HELLO_TIMEOUT_MS}. A different protocol version gets `error
+ *    unsupported-version`; a proof that does not match `phone.pairingToken` (HMAC over the
+ *    challenge, compared in constant time; with no token set, the empty key) gets `error
+ *    bad-token` and close 4001. Otherwise the HUD answers `welcome` with its own proof, the
+ *    phone counts as connected (`phone/link`) and due maintenance items are pushed.
+ *  - There is one active phone. A newer session from the same phone (same `deviceId`) replaces
+ *    the older one (close 4000 "replaced") without a disconnect in between; another phone is
+ *    refused (close 1013) while one is connected, so two paired phones never take the HUD from
+ *    each other in turns.
  *  - At most {@link MAX_PENDING_SESSIONS} connections wait for their hello, at most
  *    {@link MAX_PENDING_PER_ADDRESS} per address; beyond that the oldest waiting one is closed
  *    (1013), so idle connections cannot lock the paired phone out.
@@ -148,6 +156,7 @@ export class PhoneChannel {
       id: this.nextId++,
       ws,
       remoteAddress: address,
+      hudNonce: randomAuthId(),
       phase: 'hello',
       helloTimer: null,
       bucket: new TokenBucket(
@@ -170,6 +179,13 @@ export class PhoneChannel {
     ws.on('message', (data, isBinary) => this.onMessage(session, data, isBinary));
     ws.on('close', () => this.onClose(session));
     ws.on('error', (err) => this.options.logger.debug(`Phone socket error: ${err.message}`));
+    const challenge: HudChallenge = {
+      t: 'challenge',
+      v: PROTOCOL_VERSION,
+      hudId: this.options.hudId,
+      nonce: session.hudNonce,
+    };
+    this.sendTo(session, challenge);
   }
 
   /** Send a message to the active phone. False when no phone is connected. */
@@ -178,10 +194,10 @@ export class PhoneChannel {
     return session !== null && this.sendTo(session, message);
   }
 
-  /** Disconnect the active phone if its pairing token no longer matches. */
+  /** Disconnect the active phone if its proof does not match the (new) pairing token. */
   updateConfig(config: HudConfig): void {
     const session = this.active;
-    if (session?.hello && !this.tokenAccepted(session.hello.token, config)) {
+    if (session?.hello && !this.proofAccepted(session, session.hello, config)) {
       this.options.logger.info('Phone: pairing token changed; disconnecting the phone');
       this.refuse(session, 'bad-token', 'The pairing token has changed', PHONE_CLOSE.badToken);
     }
@@ -248,11 +264,13 @@ export class PhoneChannel {
     }
     session.throttled = false;
 
-    const parsed = isBinary
-      ? ({ ok: false, error: 'expected a text frame' } as const)
-      : parsePhoneMessage(rawDataToString(data));
+    const text = isBinary ? null : rawDataToString(data);
+    const parsed =
+      text === null
+        ? ({ ok: false, error: 'expected a text frame' } as const)
+        : parsePhoneMessage(text);
     if (!parsed.ok) {
-      this.onInvalid(session, parsed.error);
+      this.onInvalid(session, parsed.error, text);
       return;
     }
     session.invalidStreak = 0;
@@ -274,8 +292,15 @@ export class PhoneChannel {
     this.onSessionMessage(session, message);
   }
 
-  private onInvalid(session: Session, error: string): void {
+  private onInvalid(session: Session, error: string, text: string | null): void {
     if (session.phase === 'hello') {
+      // A hello of another version fails validation (v1 had other fields): say so.
+      const version = text === null ? null : helloVersion(text);
+      if (version !== null && version !== PROTOCOL_VERSION) {
+        this.clearHelloTimer(session);
+        this.refuseVersion(session, version);
+        return;
+      }
       this.refuse(session, 'bad-message', `Expected hello: ${error}`, PHONE_CLOSE.helloRequired);
       return;
     }
@@ -294,17 +319,15 @@ export class PhoneChannel {
   private onHello(session: Session, hello: PhoneHello): void {
     this.clearHelloTimer(session);
     if (hello.v !== PROTOCOL_VERSION) {
-      this.refuse(
-        session,
-        'unsupported-version',
-        `The HUD speaks protocol version ${PROTOCOL_VERSION}, the phone ${hello.v}`,
-        PHONE_CLOSE.unsupportedVersion,
-      );
+      this.refuseVersion(session, hello.v);
       return;
     }
     const config = this.options.getConfig();
-    if (!this.tokenAccepted(hello.token, config)) {
-      this.options.logger.warn(`Phone: ${hello.device || 'a phone'} sent a wrong pairing token`);
+    if (!this.proofAccepted(session, hello, config)) {
+      this.options.logger.warn(
+        `Phone: ${hello.device || 'a phone'} from ${session.remoteAddress} sent a wrong pairing ` +
+          'token (its proof does not match phone.pairingToken)',
+      );
       this.refuse(session, 'bad-token', 'Wrong pairing token', PHONE_CLOSE.badToken);
       return;
     }
@@ -333,6 +356,8 @@ export class PhoneChannel {
       hudName: config.vehicle.name,
       hudVersion: this.options.version,
       readMessagesAloud: config.phone.readMessagesAloud,
+      hudId: this.options.hudId,
+      proof: hudProof(config.phone.pairingToken, this.proofInput(session, hello)),
     };
     this.sendTo(session, welcome);
     this.options.logger.info(
@@ -343,6 +368,7 @@ export class PhoneChannel {
       type: 'phone/link',
       connected: true,
       deviceName: hello.device === '' ? null : hello.device,
+      deviceId: hello.deviceId,
       appVersion: hello.appVersion === '' ? null : hello.appVersion,
       at: this.options.now(),
     });
@@ -403,9 +429,32 @@ export class PhoneChannel {
     }
   }
 
-  private tokenAccepted(token: string, config: HudConfig): boolean {
-    const expected = config.phone.pairingToken;
-    return expected === '' || secretsEqual(token, expected);
+  private proofInput(session: Session, hello: PhoneHello): PhoneProofInput {
+    return {
+      hudId: this.options.hudId,
+      hudNonce: session.hudNonce,
+      phoneNonce: hello.nonce,
+      deviceId: hello.deviceId,
+    };
+  }
+
+  /**
+   * Whether `hello.proof` was made with `phone.pairingToken` for this session's challenge. With
+   * no token configured the key is empty: anyone can make that proof, and a phone that holds a
+   * token (and proved it) does not pass.
+   */
+  private proofAccepted(session: Session, hello: PhoneHello, config: HudConfig): boolean {
+    const expected = phoneProof(config.phone.pairingToken, this.proofInput(session, hello));
+    return proofsEqual(expected, hello.proof);
+  }
+
+  private refuseVersion(session: Session, version: number): void {
+    this.refuse(
+      session,
+      'unsupported-version',
+      `The HUD speaks protocol version ${PROTOCOL_VERSION}, the phone ${version}`,
+      PHONE_CLOSE.unsupportedVersion,
+    );
   }
 
   private sendError(session: Session, code: HudError['code'], message: string): void {
@@ -442,7 +491,23 @@ export class PhoneChannel {
   }
 }
 
-/** Whether two hellos come from the same phone (same device and app). */
+/**
+ * Whether two hellos come from the same phone: the same `deviceId` (a random id per app
+ * install), not the same name — two phones of one model share their default name.
+ */
 function samePhone(a: PhoneHello, b: PhoneHello): boolean {
-  return a.device === b.device && a.app === b.app;
+  return a.deviceId === b.deviceId;
+}
+
+/** `v` of a frame that looks like a hello (to answer an outdated one properly), else null. */
+function helloVersion(text: string): number | null {
+  try {
+    const data: unknown = JSON.parse(text);
+    if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
+    const { t, v } = data as Record<string, unknown>;
+    if (t !== 'hello') return null;
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  } catch {
+    return null;
+  }
 }

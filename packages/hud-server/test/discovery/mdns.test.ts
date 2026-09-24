@@ -29,6 +29,8 @@ function setup(script: (child: FakeChild) => void = () => {}, installed = true) 
 
 beforeEach(() => resetMdnsHintForTests());
 
+const HUD_ID = 'AAECAwQFBgcICQoLDA0ODw';
+
 describe('mDNS helpers', () => {
   it('names the service after the vehicle', () => {
     expect(mdnsInstanceName('Golf')).toBe('Golf HUD');
@@ -47,14 +49,15 @@ describe('mDNS helpers', () => {
     expect(unicode).not.toContain('�');
   });
 
-  it('builds the avahi-publish-service arguments', () => {
-    expect(avahiPublishArgs(config({ name: 'Golf', port: 9090 }))).toEqual([
+  it('builds the avahi-publish-service arguments, with the HUD id for pinned phones', () => {
+    expect(avahiPublishArgs(config({ name: 'Golf', port: 9090 }), HUD_ID)).toEqual([
       '-s',
       'Golf HUD',
       MDNS_SERVICE_TYPE,
       '9090',
       `v=${PROTOCOL_VERSION}`,
       'path=/ws/phone',
+      `id=${HUD_ID}`,
     ]);
   });
 });
@@ -62,7 +65,7 @@ describe('mDNS helpers', () => {
 describe('advertiseHud', () => {
   it('returns null when disabled', () => {
     const { deps, spawn, which } = setup();
-    expect(advertiseHud(config({ mdns: false }), deps, { spawn, which })).toBeNull();
+    expect(advertiseHud(config({ mdns: false }), HUD_ID, deps, { spawn, which })).toBeNull();
     expect(spawn.children).toEqual([]);
   });
 
@@ -70,7 +73,7 @@ describe('advertiseHud', () => {
     const { clock, deps, spawn, which, logger } = setup((child) =>
       child.print("Established under name 'Golf HUD'"),
     );
-    const service = advertiseHud(config({ port: 8123 }), deps, { spawn, which });
+    const service = advertiseHud(config({ port: 8123 }), HUD_ID, deps, { spawn, which });
     expect(service?.name).toBe('mdns');
     await clock.advance(10);
     expect(spawn.children).toHaveLength(1);
@@ -80,8 +83,9 @@ describe('advertiseHud', () => {
       'Golf HUD',
       '_carheadsup._tcp',
       '8123',
-      'v=1',
+      'v=2',
       'path=/ws/phone',
+      `id=${HUD_ID}`,
     ]);
     expect(logger.lines('info').join('\n')).toMatch(/Established under name 'Golf HUD'/);
     await service!.stop();
@@ -93,8 +97,8 @@ describe('advertiseHud', () => {
 
   it('logs an install hint once and returns null when avahi-utils is missing', () => {
     const { deps, spawn, which, logger } = setup(() => {}, false);
-    expect(advertiseHud(config(), deps, { spawn, which })).toBeNull();
-    expect(advertiseHud(config(), deps, { spawn, which })).toBeNull();
+    expect(advertiseHud(config(), HUD_ID, deps, { spawn, which })).toBeNull();
+    expect(advertiseHud(config(), HUD_ID, deps, { spawn, which })).toBeNull();
     expect(logger.lines('warn')).toHaveLength(1);
     expect(logger.lines('warn')[0]).toMatch(/avahi-utils.*deploy\//);
     expect(spawn.children).toEqual([]);
@@ -102,7 +106,7 @@ describe('advertiseHud', () => {
 
   it('handles the tool vanishing between the PATH check and the spawn', async () => {
     const { clock, deps, spawn, which, logger } = setup((child) => child.failToStart());
-    const service = advertiseHud(config(), deps, { spawn, which });
+    const service = advertiseHud(config(), HUD_ID, deps, { spawn, which });
     expect(service).not.toBeNull();
     await clock.advance(60_000);
     expect(spawn.children).toHaveLength(1);
@@ -118,7 +122,7 @@ describe('advertiseHud', () => {
         child.exit(1);
       }
     });
-    const service = advertiseHud(config(), deps, { spawn, which });
+    const service = advertiseHud(config(), HUD_ID, deps, { spawn, which });
     await clock.advance(10);
     await clock.advance(1000);
     await clock.advance(2000);

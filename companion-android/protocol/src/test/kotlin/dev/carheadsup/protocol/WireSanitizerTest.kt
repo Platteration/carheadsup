@@ -173,11 +173,18 @@ class WireSanitizerTest {
     }
 
     @Test
-    fun `a pairing token cannot be shortened`() {
-        assertNull(WireSanitizer.sanitize(PhoneMessages.hello("d", "1", "t".repeat(257))))
-        assertNull(WireSanitizer.sanitize(PhoneMessages.hello("d", "1", "tok\nen")))
-        val hello = WireSanitizer.sanitize(PhoneMessages.hello("d".repeat(200), "1", "t".repeat(256))) as PhoneHello
+    fun `a hello goes out with its authentication fields intact or not at all`() {
+        val id = "8PHy8_T19vf4-fr7_P3-_w"
+        val nonce = "ICEiIyQlJicoKSorLC0uLw"
+        val proof = "mm0V3w_MTQxN1Eo5QmrfJ3EpsfnnlUZYJPzZ0YPD62s"
+        val hello = WireSanitizer.sanitize(PhoneMessages.hello("d".repeat(200), id, "1", nonce, proof)) as PhoneHello
         assertEquals(WireLimits.NAME, hello.device.length)
+        val valid = PhoneMessages.hello("d", id, "1", nonce, proof)
+        assertEquals(valid, WireSanitizer.sanitize(valid))
+        // The proof covers the id and nonce: nothing to repair, the HUD would refuse it.
+        assertNull(WireSanitizer.sanitize(PhoneMessages.hello("d", "Pixel", "1", nonce, proof)))
+        assertNull(WireSanitizer.sanitize(PhoneMessages.hello("d", id, "1", "$nonce=", proof)))
+        assertNull(WireSanitizer.sanitize(PhoneMessages.hello("d", id, "1", nonce, proof.drop(1))))
     }
 
     @Test

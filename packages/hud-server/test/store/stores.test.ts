@@ -240,6 +240,17 @@ describe('PersistStore', () => {
     expect(parsePersistedState({ activeTrip: 'nonsense' })?.state).not.toHaveProperty('activeTrip');
   });
 
+  it('round-trips the gear-numbering anchor and drops an invalid one', async () => {
+    const store = new PersistStore(join(dir, 'state.json'), logger);
+    const gearAnchor = { transmission: 'automatic' as const, secondGearRpmPerKph: 71.4 };
+    await store.save({ ...sample, gearAnchor });
+    expect(await store.load()).toEqual({ ...sample, gearAnchor });
+    expect(parsePersistedState({ gearAnchor: null })?.errors).toEqual([]);
+    expect(
+      parsePersistedState({ gearAnchor: { transmission: 'automatic', secondGearRpmPerKph: 0 } }),
+    ).toEqual({ state: EMPTY_PERSISTED_STATE, errors: ['gearAnchor: invalid'] });
+  });
+
   it('recovers from a corrupt file via the backup and moves the corrupt one aside', async () => {
     const store = new PersistStore(join(dir, 'state.json'), logger);
     await store.save(sample);

@@ -1,6 +1,8 @@
 export interface PhoneLinkStatus {
   connected: boolean;
   deviceName: string | null;
+  /** The phone's identity (`hello.deviceId`); null when unknown. */
+  deviceId: string | null;
   appVersion: string | null;
   /** Epoch ms of the last connect/disconnect. */
   since: number;

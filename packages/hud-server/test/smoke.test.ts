@@ -1,6 +1,5 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { PROTOCOL_VERSION } from '@carheadsup/core';
 import type { HudFrame, SimStatus } from '@carheadsup/core';
 import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
 import { describe, expect, it } from 'vitest';
@@ -9,6 +8,7 @@ import { createSimulation } from '../src/sim/index.ts';
 import {
   MemoryLogger,
   TestSocket,
+  answerChallenge,
   makeTempDir,
   testConfig,
   waitFor,
@@ -92,14 +92,13 @@ describe('smoke: the whole server with the real simulator', () => {
         const phone = new TestSocket(`ws://127.0.0.1:${port}/ws/phone`);
         sockets.push(phone);
         await phone.opened;
-        phone.send({
-          t: 'hello',
-          v: PROTOCOL_VERSION,
-          device: 'Smoke test',
-          app: 'test',
-          appVersion: '0',
-          token: '',
-        });
+        phone.send(
+          answerChallenge(await phone.nextOfType('challenge'), {
+            device: 'Smoke test',
+            app: 'test',
+            appVersion: '0',
+          }),
+        );
         expect(await phone.nextOfType('welcome')).toMatchObject({ hudName: 'My car' });
       } finally {
         for (const socket of sockets) socket.close();

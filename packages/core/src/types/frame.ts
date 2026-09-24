@@ -160,6 +160,7 @@ export interface TpmsWidget extends WidgetBase {
 
 export interface ClockWidget extends WidgetBase {
   id: 'clock';
+  /** Wall-clock time. */
   epochMs: number;
   format: ClockFormat;
 }
@@ -342,6 +343,10 @@ export interface DiagnosticsFrame {
 }
 
 export interface HudFrame {
+  /**
+   * Engine time of the state it shows: monotonic (it never steps with the system clock), for
+   * judging whether frames keep coming. Wall-clock times are in the clock and ETA widgets.
+   */
   at: number;
   context: DrivingContext;
   /** Driver blanked the display — render nothing but a tiny indicator. */
@@ -360,7 +365,10 @@ export interface HudFrame {
   shiftLight: ShiftLightFrame | null;
   blindSpot: { left: boolean; right: boolean };
   collision: CollisionLevel;
-  /** Full-screen diagnostics dashboard, only when parked. */
+  /**
+   * Full-screen diagnostics dashboard: when parked, or when stopped after the driver opened it
+   * ('next-page' / 'prev-page'); never while moving.
+   */
   diagnostics: DiagnosticsFrame | null;
   status: {
     obd: ObdLinkState;

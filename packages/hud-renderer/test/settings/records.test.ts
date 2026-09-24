@@ -21,7 +21,7 @@ import {
   tripTotals,
   tripView,
 } from '../../src/settings/model/records.ts';
-import { mockDiagnostics, mockMaintenance, mockTrips } from './mock-hud.ts';
+import { MOCK_NOW, mockDiagnostics, mockMaintenance, mockTrips } from './mock-hud.ts';
 
 const METRIC: UnitsConfig = { ...DEFAULT_CONFIG.units, currency: 'EUR' };
 const US: UnitsConfig = {
@@ -176,10 +176,10 @@ describe('signalRows', () => {
     expect(rows.find((r) => r.id === 'longFuelTrimB1')?.abnormal).toBe(true);
   });
 
-  it('marks samples stale relative to the newest one, and everything stale without a link', () => {
+  it('marks samples stale by their age on the HUD’s clock, and everything without a link', () => {
     const diag = mockDiagnostics();
     const rows = signalRows(diag, METRIC);
-    // Oil temperature is 60 s older than the newest sample; its limit is 10 s.
+    // Oil temperature is 60 s old; its limit is 10 s.
     expect(rows.find((r) => r.id === 'oilTemp')?.stale).toBe(true);
     // Fuel level is 4 s old but may be up to 120 s old.
     expect(rows.find((r) => r.id === 'fuelLevel')?.stale).toBe(false);
@@ -187,8 +187,37 @@ describe('signalRows', () => {
     expect(down.every((r) => r.stale)).toBe(true);
   });
 
-  it('marks every signal stale when the car stops sending, though the link still says connected', () => {
+  it('marks every signal stale on the first poll when the car stopped sending long ago', () => {
+    // The adapter link still says connected, but nothing has arrived for 3 minutes.
+    const diag = { ...mockDiagnostics(), now: MOCK_NOW + 180_000 };
+    const rows = signalRows(diag, METRIC, {
+      watch: watchSignals(new Map(), diag, 0),
+      now: 0,
+      poll: 1000,
+    });
+    expect(rows.length).toBeGreaterThan(5);
+    expect(rows.every((r) => r.stale)).toBe(true);
+    // Just within its limit on the HUD's clock, whatever the phone's clock says.
+    const fresh = signalRows({ ...mockDiagnostics(), now: MOCK_NOW + 2000 }, METRIC);
+    expect(fresh.find((r) => r.id === 'rpm')?.stale).toBe(false);
+    const late = signalRows({ ...mockDiagnostics(), now: MOCK_NOW + 2001 }, METRIC);
+    expect(late.find((r) => r.id === 'rpm')?.stale).toBe(true);
+  });
+
+  it('marks every signal stale as the HUD’s clock moves on without new samples', () => {
     const diag = mockDiagnostics();
+    const at = (ms: number) => signalRows({ ...diag, now: MOCK_NOW + ms }, METRIC);
+    expect(at(1000).find((r) => r.id === 'rpm')?.stale).toBe(false);
+    expect(at(2001).find((r) => r.id === 'rpm')?.stale).toBe(true);
+    expect(at(2001).find((r) => r.id === 'fuelLevel')?.stale).toBe(false);
+    expect(at(116_001).every((r) => r.stale)).toBe(true);
+  });
+
+  it('without the HUD’s now (older HUD): stale by the newest sample and across polls', () => {
+    const { now: _now, ...older } = mockDiagnostics();
+    const diag = older as ApiDiagnostics;
+    expect(signalRows(diag, METRIC).find((r) => r.id === 'oilTemp')?.stale).toBe(true);
+    expect(signalRows(diag, METRIC).find((r) => r.id === 'fuelLevel')?.stale).toBe(false);
     const poll = 1000;
     // The same samples come back on every poll: the adapter answers, the car does not.
     let watch = watchSignals(new Map(), diag, 0);
@@ -209,6 +238,7 @@ describe('signalRows', () => {
     for (let t = 1; t <= 10; t += 1) {
       const next = {
         ...diag,
+        now: diag.now + t * 1000,
         signals: Object.fromEntries(
           Object.entries(diag.signals).map(([id, s]) => [id, { ...s!, at: s!.at + t * 1000 }]),
         ),

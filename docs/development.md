@@ -48,13 +48,16 @@ Everything here runs on an ordinary Linux or macOS machine; no car, Pi or phone 
 The same controls are available as the REST call `POST /api/sim`
 ([protocol.md](protocol.md#simulator)), which is handy for scripting a scene.
 
-The scripted demo drive (`packages/obd/src/sim/scenario.ts`) loops about every 7½ minutes:
+The scripted demo drive (`packages/obd/src/sim/scenario.ts`) loops about every 5 minutes:
 warm-up at a standstill (20 s), city with guidance (55 s), a red light with an incoming call
 (25 s), an on-ramp (20 s), highway with speed limits 120 / 100 and a speed camera (90 s), the
 exit (20 s), arriving with a message (30 s), then standing with the engine off and the ignition
-on: the parked dashboard appears after 3 minutes (`display.context.engineOffParkedAfterMs`, long
-so that start-stop at a red light never opens it) and stays for 15 s. To see the dashboard
-sooner, switch to manual driving, or set a shorter `engineOffParkedAfterMs` in the settings.
+on (40 s). As it stops, the simulated phone presses the companion app's remote "next page"
+button (a real `input` message), which opens the diagnostics dashboard at once while the car is
+`stopped`; it stays up through the next warm-up and closes as the car drives off. (On its own the
+HUD brings the dashboard up only after 3 minutes with the engine off,
+`display.context.engineOffParkedAfterMs`, so that start-stop at a red light never opens it.) The
+input pad's page buttons do the same at any stop.
 
 The simulator panel shows what the server reports (`GET /api/sim`), overrides, tyre pressures,
 driver-assistance warnings and the simulated phone's link included, so a reloaded console — or
@@ -78,7 +81,10 @@ of them can be opened full screen without a server, e.g.
 The core is pure, so a whole drive is a list of events. The `Harness` in
 [`packages/core/test/state/fixtures.ts`](../packages/core/test/state/fixtures.ts) wraps
 `createInitialState`, `reduce`, `deriveEffects` and `composeFrame`: feed it events with
-timestamps and inspect the state, the effects and the frames.
+timestamps and inspect the state, the effects and the frames. Timestamps are engine time, which
+is also the wall-clock time until a `clock/sync` event says otherwise — send one to replay a
+system clock that steps mid-drive
+([why](architecture.md#engine-time-and-the-wall-clock)).
 [`test/scenarios/drive.test.ts`](../packages/core/test/scenarios/drive.test.ts) is the example
 to copy.
 
@@ -163,7 +169,8 @@ priority behaviour). The other two accept options (`--tab=live --mock`, `--secti
   constructor parameter properties), `.ts` extensions in relative imports, `import type` for
   types, strict mode with `noUncheckedIndexedAccess`, no `any`.
 - **`packages/core` is pure**: no clock, timers, randomness, I/O or `console`; time comes from
-  events. Same input, same output.
+  events (monotonic engine time; the wall clock only as the `clock/sync` offset). Same input,
+  same output.
 - **Canonical units inside**, conversion only in `composeFrame`.
 - **Never show stale data as live**: read signals through `freshValue()` / the selectors.
 - **Driver distraction**: no message content, short text while moving, detail only when

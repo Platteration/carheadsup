@@ -8,8 +8,17 @@ public object PhoneMessages {
     /** `nav.source` for guidance parsed from Google Maps notifications. */
     public const val SOURCE_GOOGLE_MAPS: String = "google-maps"
 
-    public fun hello(device: String, appVersion: String, token: String): PhoneHello =
-        PhoneHello(v = PROTOCOL_VERSION, device = device, app = APP_NAME, appVersion = appVersion, token = token)
+    /** A `hello`; normally built by [dev.carheadsup.protocol.auth.HudHandshake], which computes [proof]. */
+    public fun hello(device: String, deviceId: String, appVersion: String, nonce: String, proof: String): PhoneHello =
+        PhoneHello(
+            v = PROTOCOL_VERSION,
+            device = device,
+            deviceId = deviceId,
+            app = APP_NAME,
+            appVersion = appVersion,
+            nonce = nonce,
+            proof = proof,
+        )
 
     /** Ends guidance on the HUD. */
     public fun navEnded(source: String): PhoneNav = PhoneNav(active = false, source = source)

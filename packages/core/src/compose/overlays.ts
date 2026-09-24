@@ -2,6 +2,7 @@ import { computeShiftLight } from '../display/shift-light.ts';
 import {
   ENDED_CALL_SHOW_MS,
   callControls,
+  collisionLevel,
   freshSignal,
   isAdasFresh,
   selectToast,
@@ -49,10 +50,10 @@ export function composeCall(state: HudState): CallFrame | null {
   };
 }
 
-/** Shift bar while driving (never parked), from fresh rpm. */
+/** Shift bar while driving (never parked), from fresh rpm; flashing as latched in the state. */
 export function composeShiftLight(state: HudState, config: HudConfig): ShiftLightFrame | null {
   if (!config.shiftLight.enabled || state.context.context === 'parked') return null;
-  const light = computeShiftLight(freshSignal(state, 'rpm'), config.shiftLight);
+  const light = computeShiftLight(freshSignal(state, 'rpm'), config.shiftLight, state.shiftFlash);
   return light === null ? null : { level: roundTo(light.level, 3), flash: light.flash };
 }
 
@@ -66,9 +67,12 @@ export function composeBlindSpot(state: HudState): { left: boolean; right: boole
     : { ...NO_BLIND_SPOT };
 }
 
-/** Forward-collision level from a connected module, only while its reading is ≤ 1 s old. */
+/**
+ * Forward-collision level from a connected module while its reading is ≤ 1 s old; a 'warning'
+ * is held for 1 s after the module last reported it (see `collisionLevel`).
+ */
 export function composeCollision(state: HudState): CollisionLevel {
-  return isAdasFresh(state, state.adas.collisionUpdatedAt) ? state.adas.collision : 'none';
+  return collisionLevel(state);
 }
 
 export function toAlertFrame(alert: Alert): AlertFrame {

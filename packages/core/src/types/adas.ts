@@ -13,4 +13,9 @@ export interface AdasState {
   /** Time to collision reported by the module, if any. */
   ttcSeconds: number | null;
   collisionUpdatedAt: number | null;
+  /**
+   * When the module last reported a 'warning'; the warning stays up for
+   * `COLLISION_WARNING_HOLD_MS` after it, whatever the module reports meanwhile.
+   */
+  collisionWarningAt: number | null;
 }

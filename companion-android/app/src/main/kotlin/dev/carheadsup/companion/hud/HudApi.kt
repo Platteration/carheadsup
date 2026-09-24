@@ -34,7 +34,8 @@ class HudApiException(message: String, val status: Int? = null, cause: Throwable
 
 /**
  * Client for the HUD's REST API (packages/core/src/types/api.ts). Requests go to the current
- * endpoint over the HUD's Wi-Fi and carry `Authorization: Bearer <apiToken>` when one is set.
+ * endpoint over the HUD's Wi-Fi and carry `Authorization: Bearer <apiToken>` when one is set;
+ * [endpoint] only yields a HUD that has proven itself on the phone link.
  */
 class HudApi(
     private val client: () -> OkHttpClient,
@@ -71,7 +72,7 @@ class HudApi(
     private suspend fun get(path: String): String = execute(request(path).get().build())
 
     private fun request(path: String): Request.Builder {
-        val target = endpoint() ?: throw HudApiException("HUD address unknown")
+        val target = endpoint() ?: throw HudApiException("Not connected to your HUD yet (it must prove itself first)")
         val builder = Request.Builder().url(target.apiUrl(path)).header("Accept", "application/json")
         val token = apiToken().trim()
         if (token.isNotEmpty()) builder.header("Authorization", "Bearer $token")

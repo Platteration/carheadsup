@@ -3,7 +3,7 @@ import type { DiagnosticsPageKind } from '../types/frame.ts';
 import type { HudState } from '../types/state.ts';
 
 /**
- * `UiState.page` is an index into the parked dashboard's page list, and that list changes as
+ * `UiState.page` is an index into the dashboard's page list, and that list changes as
  * signals come and go (the engine, fuel and electrical pages exist only with live data). These
  * helpers keep the index pointing at what the driver chose.
  */

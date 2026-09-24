@@ -4,11 +4,12 @@ import type {
   LightSensorKind,
   SensorsConfig,
 } from '@carheadsup/core';
-import { roundTo } from '@carheadsup/core';
-import { useState } from 'preact/hooks';
+import { MAX_ADAS_ALLOWED_SENDERS, normalizeIpAddress, roundTo } from '@carheadsup/core';
+import type { JSX } from 'preact';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { Scope } from '../model/scope.ts';
 import { DEGREES, plainUnit } from '../model/units.ts';
-import { Button, Card, Section } from '../ui/common.tsx';
+import { Button, Card, Notice, Section } from '../ui/common.tsx';
 import {
   FieldGrid,
   FieldGroup,
@@ -16,8 +17,10 @@ import {
   NumberField,
   SelectField,
   Switch,
+  issueText,
 } from '../ui/fields.tsx';
 import type { Option } from '../ui/fields.tsx';
+import { useForm } from '../ui/form-context.ts';
 
 const LIGHT_SENSORS: ReadonlyArray<Option<LightSensorKind>> = [
   { value: 'none', label: 'None (use time of day)' },
@@ -108,9 +111,133 @@ export function SensorsSection({ root }: { root: Scope<HudConfig> }) {
             nullable
             hint="For an add-on camera or radar module. Leave empty when not fitted."
           />
+          {s.adasUdpPort !== null && <AllowedSenders scope={sensors} />}
         </FieldGroup>
       </Card>
     </Section>
+  );
+}
+
+const NOT_AN_ADDRESS = 'Enter an IPv4 or IPv6 address, e.g. 10.42.0.50';
+
+/**
+ * `sensors.adasAllowedSenders`: the addresses the ADAS feed listens to. Addresses are checked
+ * and stored in canonical form as they are added. A typed address that was not added blocks
+ * saving, so it cannot be silently left out; its problem shows once the box is left or Add
+ * pressed, not while typing.
+ */
+function AllowedSenders({ scope }: { scope: Scope<SensorsConfig> }) {
+  const list = scope.child('adasAllowedSenders');
+  const senders = list.value;
+  const key = list.key;
+  const form = useForm();
+  const id = useId();
+  const [typedText, setTypedText] = useState('');
+  const [touched, setTouched] = useState(false);
+
+  // Discard / reload: forget a half-typed address.
+  const firstRevision = useRef(form.revision);
+  useEffect(() => {
+    if (form.revision === firstRevision.current) return;
+    setTypedText('');
+    setTouched(false);
+  }, [form.revision]);
+
+  const typed = typedText.trim();
+  const address = typed === '' ? null : normalizeIpAddress(typed);
+  const listed = new Set(senders.map((sender) => normalizeIpAddress(sender) ?? sender));
+  const full = senders.length >= MAX_ADAS_ALLOWED_SENDERS;
+  const problem =
+    typed === ''
+      ? null
+      : address === null
+        ? NOT_AN_ADDRESS
+        : listed.has(address)
+          ? `${address} is already in the list`
+          : `Press Add to include ${address}, or clear the box`;
+  useEffect(() => {
+    form.setLocalError(key, problem);
+  }, [key, problem]);
+  useEffect(() => () => form.setLocalError(key, null), [key]);
+
+  const add = () => {
+    setTouched(true);
+    if (address === null || listed.has(address) || full) return;
+    list.replace([...senders, address]);
+    setTypedText('');
+    setTouched(false);
+  };
+  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    add();
+  };
+
+  const issue = list.issuesWithin()[0];
+  const error = (touched ? problem : null) ?? (issue ? issueText(issue) : null);
+  return (
+    <div class="allowed-senders">
+      {senders.length === 0 && (
+        <Notice tone="warning" title="Any device on the car’s network can send warnings">
+          A passenger’s phone on the Wi-Fi could show a false “BRAKE!” or hide a real warning. Give
+          the module a static address and add it below.
+        </Notice>
+      )}
+      <FieldShell
+        label="Accept data only from"
+        inputId={id}
+        hint={
+          full
+            ? `At most ${MAX_ADAS_ALLOWED_SENDERS} addresses.`
+            : 'The module’s IPv4 address (give the module a static one). Data from other devices is ignored; with no address here, any device is heard.'
+        }
+        error={error}
+        dirty={scope.dirty('adasAllowedSenders')}
+        path={key}
+      >
+        <div class="input-row">
+          <input
+            id={id}
+            class="input input--mono"
+            type="text"
+            value={typedText}
+            placeholder="e.g. 10.42.0.50"
+            disabled={full}
+            autoComplete="off"
+            autoCapitalize="off"
+            spellcheck={false}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? `${id}-error` : undefined}
+            onInput={(event) => {
+              setTypedText(event.currentTarget.value);
+              setTouched(false);
+            }}
+            onBlur={() => setTouched(true)}
+            onKeyDown={onKeyDown}
+          />
+          <Button onClick={add} disabled={full}>
+            Add
+          </Button>
+        </div>
+      </FieldShell>
+      {senders.length > 0 && (
+        <ul class="address-list" aria-label="Accepted senders">
+          {senders.map((sender, index) => (
+            <li key={sender} class="address-list__item">
+              <code>{sender}</code>
+              <Button
+                size="small"
+                variant="ghost"
+                aria-label={`Remove ${sender}`}
+                onClick={() => list.replace(senders.filter((_, i) => i !== index))}
+              >
+                Remove
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

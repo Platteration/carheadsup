@@ -23,6 +23,7 @@ import {
   FakeSource,
   MemoryLogger,
   TestSocket,
+  answerChallenge,
   makeTempDir,
   sleep,
   startTestServer,
@@ -428,6 +429,30 @@ describe('diagnostics API', () => {
     expect(d.vin).toBe('1HGCM82633A004352');
   });
 
+  it('reports every time on the HUD’s wall clock, with its own now (regression: settings aging)', async () => {
+    const DAY = 86_400_000;
+    const clock = { step: 0 };
+    const t = await start({
+      now: () => Date.now() + clock.step,
+      monotonic: () => performance.now(),
+    });
+    t.obd.emit({ type: 'obd/link', state: 'connected', at: 0 });
+    t.obd.emit({ type: 'obd/samples', samples: [{ signal: 'coolantTemp', value: 90 }], at: 0 });
+    // Network time steps the system clock three days forward.
+    clock.step = 3 * DAY;
+    await sleep(300); // a tick syncs the core's wall-clock offset
+    const d = (await call(t, 'GET', '/api/diagnostics')).body as ApiDiagnostics;
+    expect(Math.abs(d.now - (Date.now() + clock.step))).toBeLessThan(2000);
+    // Ages are right on the HUD's clock: the sample is a few hundred ms old, not three days.
+    const age = d.now - (d.signals.coolantTemp?.at ?? Number.NaN);
+    expect(age).toBeGreaterThanOrEqual(250);
+    expect(age).toBeLessThan(2000);
+    expect(d.now - d.link.since).toBeLessThan(2000);
+    const info = (await call(t, 'GET', '/api/info')).body as ApiInfo;
+    expect(info.uptimeS).toBeLessThan(60);
+    expect(info.obd.since).toBe(d.link.since);
+  });
+
   it('clears codes only when parked with the engine off', async () => {
     const t = await start();
     const allowed = await call(t, 'POST', '/api/diagnostics/clear-dtcs');
@@ -532,7 +557,7 @@ describe('trips API', () => {
     const phone = new TestSocket(`${t.wsBase}/ws/phone`);
     try {
       await phone.opened;
-      phone.send({ t: 'hello', v: 1, device: 'P', app: 'a', appVersion: '1', token: '' });
+      phone.send(answerChallenge(await phone.nextOfType('challenge'), { device: 'P' }));
       await phone.nextOfType('welcome');
       t.obd.emit({ type: 'obd/link', state: 'connected', at: 0 });
       for (let i = 0; i < 5; i += 1) {

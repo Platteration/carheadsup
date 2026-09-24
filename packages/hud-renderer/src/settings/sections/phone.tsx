@@ -2,7 +2,7 @@ import type { HudConfig } from '@carheadsup/core';
 import { useState } from 'preact/hooks';
 import type { Scope } from '../model/scope.ts';
 import { tokenProblem, trimToken } from '../model/validation.ts';
-import { Button, Card, Section } from '../ui/common.tsx';
+import { Badge, Button, Card, Notice, Section } from '../ui/common.tsx';
 import { FieldGroup, TextField, ToggleField } from '../ui/fields.tsx';
 import { copyText, generateToken } from '../ui/hooks.ts';
 
@@ -44,12 +44,43 @@ export function SecretActions({
 
 export function PhoneSection({ root }: { root: Scope<HudConfig> }) {
   const phone = root.child('phone');
+  const paired = phone.value.pairingToken !== '';
   return (
     <Section
       id="phone"
       title="Phone"
       intro="Navigation, calls, music and messages come from the companion app."
+      aside={
+        paired ? (
+          <Badge tone="ok" title="Phone and HUD prove the pairing code to each other">
+            Paired
+          </Badge>
+        ) : (
+          <Badge tone="warning" title="No pairing code: any phone can connect">
+            Not paired · open
+          </Badge>
+        )
+      }
     >
+      {!paired && (
+        <Notice
+          tone="warning"
+          title="Not paired: the HUD is open"
+          actions={
+            <Button
+              size="small"
+              variant="primary"
+              onClick={() => phone.set('pairingToken', generateToken())}
+            >
+              Generate pairing code
+            </Button>
+          }
+        >
+          Any phone on the car’s Wi-Fi can connect and feed the HUD, and your phone cannot verify
+          that it is talking to this HUD — it asks you to confirm instead. Generate a pairing code,
+          save, and enter the same code in the companion app.
+        </Notice>
+      )}
       <Card>
         <FieldGroup title="Pairing">
           <TextField
@@ -60,7 +91,7 @@ export function PhoneSection({ root }: { root: Scope<HudConfig> }) {
             transform={trimToken}
             validate={tokenProblem}
             placeholder="No code — any phone can connect"
-            hint="Enter the same code in the companion app. Leave empty to allow any phone on the car’s Wi-Fi."
+            hint="Enter the same code in the companion app: phone and HUD then prove to each other that they know it (the code itself never crosses the Wi-Fi). Use Generate: a long random code cannot be guessed from a recorded connection."
             actions={
               <SecretActions
                 label="pairing code"

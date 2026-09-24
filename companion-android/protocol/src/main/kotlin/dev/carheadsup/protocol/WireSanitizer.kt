@@ -1,5 +1,7 @@
 package dev.carheadsup.protocol
 
+import dev.carheadsup.protocol.auth.PhoneAuth
+
 /**
  * Size limits the HUD enforces on phone messages (core `PROTOCOL_LIMITS`). Lengths are in UTF-16
  * code units, which is what both JavaScript and Kotlin `String.length` count.
@@ -11,7 +13,6 @@ public object WireLimits {
     public const val ID: Int = 256
     public const val TRACK_KEY: Int = 512
     public const val TEXT: Int = 300
-    public const val TOKEN: Int = 256
     public const val VERSION: Int = 64
     public const val PHONE_NUMBER: Int = 40
 
@@ -46,7 +47,7 @@ public object WireLimits {
  * - an icon that is not a base64 PNG within budget is dropped.
  *
  * Returns null when a required field cannot be salvaged (empty id/sender/source, position off
- * the globe, over-long pairing token).
+ * the globe, a `hello` whose identity, nonce or proof is malformed).
  */
 public object WireSanitizer {
     private val CONTROL = Regex("[\\u0000-\\u001f\\u007f]")
@@ -111,8 +112,10 @@ public object WireSanitizer {
     }
 
     private fun hello(m: PhoneHello): PhoneHello? {
-        // A token cannot be shortened without breaking pairing.
-        if (m.token.length > WireLimits.TOKEN || CONTROL.containsMatchIn(m.token)) return null
+        // Nothing to salvage: the proof covers the id and the nonce.
+        if (!PhoneAuth.isValidId(m.deviceId) || !PhoneAuth.isValidId(m.nonce) || !PhoneAuth.isValidProof(m.proof)) {
+            return null
+        }
         return m.copy(
             device = label(m.device, WireLimits.NAME),
             app = label(m.app, WireLimits.NAME),

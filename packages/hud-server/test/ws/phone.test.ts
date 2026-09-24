@@ -1,12 +1,23 @@
-import { PROTOCOL_VERSION } from '@carheadsup/core';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { PROTOCOL_VERSION, isAuthId } from '@carheadsup/core';
 import type { TripRecord } from '@carheadsup/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { HUD_VERSION } from '../../src/meta.ts';
+import { hudProof } from '../../src/phone/auth.ts';
 import { createSimulation } from '../../src/sim/index.ts';
 import { SIM_PHONE_DEVICE } from '../../src/sim/phone.ts';
 import { PHONE_CLOSE } from '../../src/ws/phone-channel.ts';
-import { FakeSimulation, TestSocket, startTestServer, waitFor } from '../helpers.ts';
-import type { TestServer, TestServerOptions } from '../helpers.ts';
+import {
+  FakeSimulation,
+  TestSocket,
+  answerChallenge,
+  connectTestPhone,
+  startTestServer,
+  testDeviceId,
+  waitFor,
+} from '../helpers.ts';
+import type { TestPhone, TestServer, TestServerOptions } from '../helpers.ts';
 
 let current: TestServer | null = null;
 const sockets: TestSocket[] = [];
@@ -28,27 +39,18 @@ function phone(t: TestServer): TestSocket {
   return socket;
 }
 
-function hello(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    t: 'hello',
-    v: PROTOCOL_VERSION,
-    device: 'Pixel 9',
-    app: 'carheadsup',
-    appVersion: '1.2.3',
-    token: '',
-    ...overrides,
-  };
+/** Open a phone socket and answer the HUD's challenge as `identity`. */
+async function sayHello(t: TestServer, identity: TestPhone = {}): Promise<TestSocket> {
+  const socket = phone(t);
+  await socket.opened;
+  socket.send(answerChallenge(await socket.nextOfType('challenge'), identity));
+  return socket;
 }
 
 /** Connect and complete the handshake. */
-async function connected(
-  t: TestServer,
-  overrides: Record<string, unknown> = {},
-): Promise<TestSocket> {
-  const socket = phone(t);
-  await socket.opened;
-  socket.send(hello(overrides));
-  await socket.nextOfType('welcome');
+async function connected(t: TestServer, identity: TestPhone = {}): Promise<TestSocket> {
+  const { socket } = await connectTestPhone(t.wsBase, identity);
+  sockets.push(socket);
   return socket;
 }
 
@@ -74,35 +76,58 @@ function trip(n: number): TripRecord {
 }
 
 describe('/ws/phone handshake', () => {
-  it('welcomes a phone and reports it connected', async () => {
+  it('challenges, welcomes a phone with its own proof and reports it connected', async () => {
     const t = await start({
       config: { vehicle: { name: 'Golf' }, phone: { readMessagesAloud: false } },
     });
     const socket = phone(t);
     await socket.opened;
-    socket.send(hello());
+    const challenge = await socket.next();
+    const hudId = (await readFile(join(t.dataDir, 'hud-id'), 'utf8')).trim();
+    expect(isAuthId(hudId)).toBe(true);
+    expect(challenge).toEqual({
+      t: 'challenge',
+      v: PROTOCOL_VERSION,
+      hudId,
+      nonce: expect.stringMatching(/^[\w-]{22}$/),
+    });
+    const hello = answerChallenge(challenge);
+    socket.send(hello);
     expect(await socket.next()).toEqual({
       t: 'welcome',
       v: PROTOCOL_VERSION,
       hudName: 'Golf',
       hudVersion: HUD_VERSION,
       readMessagesAloud: false,
+      hudId,
+      proof: hudProof('', {
+        hudId,
+        hudNonce: String(challenge['nonce']),
+        phoneNonce: String(hello['nonce']),
+        deviceId: String(hello['deviceId']),
+      }),
     });
     await waitFor(() => t.server.engine.state.phone.connected, 1000, 'phone link');
     expect(t.server.engine.state.phone).toMatchObject({
       deviceName: 'Pixel 9',
+      deviceId: hello['deviceId'],
       appVersion: '1.2.3',
     });
     const info = await (await fetch(`${t.base}/api/info`)).json();
     expect(info).toMatchObject({ phoneConnected: true });
   });
 
+  it('uses the identity kept in its data directory', async () => {
+    const t = await start({ files: { 'hud-id': 'AAECAwQFBgcICQoLDA0ODw\n' } });
+    const { socket, welcome } = await connectTestPhone(t.wsBase);
+    sockets.push(socket);
+    expect(welcome['hudId']).toBe('AAECAwQFBgcICQoLDA0ODw');
+  });
+
   it('checks the pairing token when one is configured', async () => {
     const t = await start({ config: { phone: { pairingToken: 'K7fQ2mZr' } } });
-    const wrong = phone(t);
-    await wrong.opened;
-    wrong.send(hello({ token: 'guess' }));
-    expect(await wrong.next()).toMatchObject({ t: 'error', code: 'bad-token' });
+    const wrong = await sayHello(t, { token: 'guess' });
+    expect(await wrong.nextOfType('error')).toMatchObject({ t: 'error', code: 'bad-token' });
     expect(await wrong.closed).toBe(PHONE_CLOSE.badToken);
     expect(t.server.engine.state.phone.connected).toBe(false);
 
@@ -112,9 +137,7 @@ describe('/ws/phone handshake', () => {
 
   it('refuses other protocol versions', async () => {
     const t = await start();
-    const socket = phone(t);
-    await socket.opened;
-    socket.send(hello({ v: PROTOCOL_VERSION + 1 }));
+    const socket = await sayHello(t, { v: PROTOCOL_VERSION + 1 });
     expect(await socket.next()).toMatchObject({ t: 'error', code: 'unsupported-version' });
     expect(await socket.closed).toBe(PHONE_CLOSE.unsupportedVersion);
   });
@@ -124,7 +147,7 @@ describe('/ws/phone handshake', () => {
     const socket = phone(t);
     await socket.opened;
     socket.send({ t: 'ping' });
-    expect(await socket.next()).toMatchObject({ t: 'error', code: 'bad-message' });
+    expect(await socket.nextOfType('error')).toMatchObject({ t: 'error', code: 'bad-message' });
     expect(await socket.closed).toBe(PHONE_CLOSE.helloRequired);
 
     const garbage = phone(t);
@@ -137,7 +160,10 @@ describe('/ws/phone handshake', () => {
     const t = await start({ tuning: { helloTimeoutMs: 100 } });
     const socket = phone(t);
     await socket.opened;
-    expect(await socket.next(undefined, 2000)).toMatchObject({ t: 'error', code: 'bad-message' });
+    expect(await socket.nextOfType('error', 2000)).toMatchObject({
+      t: 'error',
+      code: 'bad-message',
+    });
     expect(await socket.closed).toBe(PHONE_CLOSE.helloRequired);
   });
 
@@ -163,9 +189,11 @@ describe('/ws/phone handshake', () => {
   it('refuses another phone while one is connected', async () => {
     const t = await start();
     const driver = await connected(t, { device: 'Driver Pixel' });
-    const passenger = phone(t);
-    await passenger.opened;
-    passenger.send(hello({ device: 'Passenger iPhone' }));
+    // Same model, same default name: still another phone.
+    const passenger = await sayHello(t, {
+      device: 'Driver Pixel',
+      deviceId: testDeviceId('passenger'),
+    });
     expect(await passenger.closed).toBe(PHONE_CLOSE.busy);
     expect(passenger.closeReason).toBe('another phone is connected');
     expect(driver.ws.readyState).toBe(driver.ws.OPEN);
@@ -376,6 +404,25 @@ describe('/ws/phone messages', () => {
       callId: 'call-1',
       action: 'decline',
     });
+  });
+
+  it('times a call first seen mid-call from its receipt, even after the wall clock stepped back', async () => {
+    // Network time sets the system clock back an hour while the HUD runs: engine time keeps
+    // counting, and the phone's messages must be stamped with it, not with the wall clock (a
+    // call first seen active keeps its stamp as its start: the timer would read an hour long).
+    let wallShiftMs = 0;
+    const t = await start({
+      now: () => Date.now() + wallShiftMs,
+      monotonic: () => performance.now(),
+    });
+    const socket = await connected(t);
+    wallShiftMs = -3_600_000;
+    socket.send({ t: 'call', id: 'c9', state: 'active', callerName: 'Maria', number: null });
+    await waitFor(() => t.server.engine.state.call?.id === 'c9', 1000, 'call');
+    const state = t.server.engine.state;
+    expect(state.clock.wallOffsetMs).toBeLessThan(-3_590_000);
+    expect(state.now - (state.call?.startedAt ?? 0)).toBeLessThan(5000);
+    expect(state.now - (state.call?.startedAt ?? 0)).toBeGreaterThanOrEqual(0);
   });
 
   it('also delivers phone messages to the simulated phone', async () => {

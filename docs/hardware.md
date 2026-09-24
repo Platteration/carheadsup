@@ -189,11 +189,13 @@ leave the car, without corrupting the SD card and without draining the battery.
 The Raspberry Pi has no battery-backed clock (the Pi 5 has one, but only with its optional
 battery fitted). Without network time it boots with the time it last shut down, and network time
 arriving later steps the clock — forwards, or backwards if a real-time clock ran fast. The HUD's
-own timing survives both: its time never goes backwards and never stands still, so values still
-expire on time (after a backward step it runs slightly slow until the system clock has caught
-up, and the clock widget can be ahead by up to the size of the step meanwhile). But the clock
-widget, trip timestamps, date-based service reminders and sun-based night mode are only as right
-as the system time.
+own timing survives both: it measures time on a monotonic clock, so a step mid-drive neither
+expires live data nor splits the trip in progress, and the clock widget, trip times, service
+dates and night mode follow the corrected time at once
+([details](architecture.md#engine-time-and-the-wall-clock)). But those are only as right as the
+system time — and without either a real-time clock or network time, the HUD cannot tell how long
+the car was off: every restart looks like a short stop, so consecutive drives are merged into one
+trip. (When network time arrives later, a trip merged that way is split again.)
 
 - **Network time via the phone**: if the Pi joins the phone's hotspot (instead of being the
   hotspot), `systemd-timesyncd` sets the time at every start. See
@@ -251,7 +253,7 @@ internal pull-up and reads them with libgpiod's `gpiomon` (`sudo apt install gpi
 | --- | --- | --- | --- | --- |
 | Accept / OK | `sensors.buttons.primary` | accept call, acknowledge alert | blank / unblank the HUD | GPIO 17 (pin 11) |
 | Decline / dismiss | `sensors.buttons.secondary` | decline / hang up, dismiss toast or alert | — | GPIO 27 (pin 13) |
-| Next page | `sensors.buttons.next` | next page of the parked dashboard | — | GPIO 22 (pin 15) |
+| Next page | `sensors.buttons.next` | next dashboard page; at a stop, open the dashboard | — | GPIO 22 (pin 15) |
 
 Ground: pin 9 or 14. On long cables add an external 10 kΩ pull-up to 3.3 V and a 100 nF capacitor
 to ground at the Pi; with an old `gpiomon` that cannot set pull-ups, the log tells you so and
@@ -290,13 +292,18 @@ decides and sends the result as **newline-delimited JSON over UDP** to the HUD's
 - A reading counts for **1 s**: repeat active states at 5–10 Hz. The module counts as
   disconnected after **2 s** without a valid message — send a heartbeat at least once a second
   when there is nothing to report.
-- Up to 8 messages per datagram, datagrams up to 4 KiB, at most 50 datagrams per second.
-- The HUD accepts these datagrams from **any** device that can reach the port — it cannot tell
-  the module from a passenger's phone on the same Wi-Fi. Restrict the port to the module with a
-  firewall rule ([how](protocol.md#adas-udp-feed)), or put the module on a link of its own.
+- Up to 8 messages per datagram, datagrams up to 4 KiB, at most 50 datagrams per second (each
+  sender has its own budget).
+- Give the module a static IPv4 address and list it in `sensors.adasAllowedSenders` (settings
+  app: *Sensors and buttons → Driver-assist module → Accept data only from*). The HUD then
+  ignores datagrams from every other address, so a passenger's phone on the same Wi-Fi can
+  neither raise nor hide a warning. With the list empty it accepts **any** device that can reach
+  the port, and logs a warning saying so. The check is by address, which a device on the same
+  network can forge: if that matters, put the module on a link of its own
+  ([more](protocol.md#adas-udp-feed)).
 
 Quick tests from any Linux machine on the car's network (`10.42.0.1` is the HUD on its own
-hotspot):
+hotspot; list that machine's address in `sensors.adasAllowedSenders` too, or it is ignored):
 
 ```sh
 echo '{"t":"blind-spot","left":true,"right":false}' > /dev/udp/10.42.0.1/5005   # bash

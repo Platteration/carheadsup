@@ -23,8 +23,8 @@ everything the car itself cannot know:
 │ NavNotificationListener ──┐                                │        │                     │
 │  (Maps nav, messages,     │                                │  ws:// │ /ws/phone           │
 │   caller name)            ├─► PhoneHub ─► HudLink ─────────┼────────┼─► phone link        │
-│ MediaMonitor ─────────────┤   (latest    (hello, replay,   │  JSON  │   (validated,       │
-│ CallMonitor ──────────────┤    state)     rate limits,     │ frames │    rate-checked)    │
+│ MediaMonitor ─────────────┤   (latest    (handshake,       │  JSON  │   (validated,       │
+│ CallMonitor ──────────────┤    state)     replay, rates,   │ frames │    rate-checked)    │
 │ LocationFeed ─► RoadInfo ─┘               heartbeat,       │◄───────┼── welcome, call-    │
 │                 Provider (Overpass)       backoff)         │        │   action, trips …   │
 │ MainActivity (Compose) ── HudApi (REST /api/*) ────────────┼────────┼─► REST API          │
@@ -36,7 +36,7 @@ The Gradle build has two modules:
 
 | Module | What | Builds where |
 | --- | --- | --- |
-| `:protocol` | Pure Kotlin/JVM: the wire protocol (mirrors `packages/core/src/types/protocol.ts`), its JSON configuration and size limits, the Google Maps notification parser, OSM speed-limit parsing, Overpass queries and road matching, message-notification extraction, trip/maintenance models and formatting, reconnect backoff, rate limiting, heartbeat and replay state. Everything testable lives here. | Any JDK 17+ machine |
+| `:protocol` | Pure Kotlin/JVM: the wire protocol (mirrors `packages/core/src/types/protocol.ts`), its JSON configuration and size limits, the mutual authentication (`auth`: proofs, HUD pinning, the handshake state machine), the Google Maps notification parser, OSM speed-limit parsing, Overpass queries and road matching, message-notification extraction, trip/maintenance models and formatting, reconnect backoff, rate limiting, heartbeat and replay state. Everything testable lives here. | Any JDK 17+ machine |
 | `:app` | The Android application (Kotlin, Jetpack Compose + Material 3, OkHttp, no Google Play services). Adapts Android APIs to `:protocol`. | Only with an Android SDK |
 
 `settings.gradle.kts` includes `:app` only when an Android SDK is found (`sdk.dir` in
@@ -49,7 +49,7 @@ put on the build classpath in that case, so `./gradlew :protocol:test` works on 
 | Component | Role |
 | --- | --- |
 | `HudConnectionService` | Foreground service (types `connectedDevice` + `location`) that owns the link, GPS, media, call and road monitoring while driving. Sticky; "Stop" in its notification. |
-| `HudLink` | WebSocket client for `ws://<hud>:8080/ws/phone`. Finds the HUD by mDNS (`_carheadsup._tcp`, `HudDiscovery`) or uses the manual `host:port`; sends `hello` with the pairing token; after `welcome` replays the latest nav/road/hazards/media/call state and forwards new messages rate-limited per type (nav ≤ 4 Hz, location 1 Hz, media/road/hazards ≤ 2 Hz); pings every 5 s and reconnects when the HUD is silent for 15 s; exponential backoff (1 s → 30 s, jittered); a refused pairing (`bad-token`) or a session the same phone replaced (close 4000) waits the maximum; while another phone holds the HUD it is refused with close 1013 and backs off as usual. Restarts mDNS discovery when it finds nothing for 30 s or on *Retry now*. |
+| `HudLink` | WebSocket client for `ws://<hud>:8080/ws/phone`. Finds the HUD by mDNS (`_carheadsup._tcp`, `HudDiscovery`; once paired, only the paired HUD's advertisement) or uses the manual `host:port`; answers the HUD's `challenge` through `HudHandshake` (see [Privacy](#privacy)) and reports *Connected* only once the `welcome` proof checks out, pinning the first verified HUD; after that replays the latest nav/road/hazards/media/call state and forwards new messages rate-limited per type (nav ≤ 4 Hz, location 1 Hz, media/road/hazards ≤ 2 Hz); pings every 5 s and reconnects when the HUD is silent for 15 s; exponential backoff (1 s → 30 s, jittered); a refused or untrusted pairing (`bad-token`, a different or unconfirmed HUD, a wrong HUD proof) or a session the same phone replaced (close 4000) waits the maximum; while another phone holds the HUD it is refused with close 1013 and backs off as usual. Restarts mDNS discovery when it finds nothing for 30 s or on *Retry now*. |
 | `LocalNetwork` | Binds HUD sockets to the Wi-Fi network. The HUD usually runs an access point without internet, which Android does not use as the default network; unbound sockets would go out over mobile data and never reach it. |
 | `NavNotificationListener` | Notification access: parses Google Maps' guidance (`GoogleMapsNotificationParser`), encodes the maneuver icon as a ≤ 32 KiB PNG, ends guidance 10 s after the notification disappears (at once when the listener is unbound); extracts message senders (`MessagingNotificationExtractor`) and caller names from call notifications that describe the tracked call. |
 | `MessageRelay` / `MessageReader` | Sends `message` (sender, app, `readingAloud`) while connected; reads the text aloud with TextToSpeech under transient, ducking audio focus (`SpeechQueue`). Pauses for navigation prompts and resumes afterwards; never talks over a call — messages wait for it to end (up to 3 min). `readingAloud` is only set for messages that will be read. |
@@ -57,9 +57,9 @@ put on the build classpath in that case, so `./gradlew :protocol:test` works on 
 | `CallMonitor` | `TelephonyCallback` (Android 12+) / `PhoneStateListener` + the `PHONE_STATE` broadcast for the number, contact lookup, `TelecomManager.acceptRingingCall()` / `endCall()` for the HUD's `call-action`. Android does not say whether a waiting call was answered or declined, so the call that goes on is shown without a caller (unless the HUD did it), until the dialer's ongoing-call notification names it. |
 | `LocationFeed` | Platform `LocationManager` GPS at 1 Hz → `location`. |
 | `RoadInfoProvider` | Overpass tiles (≈2 km) around the car, one polite request at a time, cached in memory and on disk (fresh for 7 days, used up to 90 days offline) → `road` and `hazards`. Unknown rather than stale when there is no data or no usable GPS fix for 5 s; while stopped, cameras are looked for in the last direction of travel. |
-| `TripStore` / `HudApi` | Trip log merged from `trip-completed`, `trips` and `GET /api/trips`; maintenance from `GET /api/maintenance`; units from `GET /api/config`; `POST /api/input` for the remote when the socket is down. |
-| `MainActivity` | Compose UI: **Status** (connection, permission checklist, battery optimisation), **Remote** (primary / secondary / pages / blank / brightness), **Trips** (log + maintenance), **Setup** (address, pairing and API tokens, feature switches, HUD settings). |
-| `HudSettingsActivity` | The HUD's `/settings` page in a WebView (the process is bound to the HUD's Wi-Fi while it is open). The API token is handed to the page as `?token=` (`HudEndpoint.withApiToken`): the page keeps it in its storage, removes it from the address and sends it with its own API calls, which a WebView cannot add a header to. |
+| `TripStore` / `HudApi` | Trip log merged from `trip-completed`, `trips` and `GET /api/trips`; maintenance from `GET /api/maintenance`; units from `GET /api/config`; `POST /api/input` for the remote when the socket is down. REST calls (they carry the API token) only go to the address where the HUD last proved itself (`HudLink.trustedEndpoint`). |
+| `MainActivity` | Compose UI: **Status** (connection, "a different HUD is answering" with *Forget paired HUD*, the confirmation of a HUD without pairing code, permission checklist, battery optimisation), **Remote** (primary / secondary / pages / blank / brightness), **Trips** (log + maintenance), **Setup** (address, pairing code and the paired HUD, API token, feature switches, HUD settings). |
+| `HudSettingsActivity` | The HUD's `/settings` page in a WebView (the process is bound to the HUD's Wi-Fi while it is open), only for a HUD that has proven itself. The API token is handed to the page as `?token=` (`HudEndpoint.withApiToken`): the page keeps it in its storage, removes it from the address and sends it with its own API calls, which a WebView cannot add a header to. A WebView drops the page's `blob:` downloads, so files the page generates (the trips CSV) go through `FileExportBridge` (`window.CarheadsupAndroid.saveFile`): into *Downloads* on Android 10+ (MediaStore, no permission), through the share sheet (a `FileProvider` cache file) on Android 8–9; name and type are sanitised (`ExportFile`). |
 
 ### Protocol conformance
 
@@ -70,8 +70,11 @@ keys ignored and unknown enum values tolerated when decoding. `PhoneWire.encode`
 message through `WireSanitizer` first, which applies the HUD validator's limits (100-character
 names, 44 KiB icon, 50 hazards, finite in-range numbers, no control characters…), so a single odd
 notification never gets an update rejected. `ContractSyncTest` reads the TypeScript sources
-(`nav.ts`, `phone.ts`, `events.ts`, `records.ts`, `protocol.ts`, `validate.ts`) and fails if enum
-values, message types, the protocol version or the size limits drift.
+(`nav.ts`, `phone.ts`, `events.ts`, `records.ts`, `protocol.ts`, `validate.ts`, `phone-auth.ts`)
+and fails if enum values, message types, the protocol version, the size limits or the
+authentication constants drift; `PhoneAuthTest` asserts the shared authentication test vectors
+(`packages/core/test/protocol/phone-auth-vectors.json`, which the HUD's tests assert as well, and
+`ContractSyncTest` checks the module's copy against).
 
 ## Permissions and why
 
@@ -165,6 +168,11 @@ and caches tiles for a week. **Speed-camera warnings are illegal while driving i
 
 Requirements: JDK 17+ (the build runs on JDK 21), an Android SDK with platform 36 for `:app`.
 
+> **Status:** `:protocol` is built and tested on every change. `:app` has so far only been
+> type-checked against stubs of the Android and Compose APIs — it has not been built with the
+> Android Gradle Plugin or run on a phone, so expect fixes on the first real build (notification
+> parsing, discovery, pairing screens, the foreground service and file export in particular).
+
 - **Android Studio**: open `companion-android/`, let it create `local.properties`, run the `app`
   configuration.
 - **Command line**:
@@ -195,10 +203,13 @@ together.
 
 1. Put the HUD in phone mode (`server.host = 0.0.0.0`, `server.mdns = true`) and join the phone to
    the car's Wi-Fi.
-2. *Setup*: leave "Find the HUD automatically" on (or enter `host:port`), enter the pairing token
-   if the HUD has one (`phone.pairingToken`) and the API token if the REST API is protected
-   (`server.apiToken`).
+2. *Setup*: leave "Find the HUD automatically" on (or enter `host:port`), enter the HUD's pairing
+   code (`phone.pairingToken`; generate one in the HUD's settings under *Phone* if it has none)
+   and the API token if the REST API is protected (`server.apiToken`).
 3. *Status*: grant the permissions, exempt the app from battery optimisation, tap *Connect to HUD*.
+   The first HUD that proves the pairing code is remembered as yours ("Paired with HUD …" in
+   *Setup*). A HUD without pairing code cannot prove anything: the app shows it as unverified
+   and connects only after you tap *This is my HUD — connect*.
 4. Start navigation in Google Maps on the phone.
 
 The app reconnects on its own when the car's Wi-Fi comes and goes; the service survives the
@@ -210,12 +221,26 @@ services aggressively — allow auto-start / exclude the app there as well.
 - Message content is only read aloud on the phone; the `message` frame has no content field (the
   HUD rejects frames that try) and message ids are keyed hashes (HMAC with a random key that
   never leaves the phone), so they cannot be matched against guessed texts.
-- **The phone does not verify the HUD.** The protocol only authenticates the phone (pairing
-  token in `hello`); nothing proves that the peer is your HUD. With automatic discovery the phone
-  connects to whatever advertises `_carheadsup._tcp` on its current Wi-Fi, which then receives the
-  pairing and API tokens, the position, caller and message-sender names, and can answer or decline
-  calls. Use the car's own password-protected Wi-Fi, prefer a manual address on shared networks,
-  and stop the service (notification → *Stop*) when not driving.
+- **Phone and HUD verify each other** (protocol v2, [details](../docs/protocol.md#authentication)).
+  The pairing code never leaves the phone: the HUD sends a `challenge`, the phone answers with an
+  HMAC proof over it, and the HUD proves the code in return. The app pins the id of the first HUD
+  that proves it (per pairing code) and from then on:
+  - sends nothing — no position, navigation, media, calls, messages, no REST call with the API
+    token, not even its proof — to a HUD with another id ("A different HUD is answering"; if you
+    replaced or reset your HUD, *Forget paired HUD* and it pairs again);
+  - sends nothing and ignores everything (call actions included) from its own HUD until the HUD's
+    proof checks out;
+  - with automatic discovery, only uses the paired HUD's mDNS advertisement (or one without an id).
+- **A HUD without pairing code is not verified.** Anyone can make the proofs then. The app shows
+  such a HUD as unverified, connects only after you confirm it, and pins it — but a HUD that
+  copies its id is not detected. Set a pairing code on the HUD.
+- **Not encrypted.** The session is plain WebSocket: someone on the Wi-Fi can read it, and a
+  man-in-the-middle who relays it can alter it after the handshake. Someone who records the
+  handshake can try to guess the pairing code offline, so use a long random one (the HUD's
+  *Generate*). Use the car's own password-protected Wi-Fi and stop the service (notification →
+  *Stop*) when not driving.
+- Each install has a random device id (`hello.deviceId`) that tells phones apart on the HUD, so
+  two phones of the same model and name are two phones.
 - Nothing is sent anywhere but the HUD, except Overpass requests with the area around the car
   (tile bounding boxes, not the exact position).
 - Tokens live in app-private storage; backups are disabled.

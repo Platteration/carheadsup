@@ -218,7 +218,8 @@ function DtcList({ diagnostics }: { diagnostics: ApiDiagnostics }) {
 
 /**
  * Each signal's sample time across polls (see `watchSignals`), advanced once per response; a new
- * response arrives every poll, so ageing values are re-judged without a timer.
+ * response arrives every poll, so ageing values are re-judged without a timer. Only a HUD that
+ * does not send its own `now` needs it: otherwise `signalRows` ages samples on the HUD's clock.
  */
 function useSignalAging(diagnostics: ApiDiagnostics) {
   const state = useRef<{ from: ApiDiagnostics | null; watch: SignalWatch; now: number }>({

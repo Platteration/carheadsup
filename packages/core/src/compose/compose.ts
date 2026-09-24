@@ -1,6 +1,7 @@
 import { selectDisplayedAlerts } from '../alerts/visibility.ts';
 import type { HudConfig } from '../types/config.ts';
 import type { HudFrame } from '../types/frame.ts';
+import { isDashboardShown } from '../state/selectors.ts';
 import type { HudState } from '../types/state.ts';
 import { clamp, roundTo } from '../units.ts';
 import { composeDiagnostics } from './diagnostics.ts';
@@ -21,7 +22,7 @@ export const MIN_EFFECTIVE_BRIGHTNESS = 0.05;
  * Decide exactly what the driver sees. Pure function of state + config (+ `state.now`).
  * Applies adaptive clutter (layout placements × driving context × per-widget relevance),
  * unit conversion, staleness, alert selection, toast fading, call card, shift light and
- * the parked diagnostics dashboard.
+ * the diagnostics dashboard (parked, or stopped when the driver asked for it).
  *
  * When the driver has blanked the display, widgets, toast, call card, shift light, blind-spot
  * indicators and the dashboard are withheld; critical alerts and the collision warning still
@@ -47,7 +48,7 @@ export function composeFrame(state: HudState, config: HudConfig): HudFrame {
     shiftLight: blanked ? null : composeShiftLight(state, config),
     blindSpot: blanked ? { left: false, right: false } : composeBlindSpot(state),
     collision: composeCollision(state),
-    diagnostics: !blanked && context === 'parked' ? composeDiagnostics(state, config) : null,
+    diagnostics: !blanked && isDashboardShown(state) ? composeDiagnostics(state, config) : null,
     status: {
       obd: state.vehicle.link.state,
       phone: state.phone.connected,

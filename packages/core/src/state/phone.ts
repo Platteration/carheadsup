@@ -19,22 +19,28 @@ export const TRACK_NOT_ANNOUNCED = Number.MIN_SAFE_INTEGER;
  * it can no longer be answered. An answered call keeps its card (without controls) through the
  * grace period, like the rest of the phone's data.
  *
- * A *different* phone coming up (another `deviceName`, e.g. the simulated phone handing over to
- * a real one) first drops what the previous phone provided — route, road, hazards, media, call —
- * as the grace period would have: otherwise the old route and call would stay on the HUD,
- * dead-reckoned and looking live, until the new phone happened to replace them. A phone that
- * reconnects (same name, or no name given) keeps its data; it replays its state anyway.
+ * A *different* phone coming up (another `deviceId`, e.g. the simulated phone handing over to
+ * a real one, or a second phone of the same model and name) first drops what the previous phone
+ * provided — route, road, hazards, media, call — as the grace period would have: otherwise the
+ * old route and call would stay on the HUD, dead-reckoned and looking live, until the new phone
+ * happened to replace them. A phone that reconnects (same id, even under a new name, or no
+ * identity given) keeps its data; it replays its state anyway. Events without a `deviceId` fall
+ * back to comparing names.
  */
 export function applyPhoneLink(state: HudState, event: EventOf<'phone/link'>): HudState {
   const prev = state.phone;
   const phone: PhoneLinkStatus = {
     connected: event.connected,
     deviceName: event.deviceName !== undefined ? event.deviceName : prev.deviceName,
+    deviceId: event.deviceId !== undefined ? event.deviceId : prev.deviceId,
     appVersion: event.appVersion !== undefined ? event.appVersion : prev.appVersion,
     since: event.connected !== prev.connected ? state.now : prev.since,
   };
   if (event.connected) {
-    const otherPhone = event.deviceName !== undefined && event.deviceName !== prev.deviceName;
+    const otherPhone =
+      event.deviceId !== undefined
+        ? event.deviceId !== prev.deviceId
+        : event.deviceName !== undefined && event.deviceName !== prev.deviceName;
     return otherPhone ? { ...dropPhoneData(state), phone } : { ...state, phone };
   }
   const unanswered = state.call?.state === 'ringing' || state.call?.state === 'dialing';

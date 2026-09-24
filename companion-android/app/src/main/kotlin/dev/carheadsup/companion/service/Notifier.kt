@@ -22,6 +22,7 @@ import dev.carheadsup.protocol.api.MaintenanceAlertGate
 import dev.carheadsup.protocol.api.MaintenanceItemStatus
 import dev.carheadsup.protocol.api.TripFormatter
 import dev.carheadsup.protocol.api.TripRecord
+import dev.carheadsup.protocol.auth.TrustProblem
 
 /** Notification channels and the app's notifications. */
 class Notifier(private val context: Context) {
@@ -69,7 +70,7 @@ class Notifier(private val context: Context) {
                 is LinkStatus.Connecting -> context.getString(R.string.status_connecting, status.endpoint.display())
 
                 is LinkStatus.Connected -> context.getString(
-                    R.string.status_connected,
+                    if (status.authenticated) R.string.status_connected else R.string.status_connected_unverified,
                     status.hudName.ifBlank {
                         status.endpoint.display()
                     },
@@ -78,6 +79,14 @@ class Notifier(private val context: Context) {
                 is LinkStatus.Waiting -> context.getString(R.string.status_waiting, status.reason)
 
                 is LinkStatus.Refused -> context.getString(R.string.status_refused, status.message)
+
+                is LinkStatus.Untrusted -> context.getString(
+                    when (status.problem) {
+                        is TrustProblem.DifferentHud -> R.string.notification_different_hud
+                        is TrustProblem.UnconfirmedOpenHud -> R.string.notification_open_hud
+                        TrustProblem.BadProof, is TrustProblem.ProtocolViolation -> R.string.notification_unverified_hud
+                    },
+                )
             }
         val stop =
             PendingIntent.getService(

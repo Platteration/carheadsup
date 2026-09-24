@@ -31,6 +31,10 @@ export interface TripsSectionProps {
 
 /** What to tell the person after "Download CSV", when a plain download was not possible. */
 const SAVE_NOTES: Partial<Record<FileSaveOutcome, { tone: 'info' | 'critical'; text: string }>> = {
+  saved: {
+    tone: 'info',
+    text: 'Saved to the phone’s Downloads folder.',
+  },
   copied: {
     tone: 'info',
     text: 'This app cannot save files, so the CSV was copied to the clipboard instead. Paste it into a spreadsheet, or open this page in a browser to download it.',

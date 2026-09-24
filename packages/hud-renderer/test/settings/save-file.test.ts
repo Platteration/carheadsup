@@ -63,4 +63,32 @@ describe('saving the trips CSV', () => {
     const nothing = env(WEBVIEW, { copy: async () => false });
     expect(await saveTextFile('a,b', 'trips.csv', 'text/csv', nothing)).toBe('failed');
   });
+
+  it('in the companion app, hands the file to its bridge first', async () => {
+    const saved = env(WEBVIEW, { nativeSave: vi.fn(() => 'saved' as const), shareFile: vi.fn() });
+    expect(await saveTextFile('a,b', 'trips.csv', 'text/csv', saved)).toBe('saved');
+    expect(saved.nativeSave).toHaveBeenCalledWith('a,b', 'trips.csv', 'text/csv');
+    expect(saved.shareFile).not.toHaveBeenCalled();
+    expect(saved.copy).not.toHaveBeenCalled();
+
+    // Older Android versions: the app opens its share sheet.
+    const shared = env(WEBVIEW, { nativeSave: () => 'shared' });
+    expect(await saveTextFile('a,b', 'trips.csv', 'text/csv', shared)).toBe('shared');
+    expect(shared.copy).not.toHaveBeenCalled();
+
+    // The bridge could not save (or broke): the usual fallbacks.
+    const failed = env(WEBVIEW, { nativeSave: () => 'failed' });
+    expect(await saveTextFile('a,b', 'trips.csv', 'text/csv', failed)).toBe('copied');
+    const broken = env(WEBVIEW, {
+      nativeSave: () => {
+        throw new Error('Java exception');
+      },
+    });
+    expect(await saveTextFile('a,b', 'trips.csv', 'text/csv', broken)).toBe('copied');
+
+    // Browsers never use it (a page elsewhere cannot have it anyway).
+    const browser = env(DESKTOP, { nativeSave: vi.fn(() => 'saved' as const) });
+    expect(await saveTextFile('a,b', 'trips.csv', 'text/csv', browser)).toBe('downloaded');
+    expect(browser.nativeSave).not.toHaveBeenCalled();
+  });
 });
