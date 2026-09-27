@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="An offline, bench-only comparison of three carheadsup HUD UI concepts. No vehicle connection.">
+<title>carheadsup — UI Lab</title>
+<style>
+:root{color-scheme:dark;--bg:#101418;--panel:#181e24;--line:#303a44;--ink:#f1f5f7;--muted:#a5b0ba;--accent:#97e6ef;--dim:#76818c;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}button,input,select{font:inherit}button,select{cursor:pointer}button,a,input,select{touch-action:manipulation}button{color:inherit}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid var(--accent);outline-offset:4px}button:disabled{opacity:.45;cursor:default}a{color:var(--accent)}.wrap{max-width:1540px;margin:auto;padding:0 44px}header{min-height:87px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);gap:20px}.brand{display:flex;align-items:center;gap:14px;font-size:17px;font-weight:700;letter-spacing:-.4px}.brand svg{width:30px;height:30px;color:var(--accent)}.brand small{color:var(--muted);font-size:11px;font-weight:500;letter-spacing:2px;margin-left:12px}.badge{display:inline-flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:20px;padding:7px 11px;font-size:11px;color:var(--muted);letter-spacing:.8px}.dot{width:6px;height:6px;background:var(--accent);border-radius:50%}.hero{display:flex;justify-content:space-between;gap:36px;align-items:flex-end;padding:36px 0 30px}.eyebrow{font-size:11px;letter-spacing:2.2px;text-transform:uppercase;color:var(--muted);margin:0 0 12px}.hero h1{font-size:clamp(32px,3.1vw,48px);font-weight:500;letter-spacing:-1.9px;line-height:1.12;margin:0}.hero h1 span{color:var(--accent)}.hero p{max-width:430px;font-size:14px;line-height:1.65;color:var(--muted);margin:0 0 2px}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 262px;gap:24px}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}.tab{text-align:left;border:1px solid var(--line);border-radius:9px;background:transparent;padding:15px 16px;display:flex;gap:13px;align-items:center;min-width:0}.tab[aria-pressed=true]{border-color:var(--accent);background:#1c2b30}.tab .number{font-size:12px;color:var(--dim)}.tab[aria-pressed=true] .number{color:var(--accent)}.tab strong{display:block;font-size:15px;font-weight:550}.tab small{font-size:11px;color:var(--muted);display:block;margin-top:3px}.screen-card{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#080a0c}.screen-meta{height:46px;background:#161c22;display:flex;justify-content:space-between;align-items:center;padding:0 20px;gap:16px;font-size:10px;letter-spacing:1.7px;color:var(--muted)}.screen-meta b{color:var(--ink);font-weight:500}.stage{background:#000;position:relative;overflow:hidden;aspect-ratio:8/3;display:flex;align-items:center;justify-content:center}.stage svg{display:block;width:100%;height:100%;flex:none}.stage.is-tall{aspect-ratio:5/3}.stage .demo-mark{position:absolute;left:18px;top:13px;z-index:2;color:#87919b;font-size:9px;letter-spacing:1.7px;pointer-events:none}.screen-foot{min-height:55px;border-top:1px solid #20282f;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--muted);font-size:12px;background:#13191e}.screen-actions{display:flex;gap:8px;flex-shrink:0}.quiet{border:1px solid var(--line);background:transparent;border-radius:6px;padding:8px 11px;font-size:11px;min-height:34px}.quiet:hover{border-color:var(--muted)}.explanation{display:flex;justify-content:space-between;gap:25px;padding:20px 0 9px}.explanation h2{font-size:20px;font-weight:500;letter-spacing:-.5px;margin:0 0 8px}.explanation p{font-size:13px;line-height:1.65;color:var(--muted);max-width:580px;margin:0}.recommend{align-self:flex-start;white-space:nowrap;color:var(--accent);border:1px solid #395258;border-radius:5px;font-size:10px;padding:7px 9px;letter-spacing:.7px}.controls{border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:21px 19px;align-self:start}.controls h2{margin:0 0 20px;font-size:10px;letter-spacing:1.8px;font-weight:500;color:var(--muted)}.field{display:block;margin-bottom:16px;font-size:11px;color:var(--muted)}.field>span{display:block;margin-bottom:7px}.field select{width:100%;border:1px solid #3c4650;background:#10151a;color:var(--ink);border-radius:6px;padding:9px 10px;font-size:12px;min-height:38px}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.divider{border:0;border-top:1px solid var(--line);margin:18px 0}.palettes{display:flex;gap:6px}.palette{flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;border:1px solid transparent;background:transparent;border-radius:6px;padding:8px 3px;font-size:10px;color:var(--muted)}.palette[aria-pressed=true]{border-color:#52626d;color:var(--ink);background:#222c33}.swatch{width:19px;height:19px;border-radius:50%;border:3px solid #101418;outline:1px solid #57616b}.switch{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;margin:16px 0}.switch input{width:18px;height:18px;accent-color:var(--accent)}input[type=range]{width:100%;accent-color:var(--accent);margin:5px 0;cursor:pointer}.field>span.range-caption{display:flex;justify-content:space-between;font-size:10px;color:var(--dim)}.hint{font-size:10px;line-height:1.6;color:var(--muted);margin:9px 0 0}.primary{width:100%;padding:11px;border:1px solid var(--accent);background:var(--accent);color:#14242a;font-size:12px;font-weight:600;border-radius:6px}.full{width:100%;margin-top:9px}.bench-note{display:flex;align-items:flex-start;gap:10px;background:#1d201f;border:1px solid #494735;border-radius:8px;padding:12px 15px;color:#d0c9a5;font-size:11px;line-height:1.6;margin-top:16px}.bench-note b{color:#eee4b5;font-weight:550}.comparison{padding:37px 0 27px}.section-heading{display:flex;justify-content:space-between;align-items:baseline;gap:20px;margin-bottom:17px}.section-heading h2{font-size:22px;font-weight:450;letter-spacing:-.6px;margin:0}.section-heading p{font-size:11px;color:var(--muted);margin:0}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.compare-card{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel);text-align:left;padding:0;min-width:0}.compare-card[aria-pressed=true]{border-color:var(--accent)}.mini-stage{aspect-ratio:8/3;background:#000;overflow:hidden}.mini-stage svg{display:block;width:100%;height:100%}.card-copy{padding:14px 17px}.card-copy strong{font-size:14px;font-weight:550;display:flex;justify-content:space-between}.card-copy strong span{font-size:10px;color:var(--muted);font-weight:400}.card-copy p{font-size:11px;color:var(--muted);line-height:1.6;margin:7px 0 0}.integration{border-top:1px solid var(--line);padding:22px 0 28px;color:var(--muted);font-size:12px;line-height:1.8}.integration summary{cursor:pointer;font-size:13px;color:var(--ink)}.integration .notes{max-width:850px}.integration code{color:#c6dde5;font-size:11px}.integration h3{font-size:13px;color:var(--ink);margin-bottom:0}.integration p{margin:7px 0 10px}footer{display:flex;justify-content:space-between;gap:20px;font-size:10px;color:var(--dim);border-top:1px solid var(--line);padding:18px 0 25px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.focus .wrap{max-width:none;padding:0}.focus header,.focus .hero,.focus .tabs,.focus .controls,.focus .explanation,.focus .bench-note,.focus .comparison,.focus .integration,.focus footer{display:none}.focus .workspace{display:block}.focus .screen-card{position:fixed;inset:0;border:0;border-radius:0;z-index:20;display:flex;flex-direction:column;background:#000}.focus .screen-meta{flex:0 0 38px;background:#000}.focus .stage{flex:1;min-height:0;width:100%;aspect-ratio:auto}.focus .stage svg{max-width:100%;max-height:100%;object-fit:contain}.focus .screen-foot{background:#000;border:0;flex:0 0 50px}.focus .screen-foot>span{font-size:10px}.focus #compare{display:none}
+@media(min-width:1400px){.hero{padding-top:40px;padding-bottom:35px}.workspace{gap:28px;grid-template-columns:minmax(0,1fr) 280px}.controls{padding:22px}.stage.is-tall{max-height:630px}.stage.is-tall svg{width:auto;max-width:100%}}
+@media(max-width:1000px){.wrap{padding:0 24px}.workspace{grid-template-columns:minmax(0,1fr) 235px;gap:17px}.hero p{max-width:315px;font-size:12px}.tab{padding:12px;gap:8px}.tab small{font-size:10px}.controls{padding:16px}.screen-foot{flex-wrap:wrap}.explanation{display:block}.recommend{display:inline-block;margin-top:12px}.cards{gap:11px}}
+@media(max-width:760px){.wrap{padding:0 18px}header{min-height:70px;gap:10px}.brand{font-size:15px;gap:8px}.brand small{display:none}.badge{font-size:8px;padding:6px 8px;letter-spacing:.4px}.hero{display:block;padding:26px 0 23px}.hero h1{font-size:36px}.hero p{max-width:100%;margin-top:15px;font-size:12px}.workspace{display:flex;flex-direction:column;gap:18px}.tabs{gap:7px;margin-bottom:14px}.tab{padding:11px 10px;gap:6px}.tab .number{display:none}.tab strong{font-size:13px}.tab small{font-size:9px}.screen-meta{height:36px;padding:0 12px;font-size:8px;letter-spacing:1px}.stage .demo-mark{top:8px;left:10px;font-size:7px}.screen-foot{padding:10px 12px;gap:9px;font-size:10px}.quiet{font-size:10px}.explanation{padding-top:17px}.explanation h2{font-size:18px}.explanation p{font-size:12px}.controls{width:100%;padding:19px;display:grid;grid-template-columns:1fr 1fr;column-gap:16px}.controls h2,.controls .divider,.controls .control-wide,.controls>.hint{grid-column:1/-1}.controls h2{margin-bottom:18px}.controls .divider{margin:3px 0 15px}.controls .two{display:contents}.controls .field{min-width:0}.controls .switch{margin:0 0 15px}.controls .palettes{justify-content:flex-start}.controls .palette{padding:7px}.controls .full{margin-top:0}.controls .control-wide.buttons{display:grid;grid-template-columns:1fr 1fr;gap:10px}.controls .primary{font-size:11px}.bench-note{font-size:10px}.comparison{padding-top:29px}.section-heading{display:block}.section-heading h2{font-size:20px}.section-heading p{margin-top:8px}.cards{grid-template-columns:1fr}.card-copy{padding:13px 16px}.card-copy p{font-size:12px}.card-copy strong{font-size:16px}.mini-stage{aspect-ratio:8/3}.integration{font-size:11px}footer{font-size:9px}.focus .screen-foot{flex-wrap:nowrap}.focus .screen-foot>span{max-width:45%}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><div class="brand"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M5 25 11 6M27 25 21 6M16 8v5m0 5v5" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>carheadsup<small>UI LAB / 01</small></div><span class="badge"><span class="dot"></span>OFFLINE DESIGN PROTOTYPE</span></header>
+<section class="hero"><div><p class="eyebrow">A clearer kind of driving interface</p><h1>Less on the glass.<br><span>More of the road.</span></h1></div><p>Three directions, one heads-up display. Compare the same sample drive, find your visual language, then bring it into the existing HUD renderer.</p></section>
+<main>
+<div class="workspace">
+<div class="left">
+<nav class="tabs" aria-label="HUD concepts">
+<button class="tab" data-concept="glance" aria-pressed="false"><span class="number">01</span><span><strong>Glance</strong><small>Only the essentials</small></span></button>
+<button class="tab" data-concept="vector" aria-pressed="true"><span class="number">02</span><span><strong>Vector</strong><small>Navigation, first</small></span></button>
+<button class="tab" data-concept="apex" aria-pressed="false"><span class="number">03</span><span><strong>Apex</strong><small>A little more driver</small></span></button>
+</nav>
+<div class="screen-card">
+<div class="screen-meta"><b id="screen-title">02 / VECTOR</b><span id="scene-label">CITY · 1280 × 480</span></div>
+<div id="hud" class="stage" aria-label="Sample heads-up display"><span class="demo-mark">DEMO DATA · NOT FOR DRIVING</span></div>
+<div class="screen-foot"><span id="stage-note">Sample navigation · no vehicle connected</span><div class="screen-actions"><button id="play" class="quiet" aria-pressed="false">Play sample</button><button id="focus" class="quiet" aria-pressed="false">Focus view</button><button id="compare" class="quiet">Compare ↓</button></div></div>
+</div>
+<div class="explanation"><div><h2 id="concept-title">A confident daily driver.</h2><p id="concept-description"></p></div><span id="recommendation" class="recommend">RECOMMENDED START</span></div>
+<div class="bench-note"><span aria-hidden="true">△</span><span><b>Bench preview only.</b> Everything shown is sample data. This page does not connect to the car, change settings, or replace the existing driving display. Adjust controls only while parked.</span></div>
+</div>
+<aside class="controls" aria-label="Prototype controls">
+<h2>TUNE THE PROTOTYPE</h2>
+<label class="field control-wide"><span>Driving scenario</span><select id="scenario"><option value="city">City · next right turn</option><option value="highway">Highway · quiet cruise</option><option value="exit">Exit · sample lane guidance</option><option value="call">Stopped · incoming call</option><option value="warning">Critical · engine temperature</option><option value="signal">Disconnected · no signal</option><option value="parked">Parked · trip summary</option></select></label>
+<div class="two"><label class="field"><span>Display shape</span><select id="format"><option value="wide">1280 × 480</option><option value="compact">800 × 480</option></select></label><label class="field"><span>Display units</span><select id="units"><option value="imperial">mph / ft</option><option value="metric">km/h / m</option></select></label></div>
+<div class="field control-wide"><span>Accent palette</span><div class="palettes" role="group" aria-label="Accent palette"><button class="palette" data-palette="ice" aria-pressed="true"><i class="swatch" style="background:#97e6ef"></i>Ice</button><button class="palette" data-palette="phosphor" aria-pressed="false"><i class="swatch" style="background:#bded99"></i>Phosphor</button><button class="palette" data-palette="amber" aria-pressed="false"><i class="swatch" style="background:#ffd292"></i>Amber</button></div></div>
+<hr class="divider">
+<label class="switch"><span>Night preview</span><input id="night" type="checkbox"></label>
+<label class="field"><span>Reflection test</span><select id="mirror"><option value="none">Not mirrored</option><option value="x">Mirror X</option><option value="y">Mirror Y</option></select></label>
+<label class="field control-wide"><span>Preview brightness <output id="brightness-output" for="brightness">100%</output></span><input id="brightness" type="range" min="25" max="100" step="5" value="100"><span class="range-caption"><span>DIM</span><span>BRIGHT</span></span></label>
+<label class="field control-wide"><span>Sample speed <output id="speed-output" for="speed">42 mph</output></span><input id="speed" type="range" min="0" max="160" step="1" value="68"><span class="range-caption"><span>STATIONARY</span><span>OVERSPEED TEST</span></span></label>
+<div class="control-wide buttons"><button id="export" class="primary">Save design choice</button><button id="reset" class="quiet full">Reset preview</button></div>
+<p class="hint">Red alerts stay red across palettes. Preview settings are local to this browser; the exported choice is not a vehicle configuration.</p>
+</aside>
+</div>
+<section class="comparison" id="comparison"><div class="section-heading"><h2>Three personalities. One purpose.</h2><p>Same scenario and palette. Different information hierarchy.</p></div><div class="cards">
+<button class="compare-card" data-concept="glance" aria-pressed="false" aria-label="Choose Glance"><div class="mini-stage" data-mini="glance" aria-hidden="true"></div><div class="card-copy"><strong>01 / Glance <span>MINIMAL</span></strong><p>Big speed. One maneuver. The most open glass.</p></div></button>
+<button class="compare-card" data-concept="vector" aria-pressed="true" aria-label="Choose Vector"><div class="mini-stage" data-mini="vector" aria-hidden="true"></div><div class="card-copy"><strong>02 / Vector <span>EVERYDAY</span></strong><p>A clear turn, the right street, and a steady speed.</p></div></button>
+<button class="compare-card" data-concept="apex" aria-pressed="false" aria-label="Choose Apex"><div class="mini-stage" data-mini="apex" aria-hidden="true"></div><div class="card-copy"><strong>03 / Apex <span>SPORT</span></strong><p>A linear rev strip and gear, without a dashboard of dials.</p></div></button>
+</div></section>
+<details class="integration" id="integration"><summary>What is real, and what comes next?</summary><div class="notes"><h3>This page is a working UI experiment, not a replacement kiosk.</h3><p>All seven scenes are deterministic local samples. There are no API calls, WebSockets, analytics, external fonts, vehicle controls, or permission prompts. Focus view is still visibly marked as a demo. The disconnected scene is a visual example, not a test of the real feed watchdog.</p><h3>Integration path</h3><p>Port the selected information hierarchy into <code>packages/hud-renderer/src/hud/HudView.tsx</code>, reusing the existing <code>HudFrame</code>, widgets, <code>useHudFeed</code>, <code>ProjectionStage</code>, error boundaries, and safety overlays. Keep the server's adaptive visibility and canonical unit conversion, rather than connecting widgets directly to OBD or inventing missing values.</p><p>Glance is the suggested low-clutter mode; Vector is the proposed everyday layout; Apex is an optional sport layout. These are design recommendations, not claims of certified safety. The existing root HUD, settings, core logic and phone app are unchanged.</p><h3>Source-dependent features</h3><p>Lane arrows in the exit scene are hypothetical provider-supplied samples. The repository notes that Google Maps notifications do not provide lane guidance. Gear can be inferred in the existing core; an inferred gear must remain labelled and must not be shown for CVTs. This sample labels its gear as inferred. There is no fabricated collision or blind-spot sensing.</p><h3>Before real use</h3><p>Verify actual screen size, mirror axis, mounting, contrast, night dimming, ghosting, polarized-glasses visibility and sightline. Hardware brightness and optical calibration are not exercised here. Retain non-dismissible critical alerts and stale-data blanking, and complete physical-device validation before road use.</p></div></details>
+</main><footer><span>CARHEADSUP / DESIGN STUDIES 01–03</span><span>LOCAL SAMPLES ONLY · BLACK CANVAS IN EVERY PALETTE</span></footer>
+<div class="sr-only" id="announcement" role="status" aria-live="polite"></div>
+</div>
+<script>
+'use strict';
+(() => {
+  // Deliberately isolated: no backend connections, credentials, or car controls.
+  const KEY = 'carheadsup.ui-lab.v1';
+  const DEFAULT = { concept:'vector', scenario:'city', format:'wide', units:'imperial', palette:'ice', night:false, mirror:'none', brightness:100, speed:68 };
+  const COLORS = { ice:'#97e6ef', phosphor:'#bded99', amber:'#ffd292' };
+  const CONCEPTS = {
+    glance:{ number:'01', name:'Glance', title:'The essentials, with room to breathe.', description:'Speed is the anchor. A single turn sits beside it, with no persistent trip or engine detail. My pick for the quietest default and a smaller reflection area.', note:'Smallest information footprint', recommendation:'LOW-CLUTTER OPTION' },
+    vector:{ number:'02', name:'Vector', title:'A confident daily driver.', description:'Turn direction and street form one clear block; speed has its own stable place. Trip context stays secondary. My starting point for a cohesive everyday HUD.', note:'Navigation-led · stable speed position', recommendation:'RECOMMENDED START' },
+    apex:{ number:'03', name:'Apex', title:'More character. Still less clutter.', description:'A linear rev strip, a large speed readout and an explicitly inferred gear add a driver-focused feel. Navigation stays a single line. An opt-in sport mode, not the universal default.', note:'Sport layout · sample gear is inferred', recommendation:'OPTIONAL SPORT MODE' }
+  };
+  const SCENES = {
+    city:{ name:'CITY', speed:68, limit:72, rpm:2800, gear:4, meters:110, street:'Riverside Drive', turn:'right', eta:'18:42', remaining:4.2 },
+    highway:{ name:'HIGHWAY', speed:100, limit:105, rpm:2100, gear:6, meters:null, street:null, turn:'straight', eta:'19:06', remaining:31.5 },
+    exit:{ name:'EXIT', speed:74, limit:80, rpm:2600, gear:4, meters:300, street:'Exit 14 · Eastbound', turn:'right', eta:'18:49', remaining:8.1, lanes:true },
+    call:{ name:'STOPPED', speed:0, limit:48, rpm:760, gear:null, meters:90, street:'Riverside Drive', turn:'right', eta:'18:42', remaining:4.2, call:true },
+    warning:{ name:'CRITICAL ALERT', speed:60, limit:72, rpm:2500, gear:4, warning:true },
+    signal:{ name:'DISCONNECTED', speed:null, limit:null, rpm:null, gear:null },
+    parked:{ name:'PARKED', speed:0, limit:null, rpm:0, gear:null, parked:true }
+  };
+  function restore() {
+    let value;
+    try { value = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return {...DEFAULT}; }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {...DEFAULT};
+    const next = {...DEFAULT};
+    const enums = { concept:Object.keys(CONCEPTS), scenario:Object.keys(SCENES), format:['wide','compact'], units:['imperial','metric'], palette:Object.keys(COLORS), mirror:['none','x','y'] };
+    for (const [key, allowed] of Object.entries(enums)) if (allowed.includes(value[key])) next[key] = value[key];
+    if (typeof value.night === 'boolean') next.night = value.night;
+    if (Number.isFinite(value.brightness)) next.brightness = Math.max(25,Math.min(100,Math.round(value.brightness/5)*5));
+    if (Number.isFinite(value.speed)) next.speed = Math.max(0,Math.min(160,Math.round(value.speed)));
+    if (['call','parked','signal'].includes(next.scenario)) next.speed = SCENES[next.scenario].speed ?? 0;
+    return next;
+  }
+  let state = restore();
+  let timer = null;
+  let step = 0;
+  let focus = false;
+  const $ = (id) => document.getElementById(id);
+  const escape = (value) => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const label = (x,y,value,size=24,color='#f1f5f7',extra='') => `<text x="${x}" y="${y}" fill="${color}" font-size="${size}" ${extra}>${escape(value)}</text>`;
+  const small = (x,y,value,color='#a8b4bf',extra='') => label(x,y,value,18,color,`letter-spacing="3" ${extra}`);
+  function arrow(x,y,size,dir='right',color=COLORS[state.palette]) {
+    const path = dir === 'straight' ? 'M50 87V13M26 38 50 13 74 38' : 'M25 88V45Q25 25 45 25H83M62 4 83 25 62 46';
+    return `<g transform="translate(${x} ${y}) scale(${size/100})"><path d="${path}" fill="none" stroke="${color}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></g>`;
+  }
+  function convertedSpeed(kph) { return kph === null ? '—' : String(Math.round(state.units === 'imperial' ? kph/1.609344 : kph)); }
+  function distance(meters) { return state.units === 'imperial' ? `${Math.round(meters*3.28084/10)*10} ft` : `${Math.round(meters)} m`; }
+  function unit() { return state.units === 'imperial' ? 'MPH' : 'KM/H'; }
+  function limitSign(x,y,kph) {
+    if (kph === null || kph === undefined) return '';
+    return `<g data-role="limit"><rect x="${x}" y="${y}" width="76" height="88" rx="8" fill="none" stroke="#b7c3ce" stroke-width="2"/>${label(x+38,y+25,'LIMIT',14,'#b7c3ce','text-anchor="middle" letter-spacing="1.5"')}${label(x+38,y+69,convertedSpeed(kph),42,'#f1f5f7','text-anchor="middle" font-weight="550"')}</g>`;
+  }
+  function speedText(x,y,kph,size=202,anchor='middle',over=false) {
+    return label(x,y,convertedSpeed(kph),size,over?'#ff6b78':'#f1f5f7',`data-role="speed" text-anchor="${anchor}" font-weight="500" letter-spacing="-8"`) + label(x,y+43,unit(),22,'#acbac6',`text-anchor="${anchor}" letter-spacing="5"`);
+  }
+  function renderHud(concept,width=1280,mini=false) {
+    const compact = width === 800;
+    const scene = {...SCENES[state.scenario], speed:SCENES[state.scenario].speed===null?null:state.speed};
+    const a = COLORS[state.palette];
+    const W = width;
+    const overspeed = scene.speed !== null && scene.limit != null && scene.speed > scene.limit+3;
+    const description = `${CONCEPTS[concept].name}. Sample ${scene.name.toLowerCase()} scene. ${scene.speed===null?'No speed available.':`${convertedSpeed(scene.speed)} ${unit()}.`}`;
+    let content = '';
+    if (state.scenario === 'signal') {
+      content = label(W/2,235,'—',110,'#83909c','text-anchor="middle"') + small(W/2,299,'SIGNAL LOST','#b7c3ce','text-anchor="middle"') + label(W/2,342,'No frozen speed. No invented values.',21,'#83909c','text-anchor="middle"');
+    } else if (scene.warning) {
+      const hot = state.units==='imperial'?'250 °F':'121 °C';
+      content = `<path d="M${W/2-21} 63  ${W/2} 27 ${W/2+21} 63Z" fill="none" stroke="#ff6b78" stroke-width="3"/>` + label(W/2,57,'!',24,'#ff6b78','text-anchor="middle"') + label(W/2,130,'ENGINE TEMPERATURE HIGH',compact?32:41,'#ff6b78','data-role="critical" text-anchor="middle" font-weight="600" letter-spacing="1"') + label(W/2,179,`Stop safely · ${hot}`,27,'#f1c0c5','text-anchor="middle"') + speedText(W/2,360,scene.speed,157) + small(W/2,448,'CRITICAL ALERT · NOT DISMISSIBLE','#ff6b78','text-anchor="middle"');
+    } else if (scene.parked) {
+      content = small(65,65,'PARKED · SAMPLE TRIP',a) + label(65,193,'P',114,'#f1f5f7','font-weight="500"') + label(178,151,'A good place to pause.',compact?29:39) + label(178,195,'Trip details belong here, not on the move.',compact?18:24,'#a8b4bf');
+      const start=compact?75:100, gap=compact?252:410;
+      for (const [i, item] of [[0,[state.units==='imperial'?'7.1':'11.4',state.units==='imperial'?'MILES':'KILOMETRES']],[1,['24','MINUTES']],[2,['12.7','BATTERY / V']]]) content += label(start+i*gap,331,item[0],compact?65:78) + small(start+i*gap,377,item[1],a);
+      content += label(65,443,'Sample summary only · not connected to trip storage',19,'#8896a2');
+    } else {
+      const meters = Math.max(20,(scene.meters || 0) - (timer ? step%45 : 0));
+      if (concept==='glance') {
+        const sx=compact?197:260, nx=compact?422:650;
+        content = speedText(sx,310,scene.speed,compact?206:230,'middle',overspeed) + limitSign(W-127,57,scene.limit);
+        if (scene.street) content += arrow(nx,172,compact?102:133,scene.turn,a) + label(nx+(compact?110:160),242,distance(meters),compact?44:65,a,'font-weight="500"') + label(nx,326,compact&&scene.lanes?'Exit 14 · Eastbound':scene.street,compact?24:30,'#c3d1db');
+        else content += small(nx,210,'QUIET CRUISE',a) + label(nx,263,'Just the essentials.',compact?24:34,'#c3d1db');
+      } else if (concept==='vector') {
+        const sx=compact?636:1035;
+        content = speedText(sx,311,scene.speed,compact?174:217,'middle',overspeed) + limitSign(W-113,44,scene.limit);
+        if (scene.street) {
+          const nx=compact?45:77, tx=compact?151:255;
+          content += arrow(nx,166,compact?91:139,scene.turn,a) + small(tx,143,scene.lanes?'TAKE THE EXIT':'NEXT TURN',a) + label(tx,211,distance(meters),compact?49:64,a,'font-weight="500"') + label(compact?55:255,compact?291:269,scene.street,compact?29:39,'#f1f5f7');
+          if (scene.lanes) content += label(compact?62:255,compact?348:319,'↑   ↑   ↗   ↗',compact?33:36,a) + label(compact?62:255,compact?376:348,'SAMPLE LANES · PROVIDER REQUIRED',13,'#8896a2','letter-spacing="1"');
+          const remaining = state.units==='imperial'?`${(scene.remaining/1.609344).toFixed(1)} mi`:`${scene.remaining.toFixed(1)} km`;
+          content += label(compact?55:88,420,`${scene.eta} ARRIVAL`,22,'#b8c6d1','letter-spacing="1.5"') + label(compact?304:349,420,remaining,22,'#8896a2');
+        } else content += arrow(compact?73:118,170,95,'straight',a) + small(compact?211:275,213,'QUIET CRUISE',a) + label(compact?65:275,275,'Guidance returns near the turn.',compact?22:30,'#b8c6d1');
+      } else {
+        const x0=compact?55:92, barW=W-(compact?195:265), rpm=scene.rpm||0;
+        content += small(x0,50,'ENGINE / RPM',a);
+        for(let i=0;i<32;i++) content+=`<rect x="${x0+i*barW/32}" y="75" width="${barW/32-5}" height="8" rx="1" fill="${i<rpm/8000*32?a:'#273239'}"/>`;
+        for(let i=1;i<=8;i++) content += label(x0+(i-1)*barW/8,112,i,16,i>=7?'#ff8993':'#8495a1');
+        content += limitSign(W-116,44,scene.limit) + speedText(W*.50,320,scene.speed,compact?188:214,'middle',overspeed);
+        content += label(compact?100:183,256,scene.gear===null?'—':`D${scene.gear}`,compact?62:77,'#f1f5f7','text-anchor="middle"') + small(compact?100:183,297,'GEAR',a,'text-anchor="middle"') + (scene.gear===null?'':label(compact?100:183,330,'INFERRED',12,'#91a3af','text-anchor="middle" letter-spacing="1.5"'));
+        content += label(compact?695:1090,256,(rpm/1000).toFixed(1),compact?62:77,'#f1f5f7','text-anchor="middle"') + small(compact?695:1090,297,'×1000',a,'text-anchor="middle"');
+        if (scene.street) content += arrow(compact?50:92,387,43,scene.turn,a) + label(compact?111:163,425,distance(meters),compact?27:32,a) + label(compact?252:339,425,scene.street,compact?25:32,'#becdd7');
+        else content += small(W/2,425,'QUIET CRUISE',a,'text-anchor="middle"');
+      }
+      if (overspeed) content += label(concept==='vector'?(compact?636:1035):concept==='glance'?(compact?197:260):W/2,385,'OVER LIMIT',16,'#ff6b78','data-role="overspeed" text-anchor="middle" letter-spacing="2"');
+      if (scene.call) {
+        // Read-only notification sample. No fake accept/decline controls or vehicle actions.
+        content += `<rect x="${W*.23}" y="18" width="${W*.50}" height="61" rx="8" fill="#000" stroke="${a}" stroke-width="1.5"/>` + label(W/2,56,'INCOMING CALL · ALEX',compact?20:25,a,'data-role="call" text-anchor="middle" letter-spacing="1.5"');
+      }
+    }
+    const mirror = mini?'':state.mirror==='x'?`translate(${W} 0) scale(-1 1)`:state.mirror==='y'?'translate(0 480) scale(1 -1)':'';
+    const brightness = state.brightness/100*(state.night ? .58 : 1);
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} 480" role="img" aria-label="${escape(description)}" preserveAspectRatio="xMidYMid meet"><rect width="${W}" height="480" fill="#000"/><g data-role="drawing" transform="${mirror}" style="filter:brightness(${brightness})" font-family="Arial, Helvetica, sans-serif" font-variant-numeric="tabular-nums">${content}</g></svg>`;
+  }
+  function persist() { try { localStorage.setItem(KEY,JSON.stringify(state)); } catch { /* Private/file browsers may deny storage; the preview still works. */ } }
+  function syncControls() {
+    for(const key of ['scenario','format','units','mirror','brightness','speed']) $(key).value=String(state[key]);
+    $('night').checked=state.night;
+    const locked=['call','signal','parked'].includes(state.scenario);
+    $('speed').disabled=locked;
+    $('play').disabled=locked || state.scenario==='warning';
+    $('speed-output').textContent=state.scenario==='signal'?'No data':`${convertedSpeed(state.speed)} ${unit().toLowerCase()}`;
+    $('brightness-output').textContent=`${state.brightness}%`;
+    document.querySelectorAll('[data-concept]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.concept===state.concept)));
+    document.querySelectorAll('[data-palette]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.palette===state.palette)));
+  }
+  function paint() {
+    const concept=CONCEPTS[state.concept];
+    const w=state.format==='compact'?800:1280;
+    const hud=$('hud');
+    hud.querySelector('svg')?.remove();
+    hud.insertAdjacentHTML('beforeend',renderHud(state.concept,w));
+    hud.classList.toggle('is-tall',state.format==='compact');
+    $('screen-title').textContent=`${concept.number} / ${concept.name.toUpperCase()}`;
+    $('scene-label').textContent=`${SCENES[state.scenario].name} · ${w} × 480`;
+    $('concept-title').textContent=concept.title;
+    $('concept-description').textContent=concept.description;
+    $('recommendation').textContent=concept.recommendation;
+    $('stage-note').textContent=state.scenario==='signal'?'Sample signal-loss state · not a live connection':concept.note;
+    document.querySelectorAll('[data-mini]').forEach(el=>{el.innerHTML=renderHud(el.dataset.mini,w,true);el.style.aspectRatio=state.format==='compact'?'5/3':'8/3';});
+    syncControls();
+  }
+  function stop() { if(timer!==null) clearInterval(timer);timer=null;step=0;$('play').textContent='Play sample';$('play').setAttribute('aria-pressed','false'); }
+  function choose(key,value) {
+    if(key==='scenario') { stop();state.scenario=value;state.speed=SCENES[value].speed??0; }
+    else { if(key==='speed') stop();state[key]=value; }
+    persist();paint();
+  }
+  document.querySelectorAll('[data-concept]').forEach(b=>b.addEventListener('click',()=>{choose('concept',b.dataset.concept);$('announcement').textContent=`${CONCEPTS[state.concept].name} selected.`;}));
+  document.querySelectorAll('[data-palette]').forEach(b=>b.addEventListener('click',()=>choose('palette',b.dataset.palette)));
+  for(const key of ['scenario','format','units','mirror']) $(key).addEventListener('change',e=>choose(key,e.target.value));
+  for(const key of ['brightness','speed']) $(key).addEventListener('input',e=>choose(key,Number(e.target.value)));
+  $('night').addEventListener('change',e=>choose('night',e.target.checked));
+  $('play').addEventListener('click',()=>{
+    if(timer!==null) { stop();paint();return; }
+    $('play').textContent='Pause sample';$('play').setAttribute('aria-pressed','true');
+    const base=SCENES[state.scenario].speed??0;
+    timer=setInterval(()=>{step+=1;state.speed=Math.max(0,base+Math.round(Math.sin(step/5)*4));paint();},250);
+  });
+  document.addEventListener('visibilitychange',()=>{if(document.hidden){stop();paint();}});
+  function setFocus(value) {focus=value;document.body.classList.toggle('focus',focus);$('focus').textContent=focus?'Exit focus':'Focus view';$('focus').setAttribute('aria-pressed',String(focus));$('focus').focus();}
+  $('focus').addEventListener('click',()=>setFocus(!focus));
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&focus)setFocus(false);});
+  $('compare').addEventListener('click',()=>$('comparison').scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'}));
+  $('reset').addEventListener('click',()=>{stop();state={...DEFAULT};persist();paint();$('announcement').textContent='Preview reset to Vector, Ice, city sample.';});
+  $('export').addEventListener('click',()=>{
+    const proposal={schema:'carheadsup-ui-proposal-v1',purpose:'Design preference only. Not compatible with the vehicle config API.',concept:state.concept,palette:state.palette,units:state.units,format:state.format,nightPreview:state.night,mirrorPreview:state.mirror,brightnessPreview:state.brightness};
+    const url=URL.createObjectURL(new Blob([JSON.stringify(proposal,null,2)+'\n'],{type:'application/json'}));
+    const anchor=document.createElement('a');anchor.href=url;anchor.download=`carheadsup-${state.concept}-choice.json`;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);$('announcement').textContent='Design choice downloaded. No car settings changed.';
+  });
+  window.addEventListener('pagehide',stop);
+  paint();
+})();
+</script>
+</body>
+</html>
