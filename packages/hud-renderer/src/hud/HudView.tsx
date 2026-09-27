@@ -1,5 +1,6 @@
 import '../common/fonts.ts';
 import './hud.css';
+import './apex/apex.css';
 import type {
   DiagnosticsFrame,
   DrivingContext,
@@ -9,6 +10,9 @@ import type {
 } from '@carheadsup/core';
 import type { ComponentChildren, RefObject } from 'preact';
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { ApexWidgets } from './apex/ApexWidgets.tsx';
+import { DirectionalGlows } from './apex/DirectionalGlows.tsx';
+import type { HudLayout } from './apex/model.ts';
 import { DiagnosticsView } from './diagnostics/Diagnostics.tsx';
 import { useHold } from './flash.ts';
 import { Guard } from './Guard.tsx';
@@ -36,6 +40,8 @@ import { Widget } from './widgets/index.tsx';
 export interface HudViewProps {
   /** The frame to draw; null draws nothing but the tiny "no signal" dot. */
   frame: HudFrame | null;
+  /** Opt-in visual layout; the configured layout remains the default. */
+  layout?: HudLayout;
   /** Mirroring / rotation / keystone from the server's display config. */
   projection?: ProjectionConfig | null;
   /** Ignore mirroring, rotation and keystone (e.g. when embedded in the dev console). */
@@ -46,6 +52,11 @@ export interface HudViewProps {
    */
   hardwareBrightness?: boolean;
   className?: string;
+}
+
+interface ContentProps {
+  frame: HudFrame;
+  apex?: boolean;
 }
 
 /** Track an element's layout size (unaffected by CSS transforms on ancestors). */
@@ -99,24 +110,27 @@ function ZoneBox({
  * hud.css). With more than one item every banner is compacted to its title and one detail line,
  * and lower-priority alerts beyond {@link planAlerts}' limit collapse into a "+N more" line.
  */
-function TopLead({ frame }: { frame: HudFrame }) {
+function TopLead({ frame, apex }: ContentProps) {
   return (
     <Guard name="alert stack" resetKey={frame}>
-      <LeadBlock frame={frame} />
+      <LeadBlock frame={frame} apex={apex} />
     </Guard>
   );
 }
 
-function LeadBlock({ frame }: { frame: HudFrame }) {
+function LeadBlock({ frame, apex }: ContentProps) {
   const { shown, more } = planAlerts(visibleAlerts(frame));
-  const cue = collisionLevel(frame.collision) !== 'none';
+  // Apex communicates collision direction at the edge, without a duplicate icon/text card.
+  const cue = !apex && collisionLevel(frame.collision) !== 'none';
   const items = shown.length + (cue ? 1 : 0) + (more > 0 ? 1 : 0);
   if (items === 0) return null;
   return (
     <div class={cx('hud-lead', items > 1 && 'hud-lead--compact')} data-lead="true">
-      <Guard name="collision cue" resetKey={frame}>
-        <CollisionCue level={frame.collision} />
-      </Guard>
+      {!apex && (
+        <Guard name="collision cue" resetKey={frame}>
+          <CollisionCue level={frame.collision} />
+        </Guard>
+      )}
       {shown.map((a, i) => (
         <Guard key={`${a.key}-${i}`} name="alert banner" resetKey={a}>
           <AlertBanner alert={a} />
@@ -132,11 +146,21 @@ function LeadBlock({ frame }: { frame: HudFrame }) {
 }
 
 /** Safety overlays that are drawn in every mode, even when blanked or calibrating. */
-function SafetyOverlays({ frame }: { frame: HudFrame }) {
+function SafetyOverlays({ frame, apex }: ContentProps) {
   return (
     <Guard name="driver-assistance overlays" resetKey={frame}>
-      <BlindSpot left={frame.blindSpot.left === true} right={frame.blindSpot.right === true} />
-      {collisionLevel(frame.collision) === 'warning' && <CollisionBorder />}
+      {apex ? (
+        <DirectionalGlows
+          left={frame.blindSpot.left === true}
+          right={frame.blindSpot.right === true}
+          front={frame.collision}
+        />
+      ) : (
+        <>
+          <BlindSpot left={frame.blindSpot.left === true} right={frame.blindSpot.right === true} />
+          {collisionLevel(frame.collision) === 'warning' && <CollisionBorder />}
+        </>
+      )}
     </Guard>
   );
 }
@@ -168,7 +192,7 @@ function Status({ frame }: { frame: HudFrame }) {
   );
 }
 
-function DrivingContent({ frame }: { frame: HudFrame }) {
+function DrivingContent({ frame, apex }: ContentProps) {
   const groups = groupByZone(frame.widgets);
   return (
     <div class="hud-content" data-mode="driving">
@@ -178,42 +202,50 @@ function DrivingContent({ frame }: { frame: HudFrame }) {
         </Guard>
       )}
       <Status frame={frame} />
-      <SafetyOverlays frame={frame} />
-      <div class="hud-grid">
-        {ZONES.map((zone) => (
-          <ZoneBox
-            key={zone}
-            zone={zone}
-            lead={
-              zone === 'top' ? (
-                <TopLead frame={frame} />
-              ) : zone === 'bottom' ? (
-                <BottomLead frame={frame} />
-              ) : undefined
-            }
-          >
-            {groups[zone].map((w, i) => (
-              <div key={`${w.id}-${i}`} class="hud-slot">
-                <Guard name={`${w.id} widget`} resetKey={w}>
-                  <Widget w={w} />
-                </Guard>
-              </div>
-            ))}
-          </ZoneBox>
-        ))}
-      </div>
+      <SafetyOverlays frame={frame} apex={apex} />
+      {apex ? (
+        <>
+          <ApexWidgets frame={frame} />
+          <div class="apex-alerts"><TopLead frame={frame} apex /></div>
+          <div class="apex-bottom"><BottomLead frame={frame} /></div>
+        </>
+      ) : (
+        <div class="hud-grid">
+          {ZONES.map((zone) => (
+            <ZoneBox
+              key={zone}
+              zone={zone}
+              lead={
+                zone === 'top' ? (
+                  <TopLead frame={frame} />
+                ) : zone === 'bottom' ? (
+                  <BottomLead frame={frame} />
+                ) : undefined
+              }
+            >
+              {groups[zone].map((w, i) => (
+                <div key={`${w.id}-${i}`} class="hud-slot">
+                  <Guard name={`${w.id} widget`} resetKey={w}>
+                    <Widget w={w} />
+                  </Guard>
+                </div>
+              ))}
+            </ZoneBox>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 /** Blanked: black apart from a tiny indicator, critical alerts and ADAS warnings. */
-function BlankedContent({ frame }: { frame: HudFrame }) {
+function BlankedContent({ frame, apex }: ContentProps) {
   return (
     <div class="hud-content hud-content--blanked" data-mode="blanked">
       <BlankIndicator />
-      <SafetyOverlays frame={frame} />
+      <SafetyOverlays frame={frame} apex={apex} />
       <div class="hud-grid">
-        <ZoneBox zone="top" lead={<TopLead frame={frame} />} />
+        <ZoneBox zone="top" lead={<TopLead frame={frame} apex={apex} />} />
       </div>
     </div>
   );
@@ -223,14 +255,14 @@ function BlankedContent({ frame }: { frame: HudFrame }) {
  * Calibrating (grid on while standing still): the grid, with every safety cue still drawn on top
  * of it — blind spots, collision warnings and alerts never disappear behind the pattern.
  */
-function CalibrationContent({ frame }: { frame: HudFrame }) {
+function CalibrationContent({ frame, apex }: ContentProps) {
   return (
     <>
       <AlignmentGrid />
       <div class="hud-content hud-content--calibration" data-mode="calibration">
-        <SafetyOverlays frame={frame} />
+        <SafetyOverlays frame={frame} apex={apex} />
         <div class="hud-grid">
-          <ZoneBox zone="top" lead={<TopLead frame={frame} />} />
+          <ZoneBox zone="top" lead={<TopLead frame={frame} apex={apex} />} />
         </div>
       </div>
     </>
@@ -240,19 +272,17 @@ function CalibrationContent({ frame }: { frame: HudFrame }) {
 function DiagnosticsContent({
   frame,
   diagnostics,
-}: {
-  frame: HudFrame;
-  diagnostics: DiagnosticsFrame;
-}) {
+  apex,
+}: ContentProps & { diagnostics: DiagnosticsFrame }) {
   const top =
     collisionLevel(frame.collision) !== 'none' || visibleAlerts(frame).length > 0 ? (
-      <TopLead frame={frame} />
+      <TopLead frame={frame} apex={apex} />
     ) : undefined;
   const bottom = frame.call || frame.toast ? <BottomLead frame={frame} /> : undefined;
   return (
     <div class="hud-content hud-content--diagnostics" data-mode="diagnostics">
       <Status frame={frame} />
-      <SafetyOverlays frame={frame} />
+      <SafetyOverlays frame={frame} apex={apex} />
       <Guard name="diagnostics dashboard" resetKey={diagnostics}>
         <DiagnosticsView d={diagnostics} top={top} bottom={bottom} />
       </Guard>
@@ -260,12 +290,12 @@ function DiagnosticsContent({
   );
 }
 
-function FrameContent({ frame }: { frame: HudFrame }) {
-  if (frame.blanked) return <BlankedContent frame={frame} />;
+function FrameContent({ frame, apex }: ContentProps) {
+  if (frame.blanked) return <BlankedContent frame={frame} apex={apex} />;
   if (frame.diagnostics) {
-    return <DiagnosticsContent frame={frame} diagnostics={frame.diagnostics} />;
+    return <DiagnosticsContent frame={frame} diagnostics={frame.diagnostics} apex={apex} />;
   }
-  return <DrivingContent frame={frame} />;
+  return <DrivingContent frame={frame} apex={apex} />;
 }
 
 function NoSignalContent() {
@@ -309,6 +339,7 @@ function useDrawnFrame(frame: HudFrame | null): HudFrame | null {
  */
 export function HudView({
   frame,
+  layout = 'configured',
   projection = null,
   preview = false,
   hardwareBrightness = false,
@@ -317,6 +348,7 @@ export function HudView({
   const rootRef = useRef<HTMLDivElement>(null);
   const size = useElementSize(rootRef);
   const drawn = useDrawnFrame(frame);
+  const apex = layout === 'apex';
   const brightness = frame && !hardwareBrightness ? contentBrightness(frame.theme.brightness) : 1;
   // The calibration grid only while standing still; without a frame, the last known context.
   const lastContext = useRef<DrivingContext | null>(null);
@@ -325,9 +357,10 @@ export function HudView({
   return (
     <div
       ref={rootRef}
-      class={cx('hud', frame?.theme.night && 'hud--night', preview && 'hud--preview', className)}
+      class={cx('hud', apex && 'hud--apex', frame?.theme.night && 'hud--night', preview && 'hud--preview', className)}
       style={brightness < 1 ? { filter: `brightness(${brightness})` } : undefined}
       data-context={frame?.context}
+      data-layout={layout}
       data-brightness={brightness}
     >
       <ProjectionStage projection={preview ? null : projection} size={size}>
@@ -339,7 +372,7 @@ export function HudView({
           )
         ) : (
           <Guard name="frame" resetKey={drawn} fallback={<NoSignalContent />}>
-            {showGrid ? <CalibrationContent frame={drawn} /> : <FrameContent frame={drawn} />}
+            {showGrid ? <CalibrationContent frame={drawn} apex={apex} /> : <FrameContent frame={drawn} apex={apex} />}
           </Guard>
         )}
       </ProjectionStage>

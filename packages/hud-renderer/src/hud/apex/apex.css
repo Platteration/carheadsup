@@ -1,0 +1,100 @@
+/* Apex is opt-in. Black remains transparent on the glass; no road or vehicle illustrations. */
+.hud--apex .apex-layout {
+  position: absolute;
+  inset: 0;
+}
+.apex-slot {
+  position: absolute;
+  container-type: size;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  --justify: center;
+}
+.apex-slot--rpm { left: 20%; top: 13%; width: 60%; height: 9%; }
+.apex-slot--nav { left: 11%; top: 32%; width: 25%; height: 30%; --justify: flex-start; justify-content: flex-start; }
+.apex-slot--speed { left: 38%; top: 28%; width: 29%; height: 42%; }
+.apex-slot--limit { left: 74%; top: 34%; width: 13%; height: 28%; }
+.apex-slot--gear { left: 49%; top: 72%; width: 7%; height: 9%; }
+.hud--apex .apex-slot--speed .hud-speed__value {
+  font-family: var(--font-sans);
+  font-size: min(calc(var(--u) * 40), 78cqh, 47cqw);
+  font-weight: 700;
+}
+.hud--apex .apex-slot--rpm .hud-w--tachometer { width: 100%; }
+.hud--apex .apex-slot--rpm .hud-tach__bar {
+  height: calc(var(--u) * 1.25);
+  color: var(--c-accent);
+  border: 0;
+  border-radius: 0;
+  background: var(--c-faint);
+}
+.hud--apex .apex-slot--rpm .hud-tach--red .hud-tach__bar { color: var(--c-critical); }
+.hud--apex .apex-slot--rpm .hud-tach__readout { font-size: calc(var(--u) * 2.5); justify-content: flex-end; }
+.hud--apex .apex-slot--rpm .hud-unit { font-size: calc(var(--u) * 2); }
+.hud--apex .apex-slot--nav .hud-nav__distance { font-size: min(calc(var(--u) * 8), 25cqw); }
+.hud--apex .apex-slot--nav .hud-nav__street { font-size: calc(var(--u) * 4); }
+.hud--apex .apex-slot--nav .hud-nav__then { display: none; }
+.hud--apex .apex-slot--limit .hud-limit { height: min(calc(var(--u) * 24), 88cqh, 70cqw); }
+.hud--apex .apex-slot--gear .hud-gear { border: 0; width: 100%; aspect-ratio: auto; }
+.hud--apex .apex-slot--gear .hud-gear__value { font-size: calc(var(--u) * 5); }
+/* Do not remove the inferred marker/semantics in the shared Gear widget. */
+.hud--apex .apex-slot--gear .hud-gear--inferred { color: var(--c-dim); }
+.apex-alerts {
+  position: absolute;
+  top: 5%;
+  left: 31%;
+  width: 38%;
+  z-index: 6;
+  /* Critical alerts can grow over the normal readouts rather than being clipped. */
+}
+.apex-bottom {
+  position: absolute;
+  bottom: 8%;
+  left: 36%;
+  width: 30%;
+  z-index: 5;
+  background: #000;
+}
+.apex-notices {
+  position: absolute;
+  left: 10%;
+  right: 10%;
+  bottom: 4%;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: calc(var(--u) * 1.5);
+  z-index: 4;
+  background: #000;
+}
+.apex-notice { min-width: 0; max-width: 100%; }
+/* Only active directions exist. Danger colors are semantic, not accent-palette colors. */
+.apex-glows { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
+.apex-glow {
+  --glow-color: #ffb547;
+  position: absolute;
+  border-radius: 50%;
+  color: var(--glow-color);
+  background: radial-gradient(ellipse, currentColor 0%, transparent 72%);
+}
+.apex-glow::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 9px 1px currentColor;
+}
+.apex-glow--left, .apex-glow--right { top: 23%; height: 48%; width: 4%; }
+.apex-glow--left { left: 0.5%; }
+.apex-glow--right { right: 0.5%; }
+.apex-glow--left::after, .apex-glow--right::after { top: 12%; bottom: 12%; left: 48%; width: 4%; }
+.apex-glow--front, .apex-glow--rear { left: 28%; width: 44%; height: 6%; }
+.apex-glow--front { top: 0.5%; }
+.apex-glow--rear { bottom: 0.5%; }
+.apex-glow--front::after, .apex-glow--rear::after { left: 12%; right: 12%; top: 48%; height: 5%; }
+.apex-glow--warning { --glow-color: #ff454f; animation: apex-warning 1s ease-in-out infinite alternate; }
+/* A steady visible baseline, not an on/off strobe. Timing never depends on frame arrivals. */
+@keyframes apex-warning { from { opacity: 1; } to { opacity: 0.6; } }
+@media (prefers-reduced-motion: reduce) { .apex-glow--warning { animation: none; } }
