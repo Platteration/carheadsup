@@ -45,6 +45,15 @@ describe('the demo inliner', () => {
     expect(externalReferences(html)).toEqual([]);
   });
 
+  it('writes U+FFFD as an escape that means the same', () => {
+    const code = 'globalThis.v = [`a�`, "�", /[�]/.test("�")];';
+    const text = scriptText(code);
+    expect(text).not.toContain('�');
+    const scope: { v?: unknown } = {};
+    new Function('globalThis', text)(scope);
+    expect(scope.v).toEqual(['a�', '�', true]);
+  });
+
   it('refuses code that cannot be inlined safely', () => {
     expect(() => scriptText('const s = "<!--";')).toThrow(/<!--/);
     expect(() =>

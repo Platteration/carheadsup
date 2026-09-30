@@ -109,7 +109,7 @@ function utf8Length(text: string): number {
  */
 export function hudDisplayName(vehicleName: string): string {
   const base = vehicleName
-    .replace(LONE_SURROGATES, '�')
+    .replace(LONE_SURROGATES, '\uFFFD')
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();

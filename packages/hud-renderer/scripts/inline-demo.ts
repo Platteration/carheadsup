@@ -19,10 +19,15 @@ export const MAX_BYTES = 16 * 1024 * 1024;
 const SCRIPT_TAG = /<script type="module" crossorigin src="\.\/([^"]+\.js)"><\/script>\s*/g;
 const STYLESHEET_TAG = /<link rel="stylesheet" crossorigin href="\.\/([^"]+\.css)">\s*/g;
 
-/** JavaScript that is safe inside an inline `<script>`: no end tag, no comment opener. */
+/**
+ * JavaScript that is safe inside an inline `<script>`: no end tag, no comment opener. U+FFFD is
+ * written as `�` (the minifier folds the core's escape back into the character, and the
+ * artifact host refuses pages containing it, as the mark of a lost character); it only occurs in
+ * string, template and regular-expression literals, where the escape means the same.
+ */
 export function scriptText(code: string): string {
   if (code.includes('<!--')) throw new Error('The script contains "<!--"; cannot inline it safely');
-  return code.replace(/<\/(script)/gi, '<\\/$1');
+  return code.replace(/<\/(script)/gi, '<\\/$1').replaceAll('�', '\\uFFFD');
 }
 
 /** CSS that is safe inside an inline `<style>`. */
