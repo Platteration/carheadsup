@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.Icon
 import android.util.Log
+import androidx.core.graphics.createBitmap
 import dev.carheadsup.protocol.WireLimits
 import java.io.ByteArrayOutputStream
 import java.util.Base64
@@ -44,7 +45,7 @@ internal class ManeuverIconEncoder(private val context: Context) {
             val width = (intrinsicWidth * scale).roundToInt().coerceAtLeast(1)
             val height = (intrinsicHeight * scale).roundToInt().coerceAtLeast(1)
             if (max(width, height) < MIN_EDGE_PX) return null
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val bitmap = createBitmap(width, height)
             try {
                 drawable.setBounds(0, 0, width, height)
                 drawable.draw(Canvas(bitmap))

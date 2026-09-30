@@ -2,6 +2,7 @@ package dev.carheadsup.companion.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.core.content.edit
 import dev.carheadsup.protocol.auth.HudPin
 import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.link.HudEndpoint
@@ -67,7 +68,7 @@ class SettingsStore(context: Context) {
      */
     val deviceId: String =
         prefs.getString(KEY_DEVICE_ID, null)?.takeIf(PhoneAuth::isValidId)
-            ?: PhoneAuth.newId().also { prefs.edit().putString(KEY_DEVICE_ID, it).apply() }
+            ?: PhoneAuth.newId().also { id -> prefs.edit { putString(KEY_DEVICE_ID, id) } }
 
     fun update(transform: (CompanionSettings) -> CompanionSettings) {
         state.update { current ->
@@ -98,19 +99,19 @@ class SettingsStore(context: Context) {
     }
 
     private fun write(settings: CompanionSettings) {
-        prefs.edit()
-            .putBoolean(KEY_DISCOVERY, settings.useDiscovery)
-            .putString(KEY_ADDRESS, settings.manualAddress)
-            .putString(KEY_PAIRING, settings.pairingToken)
-            .putString(KEY_API_TOKEN, settings.apiToken)
-            .putBoolean(KEY_READ_ALOUD, settings.readMessagesAloud)
-            .putBoolean(KEY_LOCATION, settings.shareLocation)
-            .putBoolean(KEY_OSM, settings.osmLookups)
-            .putBoolean(KEY_CAMERAS, settings.cameraWarnings)
-            .putBoolean(KEY_SERVICE, settings.serviceEnabled)
-            .putString(KEY_PIN_HUD_ID, settings.hudPin?.hudId)
-            .putString(KEY_PIN_TOKEN, settings.hudPin?.tokenFingerprint)
-            .apply()
+        prefs.edit {
+            putBoolean(KEY_DISCOVERY, settings.useDiscovery)
+            putString(KEY_ADDRESS, settings.manualAddress)
+            putString(KEY_PAIRING, settings.pairingToken)
+            putString(KEY_API_TOKEN, settings.apiToken)
+            putBoolean(KEY_READ_ALOUD, settings.readMessagesAloud)
+            putBoolean(KEY_LOCATION, settings.shareLocation)
+            putBoolean(KEY_OSM, settings.osmLookups)
+            putBoolean(KEY_CAMERAS, settings.cameraWarnings)
+            putBoolean(KEY_SERVICE, settings.serviceEnabled)
+            putString(KEY_PIN_HUD_ID, settings.hudPin?.hudId)
+            putString(KEY_PIN_TOKEN, settings.hudPin?.tokenFingerprint)
+        }
     }
 
     private companion object {

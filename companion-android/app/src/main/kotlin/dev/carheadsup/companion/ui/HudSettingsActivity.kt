@@ -12,6 +12,7 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
@@ -39,7 +40,7 @@ class HudSettingsActivity : ComponentActivity() {
             finish()
             return
         }
-        val hudHost = Uri.parse(url).host
+        val hudHost = url.toUri().host
         // WebView cannot be bound per request; route the process over the HUD's Wi-Fi while open.
         processBound = (application as CompanionApp).graph.localNetwork.bindProcess()
         webView =

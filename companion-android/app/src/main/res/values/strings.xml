@@ -81,9 +81,15 @@
     <string name="remote_failed">Could not reach the HUD: %1$s</string>
 
     <!-- Trips & maintenance -->
-    <string name="trips_totals">%1$d trips · %2$s · fuel %3$s</string>
+    <plurals name="trips_totals">
+        <item quantity="one">%1$d trip · %2$s · fuel %3$s</item>
+        <item quantity="other">%1$d trips · %2$s · fuel %3$s</item>
+    </plurals>
     <string name="trips_cost_total">Fuel cost: %1$s</string>
-    <string name="trips_synced">%1$d trips from the HUD</string>
+    <plurals name="trips_synced">
+        <item quantity="one">%1$d trip from the HUD</item>
+        <item quantity="other">%1$d trips from the HUD</item>
+    </plurals>
     <string name="trips_empty">No trips yet. Trips are logged by the HUD and appear here after each drive.</string>
     <string name="trip_avg_speed">avg %1$s</string>
     <string name="trip_max_speed">max %1$s</string>

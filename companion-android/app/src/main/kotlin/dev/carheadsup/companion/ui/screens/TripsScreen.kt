@@ -22,6 +22,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -79,8 +80,9 @@ fun TripsScreen(viewModel: MainViewModel) {
             SectionCard(stringResource(R.string.section_trips)) {
                 val totals = TripLog.totals(trips)
                 Text(
-                    stringResource(
-                        R.string.trips_totals,
+                    pluralStringResource(
+                        R.plurals.trips_totals,
+                        totals.trips,
                         totals.trips,
                         formatter.distance(totals.distanceKm),
                         formatter.fuel(totals.fuelUsedL) ?: "–",
@@ -108,7 +110,7 @@ fun TripsScreen(viewModel: MainViewModel) {
                         )
 
                         is Remote.Loaded -> Text(
-                            stringResource(R.string.trips_synced, state.value),
+                            pluralStringResource(R.plurals.trips_synced, state.value, state.value),
                             style = MaterialTheme.typography.bodySmall,
                         )
 
