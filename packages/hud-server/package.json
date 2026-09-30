@@ -5,7 +5,9 @@
   "description": "On-vehicle HUD service: OBD, phone link, sensors, state, persistence, HTTP/WebSocket API; serves the renderer.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./engine": "./src/engine.ts",
+    "./sim": "./src/sim/index.ts"
   },
   "bin": {
     "carheadsup": "./src/main.ts"

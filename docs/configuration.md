@@ -55,7 +55,9 @@ Cross-field rules are enforced too: `minLevel ≤ maxLevel`, `nightEnterLux < ni
 `highwayExitKph < highwayEnterKph`, `stationaryKph < highwayExitKph`, `startRpm < shiftRpm ≤
 flashRpm`, `coolantHighC < coolantCriticalC`, both low-voltage thresholds below `voltageHighV`,
 `idleRpm < redlineRpm`, the keystone corners forming a convex quadrilateral, distinct button GPIO
-lines. When a change breaks one, the changed field is reverted.
+lines, a CAN button rule's value within its mask, steering-wheel ladder windows that overlap
+neither each other nor the idle range and lie within the ADC's input range. When a change breaks
+one, the changed field is reverted.
 
 Units inside the config are always canonical — km/h, km, m, °C, kPa, V, litres, milliseconds —
 whatever `units` says about the display.
@@ -297,12 +299,64 @@ the phone.
 | `sensors.buttons.primary` | `null` | GPIO 0–1023 | BCM number of the accept / OK button (hold = blank). |
 | `sensors.buttons.secondary` | `null` | | Decline / dismiss button. |
 | `sensors.buttons.next` | `null` | | Next dashboard page button; while stopped it opens the dashboard. |
+| `sensors.canButtons.interface` | `null` | interface name, e.g. `"can0"` | SocketCAN interface to read [steering-wheel buttons](hardware.md#steering-wheel-buttons) from, with can-utils' `candump`; `null` = off. The HUD never transmits, and the interface **must be up in listen-only mode** (`sudo ip link set can0 up type can bitrate 500000 listen-only on`, [at boot](hardware.md#can-bus-an-mcp2515-can-hat)) so that its controller does not acknowledge or error-flag the car's frames either; the HUD checks with `ip -details link show` and logs a warning when it is not. |
+| `sensors.canButtons.releaseTimeoutMs` | `500` | 50–10000, or `null` | A held button counts as released once no frame with its id has arrived for this long — for cars that send the button frame only while a button is held. Keep it well above the frame's repeat interval. `null` = only a frame with another value releases a button, for cars that send a frame only when something changes. |
+| `sensors.canButtons.rules` | `[]` | ≤ 32 rules | One rule per button, below. A rule's button is held while `(data[byte] & mask) == value` in the frames with its id; only the press acts, once (30 ms debounce), however many frames repeat it. No two rules may have the same id, byte, mask and value. |
+| `…rules[].id` | | 3 or 8 hex digits | The frame's CAN id as `candump` prints it: 3 digits for an 11-bit id (up to `7FF`), 8 for a 29-bit id (up to `1FFFFFFF`). `5C1` and `000005C1` are different frames. |
+| `…rules[].byte` | | 0–63 | Data byte to test, 0 = the first (above 7 only in CAN FD frames). A shorter frame is ignored. |
+| `…rules[].mask` | | 2 hex digits, not `00` | The bits of that byte that belong to the button, e.g. `"0F"`; `"FF"` = the whole byte. |
+| `…rules[].value` | | 2 hex digits | What those bits read while the button is held, e.g. `"01"`; no bits outside the mask. |
+| `…rules[].action` | | an [input action](architecture.md#driver-input) | `primary`, `secondary`, `next-page`, `prev-page`, `toggle-blank`, `brightness-up` or `brightness-down`. |
+| `…rules[].longPressAction` | | an input action or `null` | Held longer than 0.8 s: this action instead, once, while still held. A short press then acts on release. |
+| `sensors.swcButtons.enabled` | `false` | | Read a steering-wheel [resistor ladder](hardware.md#resistor-ladder-an-ads1115-on-the-button-wire) through an ADS1115 ADC on `sensors.i2cBus`, 50 times a second. |
+| `sensors.swcButtons.address` | `72` | 72–75 | I²C address 0x48–0x4B (JSON has no hex numbers: 72 = 0x48, 73 = 0x49, 74 = 0x4A, 75 = 0x4B), set by the ADDR pin: GND, VDD, SDA, SCL. |
+| `sensors.swcButtons.channel` | `0` | 0–3 | Input A0–A3, measured against GND. |
+| `sensors.swcButtons.fullScaleV` | `4.096` | `6.144`, `4.096`, `2.048`, `1.024`, `0.512`, `0.256` | Input range in ± volts (programmable gain 2/3, 1, 2, 4, 8, 16). ±4.096 V for a ladder pulled up to 3.3 V. The idle range and every window must lie within it. |
+| `sensors.swcButtons.idle` | `{ "minV": 3, "maxV": 3.6 }` | 0–6.144 V, `minV < maxV` | The voltage with no button pressed. |
+| `sensors.swcButtons.windows` | `[]` | ≤ 16 | One per button: `{ "minV", "maxV", "action", "longPressAction" }` — volts (`minV < maxV`, ends included) and actions as for the CAN rules. Windows must not overlap each other or the idle range; leave gaps. A button counts once three readings in a row (60 ms) fall into its window, and is released by three readings anywhere else. A button already held when the HUD starts is ignored until released. To find the voltages, see [calibrating](hardware.md#resistor-ladder-an-ads1115-on-the-button-wire). |
 | `sensors.fallbackLocation` | `null` | `{ "lat": …, "lon": … }` | Location for sun-based brightness and night mode when the phone has not sent one. |
 | `sensors.adasUdpPort` | `null` | 1–65535 | UDP port for an [ADAS module](protocol.md#adas-udp-feed); `null` = off. Which devices may send to it: `adasAllowedSenders`, below. |
 | `sensors.adasAllowedSenders` | `[]` | ≤ 32 IPv4 / IPv6 addresses | The addresses the ADAS feed accepts datagrams from, e.g. `["10.42.0.50"]` — give the module a fixed address first. The feed listens on IPv4 only, so list the module's IPv4 address (IPv6 entries are valid but match nothing today). Addresses only: no host names, prefixes (`/24`), ports or `%zone` suffixes; each address once. Compared in canonical form, so `::ffff:10.42.0.50` is `10.42.0.50` and IPv6 case and zero-compression do not matter. Datagrams from anyone else are dropped and counted in a log warning (at most every 10 s). **Empty = any device on the car's network**, which can then raise or hide collision warnings; the HUD logs a warning when the feed starts that way and the settings app shows one. A change applies at once without reopening the port; removing an address that is sending ends its link immediately. Filtering by source address keeps out other devices on the Wi-Fi, not an attacker who forges the module's address — see the [trust note](protocol.md#adas-udp-feed). |
 
-Sensor changes apply without a restart; only the sources whose settings changed are restarted.
-Wiring: [hardware.md](hardware.md#sensors-buttons-and-wiring).
+Sensor changes apply without a restart; only the sources whose settings changed are restarted —
+new CAN button actions or ladder windows apply without restarting `candump` or re-initialising the
+ADC. Wiring: [hardware.md](hardware.md#sensors-buttons-and-wiring).
+
+Steering-wheel buttons, for example — three buttons in the low four bits of byte 0 of CAN frame
+`5C1`, and a four-button ladder on input A0 of an ADS1115 at 0x48:
+
+```json
+{
+  "sensors": {
+    "canButtons": {
+      "interface": "can0",
+      "releaseTimeoutMs": 500,
+      "rules": [
+        { "id": "5C1", "byte": 0, "mask": "0F", "value": "01", "action": "next-page", "longPressAction": null },
+        { "id": "5C1", "byte": 0, "mask": "0F", "value": "02", "action": "prev-page", "longPressAction": null },
+        { "id": "5C1", "byte": 0, "mask": "0F", "value": "03", "action": "primary", "longPressAction": "toggle-blank" }
+      ]
+    },
+    "swcButtons": {
+      "enabled": true,
+      "address": 72,
+      "channel": 0,
+      "fullScaleV": 4.096,
+      "idle": { "minV": 3.0, "maxV": 3.6 },
+      "windows": [
+        { "minV": 0.0, "maxV": 0.2, "action": "next-page", "longPressAction": null },
+        { "minV": 0.45, "maxV": 0.7, "action": "prev-page", "longPressAction": null },
+        { "minV": 0.95, "maxV": 1.15, "action": "primary", "longPressAction": "toggle-blank" },
+        { "minV": 1.5, "maxV": 1.8, "action": "secondary", "longPressAction": null }
+      ]
+    }
+  }
+}
+```
+
+The simplest way to use the steering wheel needs neither: with the phone paired to the car over
+Bluetooth, its call and media buttons already reach the phone, and the HUD follows the phone's
+call and media state ([more](hardware.md#steering-wheel-buttons)).
 
 ### server
 

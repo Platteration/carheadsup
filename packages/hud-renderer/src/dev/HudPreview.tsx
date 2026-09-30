@@ -3,6 +3,7 @@ import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { HudView } from '../hud/HudView.tsx';
 import { cx } from '../hud/util.ts';
 import type { Backdrop, PanelSize } from './sim-model.ts';
+import './preview.css';
 
 export interface HudPreviewProps {
   frame: HudFrame | null;

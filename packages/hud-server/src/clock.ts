@@ -1,4 +1,4 @@
-import type { Clock } from '@carheadsup/obd';
+import type { Clock } from '@carheadsup/obd/runtime';
 
 /**
  * Time bases that survive wall-clock steps. The HUD runs on a system clock that network time may

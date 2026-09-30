@@ -19,6 +19,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test -c e2e/playwright.config.ts",
     "build": "npm run build --workspace @carheadsup/hud-renderer",
+    "build:demo": "npm run build:demo --workspace @carheadsup/hud-renderer",
     "start": "node packages/hud-server/src/main.ts",
     "sim": "node packages/hud-server/src/tools/ensure-renderer.ts && node packages/hud-server/src/main.ts --sim",
     "dev": "npm run dev --workspace @carheadsup/hud-renderer",

@@ -1,17 +1,21 @@
 import type { HudConfig } from '@carheadsup/core';
 import type { EventSource } from '../sources/types.ts';
 import { AdasUdpSource, defaultUdpSocketFactory, type UdpSocketFactory } from './adas-udp.ts';
+import { CanButtonSource } from './can/source.ts';
 import { GestureSensorSource } from './gesture/source.ts';
 import { nodeSysFs, type SysFs } from './gpio/chip.ts';
 import { GpioButtonSource } from './gpio/source.ts';
 import { openI2cBus, type I2cOpener } from './i2c.ts';
 import { LightSensorSource } from './light/source.ts';
 import { defaultSpawn, type SpawnFn } from './process.ts';
+import { SwcButtonSource } from './swc/source.ts';
 
 export { AdasUdpSource } from './adas-udp.ts';
+export { CanButtonSource } from './can/source.ts';
 export { GestureSensorSource } from './gesture/source.ts';
 export { GpioButtonSource } from './gpio/source.ts';
 export { LightSensorSource } from './light/source.ts';
+export { SwcButtonSource } from './swc/source.ts';
 
 /**
  * Hardware seams, all optional (defaults: the `i2c-bus` package loaded lazily,
@@ -30,13 +34,14 @@ export interface SensorIo {
 
 /**
  * Hardware input sources enabled by `config.sensors`: ambient light sensor, gesture sensor,
- * GPIO buttons, ADAS UDP feed. Sources whose hardware is absent log once and stay idle rather
- * than failing the HUD.
+ * GPIO buttons, steering-wheel buttons (CAN bus and resistor ladder), ADAS UDP feed. Sources
+ * whose hardware is absent log once and stay idle rather than failing the HUD.
  *
  * One source per kind is always returned — a kind that is disabled ('none', no button lines,
- * no ADAS port) stays idle — so that enabling a sensor in the settings takes effect through
- * `updateConfig` without restarting the HUD. `updateConfig` restarts only the sources whose
- * part of the config changed (a new light-sensor gain applies without a restart at all).
+ * no CAN interface, ladder off, no ADAS port) stays idle — so that enabling a sensor in the
+ * settings takes effect through `updateConfig` without restarting the HUD. `updateConfig`
+ * restarts only the sources whose part of the config changed (a new light-sensor gain, new CAN
+ * button actions or new ladder windows apply without a restart at all).
  */
 export function createSensorSources(config: HudConfig, io: SensorIo = {}): EventSource[] {
   const open = io.openI2c ?? openI2cBus;
@@ -45,6 +50,8 @@ export function createSensorSources(config: HudConfig, io: SensorIo = {}): Event
     new LightSensorSource(config, { open, retryMs: io.i2cRetryMs }),
     new GestureSensorSource(config, { open, retryMs: io.i2cRetryMs }),
     new GpioButtonSource(config, { spawn, fs: io.sysfs ?? nodeSysFs }),
+    new CanButtonSource(config, { spawn }),
+    new SwcButtonSource(config, { open, retryMs: io.i2cRetryMs }),
     new AdasUdpSource(config, {
       createSocket: io.createUdpSocket ?? defaultUdpSocketFactory,
       bindAddress: io.adasBindAddress,

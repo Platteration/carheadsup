@@ -30,7 +30,8 @@ import type {
   PhoneToHud,
   SimControl,
 } from '@carheadsup/core';
-import type { Logger, VehicleSimulator } from '@carheadsup/obd';
+import type { Logger } from '@carheadsup/obd/runtime';
+import type { VehicleSimulator } from '@carheadsup/obd/sim';
 import type { EventSource, PhoneMessageTranslator, SourceContext } from '../sources/types.ts';
 import { OnceLogger, TimerSlots, cleanLabel, errorMessage } from '../sensors/util.ts';
 import {

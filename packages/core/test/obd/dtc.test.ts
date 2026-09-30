@@ -272,6 +272,8 @@ describe('lookupDtc', () => {
     }
   });
 
+  // All 65 536 codes: close to 5 s (the default timeout) on a small machine even alone, and
+  // slower while the rest of the suite runs in parallel.
   it('is consistent with the database and the range table for every possible code', () => {
     const hex = '0123456789ABCDEF';
     for (const letter of 'PCBU') {
@@ -286,7 +288,7 @@ describe('lookupDtc', () => {
         }
       }
     }
-  });
+  }, 30_000);
 
   it.each(['', 'hello', 'P999', 'P4420', 'X0420', 'constructor', '__proto__', 'toString'])(
     'returns an "Unrecognised trouble code" result for %j instead of throwing',

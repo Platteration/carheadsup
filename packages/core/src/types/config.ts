@@ -1,3 +1,4 @@
+import type { InputAction } from './events.ts';
 import type { SignalId } from './signals.ts';
 
 export type UnitSystem = 'metric' | 'imperial';
@@ -293,6 +294,90 @@ export interface PhoneConfig {
 export type LightSensorKind = 'none' | 'bh1750' | 'veml7700' | 'tsl2591';
 export type GestureSensorKind = 'none' | 'apds9960';
 
+/**
+ * One steering-wheel button read off the car's CAN bus: the button counts as held while
+ * `(data[byte] & mask) == value` in the frames with identifier `id`. Only presses act (a button
+ * held for many frames acts once); it is released by a frame with another value or, see
+ * `CanButtonsConfig.releaseTimeoutMs`, when its frames stop.
+ */
+export interface CanButtonRule {
+  /**
+   * CAN identifier in hex, as `candump` prints it: 3 digits for an 11-bit id (000–7FF), 8 digits
+   * for a 29-bit extended id (00000000–1FFFFFFF).
+   */
+  id: string;
+  /** Index of the data byte to test (0 = first; up to 63 for CAN FD frames). */
+  byte: number;
+  /** The bits of that byte that belong to the button, 2 hex digits (e.g. "0F"). Not "00". */
+  mask: string;
+  /** What those bits read while the button is held, 2 hex digits; no bits outside `mask`. */
+  value: string;
+  /** Acts on press — or on release when `longPressAction` is set. */
+  action: InputAction;
+  /** Acts instead of `action` once the button has been held longer than 0.8 s; null = none. */
+  longPressAction: InputAction | null;
+}
+
+/**
+ * Steering-wheel buttons read from a SocketCAN interface with can-utils' `candump`. The HUD never
+ * transmits, and the interface must be up in listen-only mode so that its controller does not
+ * acknowledge or error-flag the car's traffic either.
+ */
+export interface CanButtonsConfig {
+  /** SocketCAN interface, e.g. "can0" (an MCP2515 CAN HAT); null = off. */
+  interface: string | null;
+  /**
+   * A held button counts as released when no frame with its id has arrived for this long (cars
+   * that send the button frame only while a button is held). Null = only a frame with another
+   * value releases it (cars that send the frame only when something changes).
+   */
+  releaseTimeoutMs: number | null;
+  rules: CanButtonRule[];
+}
+
+/** ADS1115 full-scale ranges (± volts), set by its programmable-gain amplifier. */
+export type Ads1115FullScaleV = 6.144 | 4.096 | 2.048 | 1.024 | 0.512 | 0.256;
+
+/** ADS1115 I²C addresses: ADDR pin tied to GND, VDD, SDA or SCL. */
+export type Ads1115Address = 0x48 | 0x49 | 0x4a | 0x4b;
+
+/** A single-ended ADS1115 input, AIN0–AIN3. */
+export type AdcChannel = 0 | 1 | 2 | 3;
+
+/** A closed voltage range, `minV` ≤ reading ≤ `maxV`. */
+export interface VoltageRange {
+  minV: number;
+  maxV: number;
+}
+
+/** One button of a steering-wheel resistor ladder: the voltage range it produces. */
+export interface SwcWindow {
+  minV: number;
+  maxV: number;
+  /** Acts on press — or on release when `longPressAction` is set. */
+  action: InputAction;
+  /** Acts instead of `action` once the button has been held longer than 0.8 s; null = none. */
+  longPressAction: InputAction | null;
+}
+
+/**
+ * Steering-wheel buttons on a resistor ladder (the "KEY1" / "KEY2" wire aftermarket head units
+ * read), measured through an ADS1115 ADC on `sensors.i2cBus` with a pull-up to 3.3 V: each
+ * button pulls the wire to its own voltage.
+ */
+export interface SwcButtonsConfig {
+  enabled: boolean;
+  /** I²C address, 0x48–0x4B (72–75), set by the ADDR pin: GND, VDD, SDA, SCL. */
+  address: Ads1115Address;
+  channel: AdcChannel;
+  /** Input range; readings above it clip. */
+  fullScaleV: Ads1115FullScaleV;
+  /** The voltage with no button pressed. */
+  idle: VoltageRange;
+  /** One range per button; ranges must not overlap each other or `idle`. */
+  windows: SwcWindow[];
+}
+
 export interface SensorsConfig {
   lightSensor: LightSensorKind;
   gestureSensor: GestureSensorKind;
@@ -305,6 +390,10 @@ export interface SensorsConfig {
     secondary: number | null;
     next: number | null;
   };
+  /** Optional steering-wheel buttons from the car's CAN bus. */
+  canButtons: CanButtonsConfig;
+  /** Optional steering-wheel buttons on a resistor ladder, through an ADS1115 ADC. */
+  swcButtons: SwcButtonsConfig;
   /** Optional fixed location for sun-based night mode when no phone location is available. */
   fallbackLocation: { lat: number; lon: number } | null;
   /** Optional ADAS module feed (newline-delimited JSON over UDP). */

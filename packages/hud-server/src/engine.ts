@@ -1,3 +1,8 @@
+/**
+ * The HUD engine (`@carheadsup/hud-server/engine`). Browser-safe — it depends only on core and
+ * the injected runtime seams — so the in-browser demo runs the same engine as the car; keep
+ * Node.js built-ins out of this module and of `clock.ts`.
+ */
 import {
   composeFrame,
   createInitialState,
@@ -18,8 +23,8 @@ import type {
   PersistedStateWithTrip,
   TripRecord,
 } from '@carheadsup/core';
-import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
-import type { Clock, Logger, Timers } from '@carheadsup/obd';
+import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd/runtime';
+import type { Clock, Logger, Timers } from '@carheadsup/obd/runtime';
 import { EngineClock, SYSTEM_MONOTONIC, monotonicView } from './clock.ts';
 
 /** Clock tick period (drives toast fades, staleness, trip end, brightness smoothing). */

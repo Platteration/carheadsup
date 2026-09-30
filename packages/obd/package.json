@@ -5,7 +5,9 @@
   "description": "ELM327 OBD-II adapter driver, PID polling scheduler, and an ELM327 emulator backed by a vehicle simulation.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./sim": "./src/sim/index.ts",
+    "./runtime": "./src/runtime.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

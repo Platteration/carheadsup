@@ -29,6 +29,7 @@ flowchart LR
   obd["OBD-II port"] --> elm["ELM327-compatible adapter"]
   elm -->|"Bluetooth SPP / USB / Wi-Fi"| pi
   sensors["light sensor, gesture sensor<br/>(I²C), buttons (GPIO)"] --> pi
+  swc["steering-wheel buttons:<br/>CAN HAT (listen-only) or<br/>ADS1115 on the button wire"] --> pi
   phone["Android phone<br/>(companion app)"] <-->|Wi-Fi| pi
 ```
 
@@ -38,7 +39,8 @@ flowchart LR
 - An OBDLink or vLinker adapter over Bluetooth (or USB).
 - A 12 V → 5 V automotive buck converter behind an ignition-sensing power controller.
 - Optional: a light sensor for auto-brightness, an APDS-9960 gesture sensor or three buttons, a
-  DS3231 real-time clock.
+  DS3231 real-time clock; the car's own steering-wheel buttons through the phone (no hardware), a
+  CAN HAT or an ADC ([below](#steering-wheel-buttons)).
 
 ## Computer
 
@@ -259,14 +261,170 @@ Ground: pin 9 or 14. On long cables add an external 10 kΩ pull-up to 3.3 V and 
 to ground at the Pi; with an old `gpiomon` that cannot set pull-ups, the log tells you so and
 `gpio=17,27,22=ip,pu` in `config.txt` sets them at boot.
 
+### Steering-wheel buttons
+
+The car's own buttons can drive the HUD too. Three ways, simplest first:
+
+1. **Pair the phone with the car — no hardware.** With the phone connected to the car's head unit
+   over Bluetooth (hands-free and media audio), the steering wheel's call and media buttons already
+   reach the phone: answer, hang up, next track. The HUD follows the phone's call and media state
+   through the companion app, so the call card and the track toast react to those buttons with
+   nothing to wire or configure. What this cannot do is anything HUD-specific — flip dashboard
+   pages, dismiss an alert, blank the HUD.
+2. **Read the button frames off the CAN bus** (`sensors.canButtons`): cars with a multifunction
+   steering wheel usually send its buttons as CAN frames.
+3. **Measure the resistor ladder** (`sensors.swcButtons`): on many older cars the buttons are
+   resistors on one or two wires, the "KEY1 / KEY2" (or "SWC") wires that aftermarket head units
+   and steering-wheel adapters read.
+
+Buttons read either way can map to any of the HUD's
+[input actions](architecture.md#driver-input), each with an optional second action for a hold
+of more than 0.8 s. A held button acts once, not repeatedly.
+
+#### CAN bus: an MCP2515 CAN HAT
+
+**Hardware.** A CAN HAT made for the Raspberry Pi, with an MCP2515 controller and a 3.3 V
+transceiver (Waveshare RS485 CAN HAT, PiCAN2 and similar). Avoid the cheap blue
+"MCP2515 + TJA1050" Arduino modules: they run at 5 V, which the Pi's GPIO pins do not tolerate.
+Enable it in `/boot/firmware/config.txt` and reboot:
+
+```ini
+dtparam=spi=on
+# oscillator = the crystal on the board (8, 12 or 16 MHz, it is printed on it);
+# interrupt = the GPIO the HAT's INT line uses (see its documentation; 25 on most)
+dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25
+```
+
+`dmesg | grep mcp251x` then reports "successfully initialized" and `ip link` lists `can0`.
+
+**Wiring to the OBD-II port.** High-speed CAN is on **pin 6 (CAN-H)** and **pin 14 (CAN-L)**; signal
+ground is pin 5 (chassis ground pin 4). Connect the HAT's CAN-H to pin 6, CAN-L to pin 14 and
+its GND to pin 5, with a Y-splitter cable so the ELM327 adapter still fits. Leave the HAT's 120 Ω
+terminating resistor **off** (usually a jumper or switch): the car's bus is already terminated at
+both ends. Most cars run this bus at 500 kbit/s.
+
+**Many cars gateway the OBD port.** On most cars from the last 10–15 years (and on many older
+ones), the OBD port is behind a gateway that passes only diagnostic requests and replies — no
+steering-wheel frames. Those are then only on an internal bus (comfort or infotainment CAN, often
+at 100 or 125 kbit/s), which you can reach at the radio's connector, the instrument cluster or the
+steering-column module; the car's wiring diagram names the wires. Splicing into a car's
+internal wiring is more invasive — solder and insulate the joints or use a T-harness, keep the
+twisted pair twisted, and never touch the airbag wiring (yellow connectors and sleeves) in the
+steering column.
+
+**Finding the button frames.** Install can-utils, bring the interface up listen-only (below) and
+watch the bus while you press buttons:
+
+```sh
+sudo apt install can-utils
+sudo ip link set can0 up type can bitrate 500000 listen-only on
+cansniffer -c can0              # one line per id; changing bytes are highlighted
+candump -L can0,5C1:7FF         # then just one id, in the format the HUD reads
+```
+
+Hold one button and look for the id and byte that change exactly while it is held (ignore bytes
+that change all the time — counters and checksums). Write down, per button: the **id** as candump
+prints it (3 hex digits, or 8 for a 29-bit id), the **byte** (0 = the first after `#`), the bits
+that change (**mask**, e.g. `0F` for the low four bits, `FF` for the whole byte) and what they read
+while held (**value**). If nothing shows up at all, try 250000, 125000 or 100000 bit/s. Note also
+whether the frame keeps arriving when nothing is pressed: if it stops when you let go, keep
+`sensors.canButtons.releaseTimeoutMs` (a button counts as released when its frame stops); if the
+car sends a frame only when something changes, set it to `null`. Enter the rules in the settings
+app (*Sensors and buttons → Steering-wheel buttons → From the CAN bus*) or in
+[`config.json`](configuration.md#sensors).
+
+**The listen-only rule.** Always bring the interface up with `listen-only on`. In normal mode a CAN
+controller takes part in the bus even when it sends nothing: it acknowledges every frame and
+transmits error frames when something looks wrong to it — at a wrong bitrate, that disturbs the
+whole bus and can set off warnings in the car. In listen-only mode it never drives the bus. The
+HUD only receives (it runs `candump`, nothing else), checks the mode with
+`ip -details link show can0` when it starts and logs a warning if the interface is not in
+listen-only mode. Do not use `cansend` or other transmitting tools on the car's bus.
+
+To bring `can0` up listen-only at every boot, as root:
+
+```ini
+# /etc/systemd/system/can0-listen-only.service
+[Unit]
+Description=can0 up in listen-only mode (steering-wheel buttons)
+BindsTo=sys-subsystem-net-devices-can0.device
+After=sys-subsystem-net-devices-can0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ip link set can0 up type can bitrate 500000 listen-only on
+ExecStop=/usr/sbin/ip link set can0 down
+
+[Install]
+WantedBy=sys-subsystem-net-devices-can0.device
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now can0-listen-only.service
+ip -details link show can0      # shows "can <LISTEN-ONLY> state ERROR-ACTIVE … bitrate 500000"
+```
+
+The `carheadsup` service needs no extra rights for this (its unit allows CAN sockets).
+
+#### Resistor ladder: an ADS1115 on the button wire
+
+Each button connects a different resistor between the button wire (KEY1) and its ground
+(KEY-GND); a pull-up turns that into a different voltage per button. Some cars split the buttons
+over two wires, KEY1 and KEY2, each with its own ladder; the HUD reads one — choose the wire that
+carries the buttons you want (harness adapters and pinouts label them KEY1/SWC1 and KEY2/SWC2).
+
+An **ADS1115** 16-bit ADC breakout (the 12-bit ADS1015 works the same) on the I²C bus:
+
+```
+Pi 3.3 V (pin 1) ──┬──────────────────── ADS1115 VDD
+                   └── 4.7 kΩ pull-up ──┬── KEY1 (button wire)
+                                        └── 10 kΩ ── ADS1115 A0
+Pi GND (pin 9) ──────── ADS1115 GND ─── KEY-GND / car ground
+Pi SDA (pin 3) ──────── ADS1115 SDA
+Pi SCL (pin 5) ──────── ADS1115 SCL
+                        ADS1115 ADDR ── GND  (address 0x48)
+```
+
+With a 4.7 kΩ pull-up a 1 kΩ button reads about 0.58 V, 2.2 kΩ about 1.05 V and no button the
+full 3.3 V; any pull-up of a few kΩ works, because you measure the real voltages anyway. The
+10 kΩ series resistor protects the ADC input. Set `sensors.swcButtons` (settings app: *From a
+resistor ladder*): address (ADDR to GND = 0x48, VDD = 0x49, SDA = 0x4A, SCL = 0x4B), input A0–A3,
+range ±4.096 V for a 3.3 V pull-up. The HUD reads it 50 times a second; a reading counts once
+three in a row agree (60 ms).
+
+**Calibrating.** Enable the ladder with no button windows, run the HUD with debug logging
+(`CARHEADSUP_LOG_LEVEL=debug` in `/etc/default/carheadsup`, then
+`journalctl -u carheadsup -f | grep SWC`) and hold each button in turn. The log prints the steady
+voltage whenever it moves by more than 50 mV, e.g. `SWC buttons: steady at 1.052 V (no window)`.
+Give each button a window around its voltage (about ±0.1 V, never overlapping the next one), and
+the idle range around the no-button voltage. Readings between windows count as "no button"; the
+first time one settles there, the log says so.
+
+**Safety notes.**
+
+- **Measure before connecting.** With the ignition on, check the button wire against ground with
+  a multimeter. With the original head unit removed it should carry no voltage. If it is still
+  connected, it probably pulls the wire up itself (often to 5 V): then do not add a pull-up, and
+  put a divider in front of the ADC (e.g. 10 kΩ from the wire to A0 and 20 kΩ from A0 to ground)
+  so the input never exceeds the ADS1115's supply — its inputs must stay between GND and VDD
+  (+0.3 V).
+- Never connect the ADC to anything carrying 12 V or load current, and do not measure resistance
+  on a live circuit.
+- The Pi, the ADS1115 and the ladder must share one ground (the car's).
+- Tap the wire behind the radio or at the adapter harness, not inside the steering wheel or the
+  column, where the airbag and its clock spring are.
+
 ### Pin summary
 
 | Function | GPIO | Header pin |
 | --- | --- | --- |
 | 3.3 V for sensors | — | 1 |
-| I²C SDA / SCL (light, gesture, RTC) | 2 / 3 | 3 / 5 |
+| I²C SDA / SCL (light, gesture, ADS1115, RTC) | 2 / 3 | 3 / 5 |
 | Ground | — | 6, 9, 14, 20, 25, 30, 34, 39 |
 | Buttons (example) | 17, 27, 22 | 11, 13, 15 |
+| CAN HAT (MCP2515 on SPI0: MOSI, MISO, SCLK, CE0; INT) | 10, 9, 11, 8; usually 25 | 19, 21, 23, 24; 22 |
 | Shutdown request from the power controller (example) | 26 | 37 |
 | "Halted" signal to the power controller (example) | 16 | 36 |
 
@@ -354,5 +512,7 @@ Rough 2025–2026 street prices in US dollars; they vary a lot by region and sho
 | Light sensor (optional) | BH1750 / VEML7700 / TSL2591 breakout | $3–10 |
 | Gesture sensor (optional) | APDS-9960 breakout | $5–10 |
 | Buttons (optional) | 3 momentary push buttons | $5 |
+| Steering-wheel buttons over CAN (optional) | MCP2515 CAN HAT + OBD-II Y-splitter cable | $20–40 |
+| Steering-wheel resistor ladder (optional) | ADS1115 breakout, two resistors | $5–10 |
 | Real-time clock (optional) | DS3231 module (not needed on a Pi 5 with its battery) | $5 |
 | **Total** | | **about $200–450** |

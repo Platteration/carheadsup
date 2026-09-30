@@ -1,0 +1,539 @@
+/*
+ * Drive simulator page. One dark look on purpose: the HUD's world, where the display is black
+ * glass and everything around it is a car interior at dusk. Controls are cockpit pushbuttons whose
+ * indicator lights while latched. Type is B612, the cockpit typeface the HUD itself uses.
+ *
+ * Layout: the windshield (live HUD, readout, note) beside a console of controls on wide screens;
+ * on narrow ones the HUD stays pinned on top while the console scrolls under it.
+ */
+:root {
+  color-scheme: dark;
+  --bg: #0b0e13;
+  --panel: #11161d;
+  --cap: #19202a;
+  --cap-top: #202834;
+  --line: #262f3c;
+  --line-strong: #3a4657;
+  --text: #e7ecf2;
+  --muted: #8d98a8;
+  --accent: #38d2ff;
+  --caution: #ffb300;
+  --alarm: #ff5a4f;
+  --glass: #000000;
+  --shine: rgb(255 255 255 / 0.05);
+  --shade: rgb(0 0 0 / 0.55);
+  /* Indicator colour of latched buttons; groups override it. */
+  --on: var(--accent);
+
+  --font-ui: 'B612', system-ui, sans-serif;
+  --font-num: 'B612 Mono', ui-monospace, monospace;
+  --size-xs: 11px;
+  --size-s: 12px;
+  --size-m: 13px;
+  --size-l: 20px;
+
+  box-sizing: border-box;
+  height: 100%;
+  background: var(--bg);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: inherit;
+}
+
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 var(--size-m) / 1.45 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+
+#app {
+  height: 100%;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Page */
+
+.demo {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+  max-width: 1680px;
+  margin-inline: auto;
+  padding-inline: max(16px, env(safe-area-inset-left, 0px))
+    max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 14px 24px;
+}
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.masthead > .key {
+  flex: none;
+  white-space: nowrap;
+}
+
+.masthead__name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.masthead__brand {
+  margin: 0;
+  color: var(--accent);
+  font: 700 var(--size-m) / 1 var(--font-num);
+  letter-spacing: 0.04em;
+}
+
+.masthead__title {
+  margin: 0;
+  font: 700 var(--size-l) / 1.1 var(--font-ui);
+  text-wrap: balance;
+}
+
+.layout {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Windshield: the HUD, pinned on top while the controls scroll (narrow screens) */
+
+.windshield {
+  position: sticky;
+  top: env(safe-area-inset-top, 0px);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  margin-block: -8px 0;
+  padding-block: 8px 10px;
+  background: var(--bg);
+  box-shadow: 0 10px 12px -10px var(--shade);
+}
+
+.stage {
+  min-width: 0;
+}
+
+/* In line with the readout under it (centred only in full screen). */
+.stage .preview {
+  justify-content: flex-start;
+}
+
+.stage .preview__frame {
+  border-radius: 8px;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 12px 32px var(--shade);
+}
+
+.stage--fullscreen {
+  display: flex;
+  align-items: center;
+  background: var(--glass);
+}
+
+.stage--fullscreen .preview {
+  justify-content: center;
+}
+
+.stage--fullscreen .preview__frame {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.windshield__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.readout {
+  display: flex;
+  gap: 6px 14px;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font: 400 var(--size-s) / 1.3 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.readout__part:first-child {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.readout__part:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.readout__label {
+  color: var(--muted);
+}
+
+@media (max-width: 480px) {
+  .readout__label--optional {
+    display: none;
+  }
+}
+
+.note {
+  max-width: 68ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--size-s);
+}
+
+.note strong {
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Console */
+
+.console {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr));
+  gap: 0 20px;
+  min-width: 0;
+  padding: 4px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding-block: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.group--caution {
+  --on: var(--caution);
+}
+
+.group--alarm {
+  --on: var(--alarm);
+}
+
+.group__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.group__title,
+.field__label {
+  margin: 0;
+  color: var(--muted);
+  font: 700 var(--size-xs) / 1.2 var(--font-ui);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.group__title {
+  color: var(--text);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 12px;
+}
+
+.row > .field {
+  flex: 1 1 12em;
+}
+
+.keys {
+  display: grid;
+  gap: 8px;
+}
+
+.keys--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.keys--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.keys--stacked .key {
+  flex-direction: column;
+  gap: 3px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--size-s);
+}
+
+/* Pushbuttons */
+
+.key {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 8px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: linear-gradient(var(--cap-top), var(--cap));
+  box-shadow:
+    inset 0 1px 0 var(--shine),
+    0 1px 0 var(--shade);
+  color: var(--text);
+  font: 700 var(--size-s) / 1.2 var(--font-ui);
+  letter-spacing: 0.02em;
+  text-align: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    border-color 0.12s,
+    background-color 0.12s,
+    transform 0.06s;
+}
+
+.key:hover {
+  border-color: var(--line-strong);
+}
+
+.key:active,
+.key--flash {
+  border-color: var(--accent);
+  background: var(--cap);
+  transform: translateY(1px);
+}
+
+.key--small {
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: var(--size-xs);
+}
+
+/* The indicator light of a latching button. */
+.key--latch::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.key--latch[aria-pressed='true'] {
+  border-color: var(--on);
+  color: var(--on);
+}
+
+.key--latch[aria-pressed='true']::before {
+  background: var(--on);
+  box-shadow: 0 0 8px var(--on);
+}
+
+.key__code {
+  font-family: var(--font-num);
+}
+
+.key__detail {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.key--latch[aria-pressed='true'] .key__detail {
+  color: inherit;
+}
+
+.key__kbd {
+  padding: 2px 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  color: var(--muted);
+  font: 400 10px / 1 var(--font-num);
+}
+
+@media (hover: none) {
+  .key__kbd {
+    display: none;
+  }
+}
+
+/* Fields */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field--slider {
+  display: grid;
+  grid-template-columns: 7.5em minmax(0, 1fr) 4.5em;
+  align-items: center;
+  gap: 10px;
+}
+
+.field__value {
+  color: var(--text);
+  font: 400 var(--size-s) / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.seg {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.seg__item {
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 700 var(--size-s) / 1.2 var(--font-ui);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.seg__item:hover {
+  color: var(--text);
+}
+
+.seg__item[aria-pressed='true'] {
+  background: var(--cap-top);
+  box-shadow: inset 0 -2px 0 var(--accent);
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Wide screens and phones held sideways: the HUD beside the console, nothing pinned, the
+   console scrolls on its own (the query matches WIDE_QUERY in App.tsx) */
+
+@media (min-width: 1000px) and (min-height: 560px),
+  (min-width: 700px) and (orientation: landscape) {
+  .demo {
+    height: 100%;
+  }
+
+  .layout {
+    display: grid;
+    flex: 1;
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 384px);
+    /* A definite row: the HUD is sized to fit it, so it must not size the row in turn. */
+    grid-template-rows: minmax(0, 1fr);
+    gap: 20px;
+    min-height: 0;
+  }
+
+  .windshield {
+    position: static;
+    min-height: 0;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .console {
+    display: block;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+}
+
+.group:last-child {
+  border-bottom: 0;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Motion */
+
+@media (prefers-reduced-motion: reduce) {
+  .key {
+    transition: none;
+  }
+
+  .key:active,
+  .key--flash {
+    transform: none;
+  }
+
+  /* The HUD's blinking cues hold steady on this page (in the car they blink to draw the eye). */
+  .stage .hud * {
+    animation: none !important;
+  }
+}

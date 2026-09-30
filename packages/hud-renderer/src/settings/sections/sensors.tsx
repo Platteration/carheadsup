@@ -21,6 +21,7 @@ import {
 } from '../ui/fields.tsx';
 import type { Option } from '../ui/fields.tsx';
 import { useForm } from '../ui/form-context.ts';
+import { SteeringWheelButtons } from './steering-wheel.tsx';
 
 const LIGHT_SENSORS: ReadonlyArray<Option<LightSensorKind>> = [
   { value: 'none', label: 'None (use time of day)' },
@@ -99,6 +100,7 @@ export function SensorsSection({ root }: { root: Scope<HudConfig> }) {
           </FieldGrid>
         </FieldGroup>
       </Card>
+      <SteeringWheelButtons scope={sensors} />
       <Card>
         <FallbackLocation scope={sensors} />
         <FieldGroup title="Driver-assist module">

@@ -1,7 +1,7 @@
 import { DEFAULT_CONFIG, type HudConfig } from '@carheadsup/core';
 import { describe, expect, it, vi } from 'vitest';
 import type { UdpSocketLike } from '../../src/sensors/adas-udp.ts';
-import { GpioButtonSource, createSensorSources } from '../../src/sensors/index.ts';
+import { CanButtonSource, GpioButtonSource, createSensorSources } from '../../src/sensors/index.ts';
 import type { I2cOpener } from '../../src/sensors/i2c.ts';
 import { FakeClock, FakeI2cBus, fakeSpawn, recordingContext, respond } from './fakes.ts';
 
@@ -47,11 +47,14 @@ describe('createSensorSources', () => {
       'light-sensor',
       'gesture-sensor',
       'gpio-buttons',
+      'can-buttons',
+      'swc-buttons',
       'adas-udp',
     ]);
     const { ctx, events } = recordingContext(clock);
     for (const source of sources) await source.start(ctx);
     await (sources[2] as GpioButtonSource).whenReady();
+    await (sources[3] as CanButtonSource).whenReady();
     await clock.advance(10_000);
     expect(openI2c).not.toHaveBeenCalled();
     expect(spawn.children).toEqual([]);
@@ -74,7 +77,13 @@ describe('createSensorSources', () => {
         return respond(child, 'Usage: gpiomon [OPTIONS] <line>...\n  --chip  --bias  --format\n');
       if (child.command === 'gpiodetect')
         return respond(child, 'gpiochip0 [pinctrl-bcm2711] (58 lines)\n');
+      if (child.command === 'ip') return respond(child, '', 1, 'Device "can0" does not exist.\n');
     });
+    const ready = () =>
+      Promise.all([
+        (sources[2] as GpioButtonSource).whenReady(),
+        (sources[3] as CanButtonSource).whenReady(),
+      ]);
     const udp = fakeUdpFactory();
     const sources = createSensorSources(config(), { openI2c, spawn, createUdpSocket: udp.factory });
     const { ctx } = recordingContext(clock);
@@ -84,18 +93,36 @@ describe('createSensorSources', () => {
       lightSensor: 'veml7700',
       gestureSensor: 'apds9960',
       buttons: { primary: 17, secondary: null, next: null },
+      canButtons: {
+        interface: 'can0',
+        releaseTimeoutMs: 500,
+        rules: [
+          {
+            id: '5C1',
+            byte: 0,
+            mask: 'FF',
+            value: '01',
+            action: 'next-page',
+            longPressAction: null,
+          },
+        ],
+      },
+      swcButtons: { ...DEFAULT_CONFIG.sensors.swcButtons, enabled: true },
       adasUdpPort: 5005,
     });
     for (const source of sources) await source.updateConfig?.(enabled);
-    await (sources[2] as GpioButtonSource).whenReady();
+    await ready();
     await clock.advance(100);
-    expect(opened).toEqual([1, 1]);
+    expect(opened).toEqual([1, 1, 1]);
     expect(
       spawn.children.filter(
         (c) =>
           c.command === 'gpiomon' && !c.args.includes('--version') && !c.args.includes('--help'),
       ),
     ).toHaveLength(1);
+    expect(spawn.children.filter((c) => c.command === 'candump').map((c) => c.args)).toEqual([
+      ['-L', 'can0,5C1:C00007FF'],
+    ]);
     expect(udp.sockets.map((s) => s.boundTo)).toEqual([5005]);
 
     // Only the ADAS port changes: nothing else restarts.
@@ -105,9 +132,9 @@ describe('createSensorSources', () => {
         ...enabled,
         sensors: { ...enabled.sensors, adasUdpPort: 5006 },
       });
-    await (sources[2] as GpioButtonSource).whenReady();
+    await ready();
     await clock.advance(100);
-    expect(opened).toEqual([1, 1]);
+    expect(opened).toEqual([1, 1, 1]);
     expect(spawn.children.length).toBe(spawned);
     expect(udp.sockets.map((s) => [s.boundTo, s.closed])).toEqual([
       [5005, true],

@@ -83,8 +83,9 @@ notification and sends it to the HUD.
 
 ### Phone and media
 
-- **Caller ID** with accept / decline by gesture sensor (swipe right / left), GPIO buttons, a
-  keyboard on the kiosk, or the companion app's remote screen.
+- **Caller ID** with accept / decline by gesture sensor (swipe right / left), GPIO buttons, the
+  car's steering-wheel buttons (through the paired phone, or read from the CAN bus or the button
+  wire), a keyboard on the kiosk, or the companion app's remote screen.
 - **Song and artist** as a toast on track change that fades out after a few seconds.
 - **Messages: sender only.** Message text never reaches the HUD (the protocol has no field for it
   and the HUD rejects messages that try); the phone reads the message aloud instead.
@@ -150,9 +151,10 @@ share test vectors with the server). What has **not** been verified:
 - **Real cars and adapters.** The OBD code has only met the built-in ELM327 emulator and the
   vehicle simulator, not a real ELM327 clone, OBDLink or car; adapter quirks, slow ECUs and
   manufacturer PIDs may need work.
-- **Raspberry Pi peripherals.** The GPIO buttons, I²C light and gesture sensors, backlight
-  control, the kiosk on a real display, the hotspot, mDNS on the car's Wi-Fi and the ignition
-  power-down are covered by tests with fakes and by script linting, not on a Pi.
+- **Raspberry Pi peripherals.** The GPIO buttons, I²C light and gesture sensors, the
+  steering-wheel inputs (CAN HAT with `candump`, ADS1115 ladder), backlight control, the kiosk on
+  a real display, the hotspot, mDNS on the car's Wi-Fi and the ignition power-down are covered by
+  tests with fakes and by script linting, not on a Pi or in a car.
 - **The Android app (`:app`).** It could not be compiled here (no Android SDK); only its
   `:protocol` module is built and tested, and the app code was type-checked against stubs. The
   notification parsing, media, calls, discovery, pairing screens and file export have not run on
@@ -190,6 +192,19 @@ Simulated drives use their own data directory (`$XDG_DATA_HOME/carheadsup/sim`, 
 `~/.local/share/carheadsup/sim`), so they never mix with real trips. In the developer console
 you can take over from the script (*manual* mode) or trigger phone and ADAS events at any time.
 
+### Without a server: the drive simulator
+
+```sh
+npm run build:demo
+```
+
+builds `packages/hud-renderer/dist-demo/index.html`, one self-contained page (under 1 MB) that
+runs the whole HUD in the browser and loads nothing from anywhere. It runs the server's engine
+and simulation (the same scripted drive and simulated phone as above), the core's rules and the
+real HUD view, with controls for the car, the phone, faults, light, driver assistance, units and
+layout. Open it from disk or put it on any static host. `dist-demo/artifact.html` is the same
+page without the document skeleton, for hosts that supply their own.
+
 ## Architecture
 
 ```mermaid
@@ -202,7 +217,7 @@ flowchart LR
   end
   subgraph pi["Raspberry Pi: hud-server (Node.js)"]
     obd["@carheadsup/obd<br/>ELM327 driver + PID poller"]
-    inputs["light / gesture sensors, GPIO buttons,<br/>ADAS UDP feed, clock ticks"]
+    inputs["light / gesture sensors, GPIO and<br/>steering-wheel buttons,<br/>ADAS UDP feed, clock ticks"]
     reduce["reduce(state, event, config)<br/>pure, @carheadsup/core"]
     compose["composeFrame(state, config)<br/>pure, @carheadsup/core"]
     effects["effects: call actions, trips,<br/>persistence"]

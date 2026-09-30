@@ -69,6 +69,7 @@ sudo apt install -y git curl build-essential python3 \
 | `avahi-daemon`, `avahi-utils` | mDNS: the server advertises itself as `_carheadsup._tcp` with `avahi-publish-service` so the phone finds it |
 | `gpiod` | `gpiomon`, which the server uses to read the buttons |
 | `i2c-tools` | `i2cdetect` for checking sensor wiring |
+| `can-utils` (not in the list above) | Only for [steering-wheel buttons from the CAN bus](hardware.md#can-bus-an-mcp2515-can-hat): `candump`, which the server reads them with, and `cansniffer` for finding them |
 | `bluez` | `bluetoothctl` and `rfcomm` for a Bluetooth OBD adapter |
 | `cage`, `chromium-browser` | The kiosk: a single-application Wayland compositor and the browser. On newer images the browser package is called `chromium`; either works. |
 

@@ -252,6 +252,16 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
     i2cBus: 1,
     lightSensorGain: 1,
     buttons: { primary: null, secondary: null, next: null },
+    canButtons: { interface: null, releaseTimeoutMs: 500, rules: [] },
+    swcButtons: {
+      enabled: false,
+      address: 0x48,
+      channel: 0,
+      fullScaleV: 4.096,
+      // A ladder pulled up to 3.3 V reads about 3.3 V with no button pressed.
+      idle: { minV: 3, maxV: 3.6 },
+      windows: [],
+    },
     fallbackLocation: null,
     adasUdpPort: null,
     adasAllowedSenders: [],

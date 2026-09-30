@@ -7,7 +7,8 @@ import type {
   SimControl,
   SimStatus,
 } from '@carheadsup/core';
-import type { Clock, Logger, Timers, VehicleSimulator } from '@carheadsup/obd';
+import type { Clock, Logger, Timers } from '@carheadsup/obd/runtime';
+import type { VehicleSimulator } from '@carheadsup/obd/sim';
 
 /**
  * Seams between the server core (engine, HTTP/WebSocket, persistence) and the pluggable

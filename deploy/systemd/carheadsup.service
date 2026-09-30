@@ -48,8 +48,10 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectHostname=yes
 ProtectProc=invisible
-# AF_UNIX: D-Bus for avahi-publish-service; AF_NETLINK: network interface enumeration.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# AF_UNIX: D-Bus for avahi-publish-service; AF_NETLINK: network interface enumeration (and
+# `ip -details link show` for the CAN buttons); AF_CAN: candump reading steering-wheel buttons
+# (receive only; the interface itself is brought up listen-only by root, see docs/hardware.md).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_CAN
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

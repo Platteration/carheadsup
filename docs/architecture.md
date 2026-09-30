@@ -25,7 +25,7 @@ contract between all of them.
 | --- | --- | --- |
 | `@carheadsup/core` | All domain logic and the shared types. No I/O, no clock, no randomness; runs in Node.js and the browser. | `state/reducer.ts`, `compose/compose.ts`, `alerts/`, `display/` (context, brightness, sun, shift light), `vehicle/` (fuel, gear), `trip/`, `maintenance/`, `obd/` (PIDs, formulas, DTC database), `config/` (defaults, presets, schema), `protocol/validate.ts` |
 | `@carheadsup/obd` | Talks to the car. | `transport.ts` (serial, TCP), `elm327.ts` (driver), `poller.ts` (PID scheduling), `service.ts` (connect / reconnect loop, events), `sim/` (ELM327 emulator and vehicle simulator) |
-| `@carheadsup/hud-server` | The on-car service that wires everything together. | `app.ts` (composition), `engine.ts` (reducer loop, effects, frame timer), `http/` (REST API, static files, auth), `ws/` (phone and renderer sockets), `sensors/` (light, gesture, GPIO buttons, ADAS UDP), `outputs/backlight.ts`, `store/` (config, state, trips), `discovery/mdns.ts`, `sim/` |
+| `@carheadsup/hud-server` | The on-car service that wires everything together. | `app.ts` (composition), `engine.ts` (reducer loop, effects, frame timer), `http/` (REST API, static files, auth), `ws/` (phone and renderer sockets), `sensors/` (light, gesture, GPIO buttons, steering-wheel buttons over CAN or an ADC, ADAS UDP), `outputs/backlight.ts`, `store/` (config, state, trips), `discovery/mdns.ts`, `sim/` |
 | `@carheadsup/hud-renderer` | The three web pages. | `hud/` (projected HUD), `settings/` (settings app), `dev/` (developer console), `common/` (WebSocket feed, REST client, staleness) |
 | `companion-android` | The phone app. `:protocol` mirrors the TypeScript contract in Kotlin; `:app` is the Android UI and services. | see [its README](../companion-android/README.md) |
 
@@ -41,7 +41,7 @@ flowchart LR
     obd["OBD service<br/>obd/link, obd/samples,<br/>obd/dtcs, obd/vin"]
     phone["phone channel<br/>nav, road, hazards, media,<br/>call, message, location"]
     sensors["sensors<br/>sensor/light, adas/*"]
-    input["buttons, gestures,<br/>keyboard, phone remote<br/>input"]
+    input["buttons, gestures, steering wheel,<br/>keyboard, phone remote<br/>input"]
     clock["engine timer<br/>tick (100 ms),<br/>clock/sync"]
     api["REST API<br/>config, maintenance/done,<br/>odometer/set"]
   end
@@ -254,6 +254,25 @@ The companion app's remote screen sends the same actions over the phone socket (
 `POST /api/input` when the socket is down), and the developer console has buttons for all of
 them.
 
+**Steering-wheel buttons** map to any of the seven actions, button by button, each with an
+optional second action for a hold of more than 0.8 s (the short press then acts on release, as
+for the GPIO accept button); a held button acts once. Two sources read them
+([hardware](hardware.md#steering-wheel-buttons), [options](configuration.md#sensors)):
+
+- **CAN bus** (`sensors/can/`): can-utils' `candump -L` on a SocketCAN interface, supervised like
+  `gpiomon`, with kernel filters for the configured ids. A pure parser (`candump.ts`: classic and
+  CAN FD frames, 11- and 29-bit ids) feeds a pure rule engine (`rules.ts`: id, byte, mask, value;
+  30 ms debounce; release by another value or when the frame stops for `releaseTimeoutMs`),
+  which the source wakes with a timer at its next deadline. The HUD never transmits; it checks
+  with `ip -details link show` that the interface is in listen-only mode and warns if not.
+- **Resistor ladder** (`sensors/swc/`): an ADS1115 ADC on the I²C bus, run by the shared I²C
+  device runner in continuous mode and read every 20 ms. A pure detector (`ladder.ts`) matches
+  voltages to the configured windows and counts a button after three readings in a row; at debug
+  log level it logs the steady voltage whenever it moves by more than 50 mV, for calibration.
+
+Without any of that, a phone paired with the car over Bluetooth already receives the steering
+wheel's call and media buttons, and the HUD follows the phone's call and media state.
+
 ## The server
 
 `createHudServer` (`hud-server/src/app.ts`) composes the service:
@@ -267,11 +286,11 @@ them.
 2. Apply runtime overrides that are never saved: `--sim` switches the OBD transport to the
    simulator (and adds its tyre-pressure PIDs), `--port` / `--host` override `server.port` /
    `server.host`.
-3. Build the engine, the OBD link, the sensor sources (light, gesture, GPIO buttons, ADAS UDP —
-   each idles quietly when its hardware is absent or disabled), the frame sinks (backlight; the
-   renderer channel tells the page whether the backlight follows the brightness, so the page
-   does not dim as well), the phone and renderer channels, and the HTTP server; listen; start
-   everything; advertise over mDNS.
+3. Build the engine, the OBD link, the sensor sources (light, gesture, GPIO buttons, CAN and
+   resistor-ladder steering-wheel buttons, ADAS UDP — each idles quietly when its hardware is
+   absent or disabled), the frame sinks (backlight; the renderer channel tells the page whether
+   the backlight follows the brightness, so the page does not dim as well), the phone and
+   renderer channels, and the HTTP server; listen; start everything; advertise over mDNS.
 4. On `SIGINT` / `SIGTERM`, write the persisted state (including the trip in progress) first —
    a supercapacitor or UPS HAT may not last long — then stop everything in reverse order (each
    step limited to 5 s), write the state once more if it changed meanwhile and flush the trip
@@ -284,8 +303,9 @@ phone channel (disconnects a phone whose proof no longer matches the pairing tok
 `server.port` or `server.host` needs a restart.
 
 Failures stay local: the OBD service reconnects with a back-off that doubles up to 30 s; the
-`gpiomon` and `avahi-publish-service` helpers are supervised and restarted; an I²C sensor that
-fails is re-initialised every 10 s; a sink or source that throws is logged and skipped.
+`gpiomon`, `candump` and `avahi-publish-service` helpers are supervised and restarted; an I²C
+device that fails is re-initialised every 10 s; a sink or source that throws is logged and
+skipped.
 
 ## Persistence
 
@@ -393,8 +413,10 @@ physical access to the Pi (or its SD card) has everything.
   rpm, throttle, pedal, MAF or MAP, fuel rate) — up to six PIDs per request on CAN — plus at most
   two requests for due medium (1 s), slow (5 s) and very slow (10 s) PIDs. How many cycles per
   second you get depends on the adapter and the car; see [obd.md](obd.md#polling).
-- **Sensors**: light sensor at 5 Hz, gesture sensor polled every 40 ms, backlight written at most
-  10 times a second and only on a change of at least 1 % (looked for every 10 s while missing).
+- **Sensors**: light sensor at 5 Hz, gesture sensor polled every 40 ms, steering-wheel ladder ADC
+  at 50 Hz, CAN button frames filtered in the kernel (only the configured ids reach the HUD),
+  backlight written at most 10 times a second and only on a change of at least 1 % (looked for
+  every 10 s while missing).
 - **Rendering**: the page is Preact with a single CSS `matrix3d()` transform for mirroring,
   rotation and keystone correction, which the browser composites on the GPU.
 - **Disk**: persistence is coalesced (see above), so the SD card sees a few small writes per

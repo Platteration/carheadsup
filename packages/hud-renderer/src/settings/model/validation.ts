@@ -50,6 +50,12 @@ const RULE_MESSAGES: Readonly<Record<string, string>> = {
   'alerts.voltageLowOffV': 'Must be below the over-voltage threshold',
   'maintenance.items[].intervalKm': 'Set a distance or a time interval (or both)',
   'sensors.buttons.primary': 'Each button needs its own GPIO line',
+  'sensors.canButtons.rules[]': 'Same frame, byte, mask and value as another rule',
+  'sensors.canButtons.rules[].id': '3 hex digits (up to 7FF), or 8 for a 29-bit id',
+  'sensors.canButtons.rules[].mask': 'A mask of 00 would match every frame',
+  'sensors.canButtons.rules[].value': 'Has bits outside the mask, so it could never match',
+  'sensors.swcButtons.idle.minV': 'Must be below the upper end',
+  'sensors.swcButtons.windows[].minV': 'Must be below the upper end',
 };
 
 /** Short wording for format checks on fields that sit in narrow columns. */
@@ -57,6 +63,8 @@ const FORMAT_MESSAGES: Readonly<Record<string, string>> = {
   'obd.customPids[].mode': '2 hex digits',
   'obd.customPids[].pid': '2, 4 or 6 hex digits',
   'obd.customPids[].header': '3, 6 or 8 hex digits',
+  'sensors.canButtons.rules[].mask': '2 hex digits',
+  'sensors.canButtons.rules[].value': '2 hex digits',
 };
 
 /** `a.b[3].c` → `a.b[].c`, for looking up per-row messages. */

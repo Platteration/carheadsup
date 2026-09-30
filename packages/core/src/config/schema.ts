@@ -1,8 +1,23 @@
 import { z } from 'zod';
 import { compileFormula } from '../obd/formula.ts';
+import {
+  ADC_CHANNELS,
+  ADS1115_ADDRESSES,
+  ADS1115_FULL_SCALES,
+  CAN_MAX_BYTE_INDEX,
+  MAX_CAN_BUTTON_RULES,
+  MAX_SWC_WINDOWS,
+  canRuleKey,
+  formatVoltageRange,
+  parseCanId,
+  parseHexByte,
+  rangesOverlap,
+  valueFitsMask,
+} from './buttons.ts';
 import { normalizeIpAddress } from './ip.ts';
 import { DRIVING_CONTEXTS } from '../types/config.ts';
-import type { HudConfig, WidgetId, Zone } from '../types/config.ts';
+import type { Ads1115FullScaleV, HudConfig, WidgetId, Zone } from '../types/config.ts';
+import { INPUT_ACTIONS } from '../types/events.ts';
 import { SIGNAL_IDS } from '../types/signals.ts';
 
 /**
@@ -54,6 +69,9 @@ export const LAYOUT_ZONES = [
 /** Fails to compile if a WidgetId or Zone is added to the contract but not listed above. */
 export type WidgetIdsAreExhaustive = AssertTrue<Equals<(typeof WIDGET_IDS)[number], WidgetId>>;
 export type LayoutZonesAreExhaustive = AssertTrue<Equals<(typeof LAYOUT_ZONES)[number], Zone>>;
+export type FullScalesAreExhaustive = AssertTrue<
+  Equals<(typeof ADS1115_FULL_SCALES)[number], Ads1115FullScaleV>
+>;
 
 // ---------------------------------------------------------------------------
 // Cross-field rules
@@ -506,6 +524,141 @@ const adasAllowedSendersSchema = z
   .max(MAX_ADAS_ALLOWED_SENDERS)
   .superRefine(uniqueBy((address) => normalizeIpAddress(address) ?? address, null, 'address'));
 
+const inputActionSchema = z.enum(INPUT_ACTIONS);
+
+/**
+ * A Linux network interface name (at most 15 characters). Commas and colons are excluded because
+ * the name is passed to candump as `<ifname>,<filter>…`; a leading "-" would read as an option.
+ */
+const CAN_INTERFACE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$/;
+const HEX_BYTE = /^[0-9A-Fa-f]{2}$/;
+
+const canIdSchema = z
+  .string()
+  .refine(
+    (id) => parseCanId(id) !== null,
+    'expected 3 hex digits for an 11-bit id (up to 7FF) or 8 for a 29-bit id (up to 1FFFFFFF)',
+  );
+
+const canButtonRuleSchema = withRules(
+  z.object({
+    id: canIdSchema,
+    byte: int(0, CAN_MAX_BYTE_INDEX),
+    mask: z
+      .string()
+      .regex(HEX_BYTE, 'expected 2 hex digits such as "0F"')
+      .refine((mask) => parseHexByte(mask) !== 0, 'a mask of 00 would match every frame'),
+    value: z.string().regex(HEX_BYTE, 'expected 2 hex digits such as "01"'),
+    action: inputActionSchema,
+    longPressAction: inputActionSchema.nullable(),
+  }),
+  [
+    {
+      fields: ['value', 'mask'],
+      message: (r) =>
+        `value ${r.value} sets bits outside mask ${r.mask}, so the rule could never match`,
+      holds: (r) => {
+        const value = parseHexByte(r.value);
+        const mask = parseHexByte(r.mask);
+        // A 00 mask is reported by its own check.
+        return value === null || mask === null || mask === 0 || valueFitsMask(value, mask);
+      },
+    },
+  ],
+);
+
+const canButtonsSchema = z.object({
+  interface: z
+    .string()
+    .regex(CAN_INTERFACE, 'expected a network interface name such as "can0"')
+    .nullable(),
+  releaseTimeoutMs: int(50, 10_000).nullable(),
+  rules: z
+    .array(canButtonRuleSchema)
+    .max(MAX_CAN_BUTTON_RULES)
+    .superRefine(uniqueBy(canRuleKey, null, 'rule')),
+});
+
+/** Voltages the ADS1115 can be set up to measure (its widest range is ±6.144 V). */
+const voltsSchema = num(0, ADS1115_FULL_SCALES[0]);
+
+const lowBelowHigh = {
+  fields: ['minV', 'maxV'],
+  message: (v: { minV: number; maxV: number }) =>
+    `minV must be below maxV (${v.minV} >= ${v.maxV})`,
+  holds: (v: { minV: number; maxV: number }) => v.minV < v.maxV,
+} as const;
+
+const voltageRangeSchema = withRules(z.object({ minV: voltsSchema, maxV: voltsSchema }), [
+  lowBelowHigh,
+]);
+
+const swcWindowSchema = withRules(
+  z.object({
+    minV: voltsSchema,
+    maxV: voltsSchema,
+    action: inputActionSchema,
+    longPressAction: inputActionSchema.nullable(),
+  }),
+  [lowBelowHigh],
+);
+
+/** Button windows must not overlap: one voltage identifies one button. */
+const swcWindowsSchema = z
+  .array(swcWindowSchema)
+  .max(MAX_SWC_WINDOWS)
+  .superRefine((windows, ctx) => {
+    windows.forEach((window, index) => {
+      const other = windows.findIndex((w, i) => i < index && rangesOverlap(w, window));
+      if (other >= 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [index],
+          message: `overlaps window ${other + 1} (${formatVoltageRange(windows[other] ?? window)})`,
+        });
+      }
+    });
+  });
+
+const swcButtonsSchema = withRules(
+  z.object({
+    enabled: bool,
+    address: z.literal(ADS1115_ADDRESSES, {
+      error: 'expected an ADS1115 address: 0x48–0x4B (72–75)',
+    }),
+    channel: z.literal(ADC_CHANNELS),
+    fullScaleV: z.literal(ADS1115_FULL_SCALES),
+    idle: voltageRangeSchema,
+    windows: swcWindowsSchema,
+  }),
+  [
+    {
+      fields: ['idle', 'fullScaleV'],
+      message: (v) =>
+        `the idle range (${formatVoltageRange(v.idle)}) must lie within the ±${v.fullScaleV} V input range`,
+      holds: (v) => v.idle.maxV <= v.fullScaleV,
+    },
+    {
+      fields: ['windows', 'fullScaleV'],
+      message: (v) => {
+        const index = v.windows.findIndex((w) => w.maxV > v.fullScaleV);
+        const window = v.windows[index];
+        return `window ${index + 1}${window ? ` (${formatVoltageRange(window)})` : ''} must lie within the ±${v.fullScaleV} V input range`;
+      },
+      holds: (v) => v.windows.every((w) => w.maxV <= v.fullScaleV),
+    },
+    {
+      fields: ['windows', 'idle'],
+      message: (v) => {
+        const index = v.windows.findIndex((w) => rangesOverlap(w, v.idle));
+        const window = v.windows[index];
+        return `window ${index + 1}${window ? ` (${formatVoltageRange(window)})` : ''} overlaps the idle range (${formatVoltageRange(v.idle)})`;
+      },
+      holds: (v) => v.windows.every((w) => !rangesOverlap(w, v.idle)),
+    },
+  ],
+);
+
 const sensorsSchema = z.object({
   lightSensor: z.enum(['none', 'bh1750', 'veml7700', 'tsl2591']),
   gestureSensor: z.enum(['none', 'apds9960']),
@@ -521,6 +674,8 @@ const sensorsSchema = z.object({
       },
     },
   ]),
+  canButtons: canButtonsSchema,
+  swcButtons: swcButtonsSchema,
   fallbackLocation: z.object({ lat: num(-90, 90), lon: num(-180, 180) }).nullable(),
   adasUdpPort: int(1, 65_535).nullable(),
   adasAllowedSenders: adasAllowedSendersSchema,

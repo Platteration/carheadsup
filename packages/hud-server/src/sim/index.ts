@@ -1,5 +1,11 @@
+/**
+ * `@carheadsup/hud-server/sim` — the simulated vehicle and peripherals behind `--sim`: the
+ * VehicleSimulator, the scenario-synced phone, light sensor and ADAS module. Browser-safe (it
+ * imports only core, `@carheadsup/obd/sim` and `/runtime` and pure server modules), so the
+ * in-browser demo runs the same simulation as the server; keep Node.js built-ins out of it.
+ */
 import type { HudConfig, SimStatus } from '@carheadsup/core';
-import { SimulationClock, VehicleSimulator } from '@carheadsup/obd';
+import { SimulationClock, VehicleSimulator } from '@carheadsup/obd/sim';
 import { phoneMessageToEvents } from '../phone/translate.ts';
 import type { PhoneMessageTranslator, RuntimeDeps, Simulation } from '../sources/types.ts';
 import { SimAdas, SimEnvironment } from './peripherals.ts';
@@ -7,6 +13,14 @@ import { SimPhone } from './phone.ts';
 
 export { SimAdas, SimEnvironment } from './peripherals.ts';
 export { SimPhone } from './phone.ts';
+export { phoneMessageToEvents } from '../phone/translate.ts';
+export type {
+  EventSource,
+  PhoneMessageTranslator,
+  RuntimeDeps,
+  Simulation,
+  SourceContext,
+} from '../sources/types.ts';
 
 export interface SimulationOptions {
   /** Phone-message translator; defaults to the one real phone sessions use. */

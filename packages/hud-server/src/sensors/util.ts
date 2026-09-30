@@ -3,7 +3,7 @@
  * bookkeeping, exponential backoff, named timers on an injected {@link Timers}, a token-bucket
  * rate limiter and error inspection.
  */
-import type { Clock, Logger, Timers } from '@carheadsup/obd';
+import type { Clock, Logger, Timers } from '@carheadsup/obd/runtime';
 
 /** Human-readable message for any thrown value. */
 export function errorMessage(err: unknown): string {
