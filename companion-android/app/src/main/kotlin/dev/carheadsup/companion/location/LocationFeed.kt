@@ -58,8 +58,13 @@ class LocationFeed(context: Context, private val onFix: (Location) -> Unit) {
 
     fun stop() {
         if (!running) return
-        LocationManagerCompat.removeUpdates(manager, listener)
         running = false
+        try {
+            LocationManagerCompat.removeUpdates(manager, listener)
+        } catch (e: SecurityException) {
+            // The permission was revoked while updates ran; the platform has already dropped them.
+            Log.w(TAG, "Location permission revoked before stopping updates", e)
+        }
     }
 
     companion object {
