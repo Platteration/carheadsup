@@ -9,8 +9,17 @@ import dev.carheadsup.protocol.auth.SHARED_CERTIFICATE_VECTORS
 import dev.carheadsup.protocol.link.HudAdvertisement
 import dev.carheadsup.protocol.link.HudEndpoint
 import dev.carheadsup.protocol.link.PhoneCloseCode
+import dev.carheadsup.protocol.pairing.InvalidPairingVector
+import dev.carheadsup.protocol.pairing.PairingPayload
+import dev.carheadsup.protocol.pairing.PairingUri
+import dev.carheadsup.protocol.pairing.PairingVector
+import dev.carheadsup.protocol.pairing.SHARED_INVALID_PAIRING_VECTORS
+import dev.carheadsup.protocol.pairing.SHARED_PAIRING_VECTORS
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.descriptors.elementNames
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -197,6 +206,52 @@ class ContractSyncTest {
                 CertificateVector(field("name"), field("der"), field("fingerprint"), field("short"))
             }
         assertEquals(certificates, SHARED_CERTIFICATE_VECTORS)
+    }
+
+    @Test
+    fun `pairing URI constants match pairing_ts`() {
+        val pairing = source("packages/core/src/protocol/pairing.ts").substringAfter("export const PAIRING_URI")
+        fun constant(key: String): String = Regex("\\b$key: '?([^',]+)'?,").find(pairing)!!.groupValues[1]
+        assertEquals(constant("scheme"), PairingUri.SCHEME)
+        assertEquals(constant("host"), PairingUri.HOST)
+        assertEquals(constant("version").toInt(), PairingUri.VERSION)
+        assertEquals(constant("maxHosts").toInt(), PairingUri.MAX_HOSTS)
+        assertEquals(constant("maxHostChars").toInt(), PairingUri.MAX_HOST_CHARS)
+        assertEquals(constant("maxTokenChars").toInt(), PairingUri.MAX_TOKEN_CHARS)
+        assertEquals(constant("maxNameBytes").toInt(), PairingUri.MAX_NAME_BYTES)
+    }
+
+    @Test
+    fun `the copied pairing vectors are the ones the HUD asserts`() {
+        val file = ProtocolJson.parseToJsonElement(source("packages/core/test/protocol/pairing-uri-vectors.json"))
+        val valid =
+            file.jsonObject.getValue("valid").jsonArray.map { element ->
+                val v = element.jsonObject
+                val p = v.getValue("payload").jsonObject
+                fun field(name: String): String = p.getValue(name).jsonPrimitive.content
+                PairingVector(
+                    name = v.getValue("name").jsonPrimitive.content,
+                    uri = v.getValue("uri").jsonPrimitive.content,
+                    canonical = v.getValue("canonical").jsonPrimitive.boolean,
+                    payload =
+                    PairingPayload(
+                        hudId = field("hudId"),
+                        certFingerprint = field("certFingerprint"),
+                        pairingToken = field("pairingToken"),
+                        hosts = p.getValue("hosts").jsonArray.map { it.jsonPrimitive.content },
+                        tlsPort = p.getValue("tlsPort").jsonPrimitive.int,
+                        hudName = p.getValue("hudName").jsonPrimitive.contentOrNull,
+                    ),
+                )
+            }
+        assertEquals(valid, SHARED_PAIRING_VECTORS)
+        val invalid =
+            file.jsonObject.getValue("invalid").jsonArray.map { element ->
+                val v = element.jsonObject
+                fun field(name: String): String = v.getValue(name).jsonPrimitive.content
+                InvalidPairingVector(field("name"), field("uri"), field("error"))
+            }
+        assertEquals(invalid, SHARED_INVALID_PAIRING_VECTORS)
     }
 
     @Test

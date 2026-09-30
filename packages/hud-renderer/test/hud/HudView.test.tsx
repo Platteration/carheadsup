@@ -262,9 +262,9 @@ describe('HudView — diagnostics', () => {
 
   it('shows page dots with the current page', () => {
     const html = renderHud(PARKED);
-    expect(html.match(/class="hud-diag__dot[ "]/g)).toHaveLength(7);
+    expect(html.match(/class="hud-diag__dot[ "]/g)).toHaveLength(8);
     expect(html.match(/hud-diag__dot--current/g)).toHaveLength(1);
-    expect(html).toContain('aria-label="Page 5 of 7"');
+    expect(html).toContain('aria-label="Page 5 of 8"');
   });
 
   it('keeps alerts, calls and ADAS cues visible over the dashboard', () => {

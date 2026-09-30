@@ -222,8 +222,14 @@ export interface TestServer {
 }
 
 export interface TestServerOptions extends Partial<HudServerOptions> {
-  /** Written to config.json before start. */
+  /**
+   * Written to config.json before start. Without it (and without a config.json in `files` or
+   * `directories`) the defaults are written — an open HUD, no pairing token — unless
+   * `createsConfig`.
+   */
   config?: DeepPartial<HudConfig>;
+  /** Leave config.json out, so that the server creates it (with a random pairing token). */
+  createsConfig?: boolean;
   /** Files written into the data dir before start. */
   files?: Record<string, string>;
   /** Directories created in the data dir before start (e.g. to make a file unreadable). */
@@ -244,7 +250,10 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
   const rendererDir = join(temp.dir, 'dist');
   await mkdir(dataDir, { recursive: true });
   if (!options.noRenderer) await writeFakeRenderer(rendererDir);
-  if (options.config) {
+  const configGiven =
+    options.files?.['config.json'] !== undefined ||
+    (options.directories ?? []).some((name) => name.split('/')[0] === 'config.json');
+  if (options.config || (!configGiven && options.createsConfig !== true)) {
     await writeFile(join(dataDir, 'config.json'), JSON.stringify(testConfig(options.config)));
   }
   for (const [name, content] of Object.entries(options.files ?? {})) {

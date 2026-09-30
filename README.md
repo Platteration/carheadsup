@@ -34,7 +34,7 @@ unmirrored. In the car the image is mirrored so that it reads correctly in the r
 | ![Imperial](docs/screenshots/imperial-us-800x480.png) mph and a US-style limit sign | ![Speed camera](docs/screenshots/speed-camera-1280x480.png) Speed camera ahead (OpenStreetMap) | ![Sport](docs/screenshots/sport-shift-1280x480.png) Sport layout: tachometer, shift light, boost |
 | ![Blind spot](docs/screenshots/blind-spot-left-1280x480.png) Blind-spot indicator (ADAS module) | ![Engine hot](docs/screenshots/engine-hot-1280x480.png) Coolant appears only when out of range | ![Parked overview, wide](docs/screenshots/parked-overview-1280x480.png) Dashboard on a bar display |
 | ![Maintenance](docs/screenshots/parked-maintenance-800x480.png) Parked: service reminders | ![Incoming call, wide](docs/screenshots/incoming-call-1280x480.png) Call card on a bar display | ![Highway exit, wide](docs/screenshots/highway-exit-lanes-1280x480.png) Lane guidance on a bar display |
-| ![Traffic jam](docs/screenshots/traffic-jam-1280x480.png) Traffic jam 2.4 km ahead with its delay (TomTom, optional) | | |
+| ![Traffic jam](docs/screenshots/traffic-jam-1280x480.png) Traffic jam 2.4 km ahead with its delay (TomTom, optional) | ![Pair a phone](docs/screenshots/parked-pairing-800x480.png) Parked: the pairing QR code the companion scans | ![Pair a phone, wide](docs/screenshots/parked-pairing-1280x480.png) Pairing code on a bar display |
 
 <p>
 <img src="docs/screenshots/live-settings-390x844.png" alt="Settings app on a phone" height="420">
@@ -94,6 +94,10 @@ notification and sends it to the HUD.
 - **Song and artist** as a toast on track change that fades out after a few seconds.
 - **Messages: sender only.** Message text never reaches the HUD (the protocol has no field for it
   and the HUD rejects messages that try); the phone reads the message aloud instead.
+- **Pairing by QR code.** Parked, the HUD shows a QR code on its own display — the dashboard's
+  last page, or the settings app's *Show pairing code on the HUD* — and the companion scans it:
+  pairing code, the HUD's identity and certificate and its address in one go, nothing to type
+  and no certificate trusted on first use. A new HUD makes a random pairing code itself.
 
 ### Smart and contextual
 
@@ -133,15 +137,18 @@ notification and sends it to the HUD.
   travel — including on a road the route is about to leave — and the free plan's 2,500 requests
   a day (the app uses at most 2,000) mean updates every couple of minutes, not live.
 - The phone link is encrypted: the companion talks to the HUD over TLS (port 8443) and pins the
-  HUD's self-signed certificate at the first pairing, and phone and HUD prove the pairing token
-  to each other (it never crosses the Wi-Fi) bound to that certificate, so nobody in between can
-  read or relay the session. The phone remembers its HUD and sends nothing to any other one; a
-  changed certificate stops it until you pair again. The first pairing trusts the certificate it
-  sees: someone controlling the car's Wi-Fi at that moment cannot get in without the token, but
-  could test guesses of a weak one — use the generated code and compare the fingerprint the app
-  shows with the settings app. Without a pairing token nothing is proven: the phone asks you to
-  confirm the HUD, and any phone can connect — set one
-  ([details](docs/protocol.md#authentication)).
+  HUD's self-signed certificate when it pairs, and phone and HUD prove the pairing token to each
+  other (it never crosses the Wi-Fi) bound to that certificate, so nobody in between can read or
+  relay the session. The phone remembers its HUD and sends nothing to any other one; a changed
+  certificate stops it until you pair again. Scanning the HUD's pairing QR code takes the
+  certificate from the HUD's own display, so the first connection is already authenticated;
+  anyone who can see the display while that page is up (parked, at most 3 minutes) can scan the
+  code too. Pairing by typing the code in trusts the certificate the first connection sees:
+  someone controlling the car's Wi-Fi at that moment cannot get in without the token, but could
+  test guesses of a weak one — use a generated code and compare the fingerprint the app shows
+  with the settings app. Without a pairing token (only a HUD set up before new HUDs made one, or
+  one whose token was removed) nothing is proven: the phone asks you to confirm the HUD, and any
+  phone can connect — set one ([details](docs/protocol.md#pairing-by-qr-code)).
 - The web pages in a browser (settings app, developer console) use plain HTTP on the car's
   network; protect it with WPA2 on the Wi-Fi and the API token (see
   [docs/architecture.md](docs/architecture.md#security-model)).
@@ -172,9 +179,11 @@ share test vectors with the server). What has **not** been verified:
   tests with fakes and by script linting, not on a Pi or in a car.
 - **The Android app (`:app`).** It could not be compiled here (no Android SDK); only its
   `:protocol` module is built and tested, and the app code was type-checked against stubs. The
-  notification parsing, media, calls, discovery, pairing screens, file export and the TLS pinning
-  in OkHttp and the settings WebView have not run on a phone (the pinning trust manager itself is
-  tested in `:protocol` with real TLS handshakes against certificates made by the HUD).
+  notification parsing, media, calls, discovery, pairing screens, the QR scanner (CameraX), file
+  export and the TLS pinning in OkHttp and the settings WebView have not run on a phone (the
+  pinning trust manager itself is tested in `:protocol` with real TLS handshakes against
+  certificates made by the HUD, and the QR decoder with the very code the HUD draws, plain,
+  mirrored and inverted — but not with a camera pointed at a real panel).
 - **TomTom's live service.** The traffic client is tested against sample answers modelled on
   TomTom's documented Incident Details format, not against the real API.
 - **An ADAS module.** The UDP feed is tested with synthetic datagrams only.
@@ -205,7 +214,10 @@ a red light never opens it); it closes as the car drives off on the next loop. T
 - <http://localhost:8080/dev> — the developer console: live HUD preview, simulator controls
   (throttle, brake, faults, phone events such as a call or a traffic jam, ADAS, light level),
   input buttons and a gallery of sample frames.
-- <http://localhost:8080/settings> — the settings app, as the phone shows it.
+- <http://localhost:8080/settings> — the settings app, as the phone shows it. While the simulated
+  car is parked (at the start, or in the developer console's *manual* mode with the engine off),
+  *Phone → Show pairing code on the HUD* puts the pairing QR code on the HUD, for the companion
+  to scan when the phone is on the same network.
 
 Simulated drives use their own data directory (`$XDG_DATA_HOME/carheadsup/sim`, by default
 `~/.local/share/carheadsup/sim`), so they never mix with real trips. In the developer console

@@ -1,6 +1,6 @@
 import type { CollisionLevel } from './adas.ts';
 import type { HudConfig } from './config.ts';
-import type { DiagnosticDtc } from './frame.ts';
+import type { DiagnosticDtc, PairingPageStatus } from './frame.ts';
 import type { MaintenanceItemStatus, TripRecord } from './records.ts';
 import type { SignalId } from './signals.ts';
 import type { ObdLinkStatus } from './vehicle.ts';
@@ -23,6 +23,7 @@ import type { ObdLinkStatus } from './vehicle.ts';
  *   POST   /api/maintenance/:itemId/done  { odometerKm?: number } → MaintenanceItemStatus[]
  *   POST   /api/odometer                  { odometerKm: number }  → { ok: true }
  *   POST   /api/input                     { action: InputAction } → { ok: true }
+ *   POST   /api/pairing/show                 → ApiPairingShowResult (refused unless parked)
  *   GET    /api/sim                          → SimStatus         (404 when not simulating)
  *   POST   /api/sim                       SimControl → SimStatus (404 when not simulating)
  *
@@ -88,6 +89,17 @@ export interface ApiDiagnostics {
 export interface ApiClearDtcsResult {
   ok: boolean;
   message: string;
+}
+
+/**
+ * `POST /api/pairing/show`: the parked dashboard turned to its "Pair a phone" page (200), or why
+ * not (409: the car is not parked — the page never shows while driving or stopped).
+ */
+export interface ApiPairingShowResult {
+  ok: boolean;
+  message: string;
+  /** What the page shows (see `PairingPageStatus`); null when refused. */
+  status: PairingPageStatus | null;
 }
 
 export interface ApiError {

@@ -63,8 +63,10 @@ The simulator panel shows what the server reports (`GET /api/sim`), overrides, t
 driver-assistance warnings and the simulated phone's link included, so a reloaded console — or
 a second one — shows the current state. While a real phone is connected to a `--sim` server,
 the simulated phone stays silent and the panel says so. A phone (or the Android emulator, which
-reaches the host as `10.0.2.2`) connects to the TLS port: enter `<host>:8443` in the companion's
-*Setup*. A client of your own can use `wss://…:8443/ws/phone` with the proofs of
+reaches the host as `10.0.2.2`) connects to the TLS port: scan the HUD's pairing QR code (the
+settings app's *Phone → Show pairing code on the HUD*, while the simulated car is parked) or
+enter `<host>:8443` and the pairing code in the companion's *Setup*. A simulator data directory
+made from scratch has a random pairing code, like a new HUD. A client of your own can use `wss://…:8443/ws/phone` with the proofs of
 [protocol.md](protocol.md#authentication), or plain `ws://…:8080/ws/phone` once
 `server.allowPlainPhone` is on (its proofs then bind an empty fingerprint).
 
@@ -105,8 +107,8 @@ Tests live in `packages/<pkg>/test/**/*.test.ts(x)`. Files named `*.dom.test.tsx
 into happy-dom. What covers what:
 
 - **core** — reducer, composer, alerts, contexts, brightness, sun position, fuel and gear
-  estimation, trips, maintenance, config parsing, protocol validation, the DTC database, and the
-  replayed drives in `test/scenarios`.
+  estimation, trips, maintenance, config parsing, protocol validation, the pairing URI and the
+  pairing page, the DTC database, and the replayed drives in `test/scenarios`.
 - **obd** — the driver against scripted transports, the poller, the service's reconnect loop,
   and end-to-end tests (`e2e.test.ts`) of the real driver and poller against the ELM327 emulator
   and vehicle simulator.
@@ -117,14 +119,20 @@ into happy-dom. What covers what:
   settings app against an in-memory mock server, the developer console.
 - **companion-android** — `cd companion-android && ./gradlew :protocol:test` (JDK only). Its
   `ContractSyncTest` reads the TypeScript contract and fails when message types, enum values, the
-  protocol version or the size limits drift: run it after changing anything in
-  `packages/core/src/types` or `protocol/validate.ts`.
+  protocol version, the size limits or the authentication and pairing vectors drift: run it
+  after changing anything in `packages/core/src/types` or `packages/core/src/protocol`. The QR
+  code the renderer draws for the pairing page is kept in
+  `companion-android/protocol/src/test/resources/pairing/hud-qr.txt` (a renderer test fails when
+  its drawing changes; regenerate the file from `qrModules(PAIRING_URI_SAMPLE)`), and
+  `QrDecoderTest` decodes it with ZXing.
 
 Tests use temporary directories and port 0, and leave no processes behind.
 
 **Browser end-to-end tests** live in [`e2e/`](../e2e) (Playwright, not part of `npm test`): the
 kiosk page, the settings app and the developer console against a real server running the
-simulator on a free port, with the renderer built into a temporary directory first.
+simulator on a free port, with the renderer built into a temporary directory first — including
+pairing: the settings app shows the pairing code on the parked HUD, and the QR code in a
+screenshot of the (mirrored) kiosk decodes to the HUD's id, certificate, token and addresses.
 
 ```sh
 npm run test:e2e                    # = npx playwright test -c e2e/playwright.config.ts

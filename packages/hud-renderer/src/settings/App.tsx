@@ -151,6 +151,7 @@ export function SettingsApp({ api, editorOptions }: SettingsAppProps) {
             idsNeeding('data').map((id) => <Waiting key={id} id={id} connection={connection} />)
           )}
           <ConfigSections
+            api={api}
             editor={editor}
             root={root}
             connection={connection}
@@ -164,11 +165,13 @@ export function SettingsApp({ api, editorOptions }: SettingsAppProps) {
 }
 
 function ConfigSections({
+  api,
   editor,
   root,
   connection,
   tls,
 }: {
+  api: HudApi;
   editor: ConfigEditor;
   root: Scope<HudConfig> | null;
   connection: Connection;
@@ -200,7 +203,7 @@ function ConfigSections({
       <AlertsSection root={root} />
       <UnitsSection root={root} />
       <VehicleSection root={root} />
-      <PhoneSection root={root} tls={tls} />
+      <PhoneSection root={root} tls={tls} api={api} />
       <ObdSection root={root} />
       <SensorsSection root={root} />
       <ServerSection root={root} />

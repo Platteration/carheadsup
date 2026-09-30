@@ -125,10 +125,12 @@ describe('createInitialState', () => {
     expect(state.phone.connected).toBe(false);
     expect(state.adas.moduleConnected).toBe(false);
     expect(state.alerts).toEqual([]);
+    expect(state.pairing).toBeNull();
     expect(state.ui).toEqual({
       blanked: false,
       page: 0,
       dashboardRequested: false,
+      pairingShownAt: null,
       brightnessOffset: 0,
       toastDismissedAt: null,
       lastInputAt: null,
@@ -1387,9 +1389,10 @@ describe('input', () => {
 
   it('pages through the parked dashboard, wrapping both ways', () => {
     const h = new Harness();
-    // Without live signals: overview, trouble codes, trip, maintenance.
+    // Without live signals: overview, trouble codes, trip, maintenance, pair a phone.
     h.input('prev-page');
-    expect(h.state.ui.page).toBe(3);
+    expect(h.state.ui.page).toBe(4);
+    expect(h.frame().diagnostics?.page).toBe('pair');
     h.input('next-page');
     expect(h.state.ui.page).toBe(0);
     h.input('next-page');
@@ -1401,8 +1404,9 @@ describe('input', () => {
     const h = new Harness();
     h.obdConnected(T0);
     h.samples(T0 + 100, { rpm: 800, speed: 0 });
-    // overview, engine, trouble codes, trip, maintenance
+    // overview, engine, trouble codes, trip, maintenance, pair a phone
     h.input('prev-page', T0 + 200);
+    h.input('prev-page', T0 + 250);
     h.input('prev-page', T0 + 300);
     expect(h.frame().diagnostics?.page).toBe('trip');
     expect(h.state.ui.page).toBe(3);

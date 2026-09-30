@@ -19,6 +19,7 @@ const REQUIRED = [
   'parked-trouble-codes',
   'parked-trip',
   'parked-maintenance',
+  'parked-pairing',
   'night-city',
   'blind-spot-left',
   'collision-warning',
@@ -107,6 +108,21 @@ const EXPECT: Record<string, { text?: string[]; markup?: string[]; absent?: stri
       'in 6210 km',
       'No record',
     ],
+  },
+  'parked-pairing': {
+    text: [
+      'Pair a phone',
+      'Golf HUD',
+      'Scan with the carheadsup app',
+      'FDC1 53EE DCA2 B536 4DD7',
+      'Closes in 2:41',
+    ],
+    markup: ['aria-label="Pairing QR code"', 'data-modules="57"', 'data-status="ready"'],
+  },
+  'parked-pairing-open': {
+    text: ['Pair a phone', 'No pairing code set', 'Phone → Pairing code → Generate'],
+    markup: ['data-status="open"'],
+    absent: ['Pairing QR code', 'K7fQ2mZrP4xW9sLt3HvNbC8e'],
   },
   'night-city': { text: ['48', '150', 'Baker Street'], markup: ['hud--night', 'brightness(0.35)'] },
   'blind-spot-left': {

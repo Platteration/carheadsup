@@ -23,7 +23,7 @@ contract between all of them.
 
 | Package | Role | Key modules |
 | --- | --- | --- |
-| `@carheadsup/core` | All domain logic and the shared types. No I/O, no clock, no randomness; runs in Node.js and the browser. | `state/reducer.ts`, `compose/compose.ts`, `alerts/`, `display/` (context, brightness, sun, shift light), `vehicle/` (fuel, gear), `trip/`, `maintenance/`, `obd/` (PIDs, formulas, DTC database), `config/` (defaults, presets, schema), `protocol/validate.ts` |
+| `@carheadsup/core` | All domain logic and the shared types. No I/O, no clock, no randomness; runs in Node.js and the browser. | `state/reducer.ts`, `compose/compose.ts`, `alerts/`, `display/` (context, brightness, sun, shift light), `vehicle/` (fuel, gear), `trip/`, `maintenance/`, `obd/` (PIDs, formulas, DTC database), `config/` (defaults, presets, schema), `protocol/` (message validation, phone authentication, pairing URI) |
 | `@carheadsup/obd` | Talks to the car. | `transport.ts` (serial, TCP), `elm327.ts` (driver), `poller.ts` (PID scheduling), `service.ts` (connect / reconnect loop, events), `sim/` (ELM327 emulator and vehicle simulator) |
 | `@carheadsup/hud-server` | The on-car service that wires everything together. | `app.ts` (composition), `engine.ts` (reducer loop, effects, frame timer), `http/` (REST API, static files, auth), `ws/` (phone and renderer sockets), `tls/` (the HUD's self-signed certificate: DER encoder, X.509 builder, `tls.pem`), `phone/auth.ts` (the phone proofs), `sensors/` (light, gesture, GPIO buttons, steering-wheel buttons over CAN or an ADC, ADAS UDP), `outputs/backlight.ts`, `store/` (config, state, trips), `discovery/mdns.ts`, `sim/` |
 | `@carheadsup/hud-renderer` | The three web pages. | `hud/` (projected HUD), `settings/` (settings app), `dev/` (developer console), `common/` (WebSocket feed, REST client, staleness) |
@@ -200,12 +200,23 @@ and comes back to a silent ECU leaves the moving layout up until the next drive.
    layout win (the array order is priority order).
 
 When parked, the frame also carries the diagnostics dashboard — pages *overview*, *engine*,
-*fuel*, *electrical* (each only with live data), *trouble codes*, *trip* and *maintenance* —
-which the renderer shows full screen. The `next-page` / `prev-page` inputs flip through it.
-Since `parked` takes 3 minutes with the engine off, the driver can also open it while `stopped`:
-the first `next-page` / `prev-page` shows it at once (`UiState.dashboardRequested`), further ones
-flip pages, `secondary` closes it, and it closes by itself as soon as the car moves — the
-dashboard is never shown while moving.
+*fuel*, *electrical* (each only with live data), *trouble codes*, *trip*, *maintenance* and
+*pair a phone* — which the renderer shows full screen. The `next-page` / `prev-page` inputs flip
+through it. Since `parked` takes 3 minutes with the engine off, the driver can also open it while
+`stopped`: the first `next-page` / `prev-page` shows it at once (`UiState.dashboardRequested`),
+further ones flip pages, `secondary` closes it, and it closes by itself as soon as the car moves
+— the dashboard is never shown while moving.
+
+*Pair a phone* shows the [pairing QR code](protocol.md#pairing-by-qr-code), the one large light
+area the HUD ever draws, so it is stricter: it exists only while **parked** (not in the stopped
+dashboard), a page it held gives way to the overview as the car drives off (and does not come
+back by itself at the next stop), and it turns back to the overview 3 minutes after it came up
+(`PAIRING_PAGE_TIMEOUT_MS`, `UiState.pairingShownAt`) — the code carries the pairing token. The
+settings app turns the parked dashboard to it (`POST /api/pairing/show`, the `pairing/show`
+event, refused unless parked). The core composes the pairing URI from the endpoint the server
+tells it (`pairing/endpoint`: `hudId`, certificate fingerprint, TLS port and the machine's
+addresses, looked up again every 5 s while the page is up) and the pairing token in the config,
+and puts it into that page's frames only.
 
 ## Alerts
 
@@ -318,7 +329,7 @@ default `~/.local/share/carheadsup`, and its `sim` subdirectory with `--sim`) ho
 
 | File | Contents | Written |
 | --- | --- | --- |
-| `config.json` | The configuration (unless `--config` points elsewhere). Pretty-printed and hand-editable; if the server has to correct it on load, the original is kept as `config.json.bak`. | On every change from the API |
+| `config.json` | The configuration (unless `--config` points elsewhere). Pretty-printed and hand-editable; if the server has to correct it on load, the original is kept as `config.json.bak`. A new file gets a random pairing token (24 letters and digits, about 139 bits), so a new HUD is never open to every phone; an existing file never gets one. | When missing at start; on every change from the API |
 | `state.json` | Odometer, learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, and the trip in progress (`PersistedState.activeTrip`, with wall-clock times). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
 | `trips.jsonl` | One completed trip per line, oldest first; at most 5,000 trips (the oldest are dropped). | Appended when a trip ends |
 | `hud-id` | The HUD's identity on the phone link (22 base64url characters), which paired phones pin. A corrupt file is moved to `hud-id.corrupt` and replaced; phones then report a different HUD until paired again. | Once, on the first start |
@@ -353,9 +364,10 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
   only over TLS (`wss://` and `https://` on `server.tlsPort`, 8443), so nobody on the Wi-Fi can
   read the session — location, calls, who messages you, the API token — or alter it. The HUD
   serves a self-signed ECDSA P-256 certificate it made on its first start (`tls.pem`); the
-  companion pins it at the first pairing, together with the `hudId` (trust on first use; if the
-  mDNS advertisement names a fingerprint, the certificate must match it), and from then on
-  accepts exactly that certificate — any other is a hard stop, "HUD certificate changed —
+  companion pins it together with the `hudId` when it pairs — from the HUD's own display when the
+  user scans the pairing QR code (below), else at the first connection that proves the pairing
+  token (trust on first use; if the mDNS advertisement names a fingerprint, the certificate must
+  match it) — and from then on accepts exactly that certificate — any other is a hard stop, "HUD certificate changed —
   re-pair". Host names and certificate authorities play no part (the HUD is reached by IP
   address): the pin does. The settings page in the companion's WebView is let through by the
   same pin. `/ws/phone` is not served on the plain port unless `server.allowPlainPhone` is on
@@ -374,7 +386,16 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
   random per-install `deviceId`, not their name. Without a pairing token the HUD is *open*: any
   phone can connect, and the phone cannot verify the HUD, so the companion asks the user to
   confirm it (showing its certificate's fingerprint to compare with the settings app) — the
-  settings app flags this and offers to generate a token.
+  settings app flags this and offers to generate a token. A new HUD is not open: the server
+  gives the `config.json` it creates a random pairing token (existing files are left alone).
+- **First pairing authenticated by the display.** The HUD shows the pairing token, its `hudId`,
+  its certificate's fingerprint and its addresses as a QR code on its own display — a channel
+  only someone at the car can read — on the parked dashboard's *Pair a phone* page
+  ([details](protocol.md#pairing-by-qr-code)). The companion scans it, pins the `hudId` and the
+  certificate before it connects, and so never trusts a certificate on first use: someone posing
+  as the HUD on the Wi-Fi gets nothing, not even the phone's proof. The page only exists while
+  parked and closes after 3 minutes; the code is in no other frame (other devices need the API
+  token for the renderer socket, when one is set).
 - **Cross-site protection.** State-changing API requests and all WebSocket upgrades are refused
   when a browser says they come from another site (`Origin` / `Sec-Fetch-Site`), so a web page
   visited on the phone cannot drive the HUD's API.
@@ -418,14 +439,19 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
 
 What remains:
 
-- **The first pairing is trust on first use.** Before a phone has pinned the HUD, someone who
-  controls the car's Wi-Fi at that moment can pose as the HUD with a certificate of their own.
-  They still cannot complete the handshake without the pairing token (the phone refuses their
-  `welcome`, and pins nothing), but they receive the phone's proof and can test guesses of a
-  weak pairing token offline. Use a long random token (*Generate*: about 139 bits), pair where
-  the Wi-Fi is yours, and compare the fingerprint the companion shows with the settings app's
-  Phone section. Recorded traffic is no longer enough: a passive listener sees only TLS. An open
-  HUD (no pairing token) is exactly as trustworthy as that first confirmation.
+- **Pairing by hand is trust on first use.** Scanning the HUD's QR code is not; typing the
+  pairing code in is: before a phone has pinned the HUD, someone who controls the car's Wi-Fi at
+  that moment can pose as the HUD with a certificate of their own. They still cannot complete
+  the handshake without the pairing token (the phone refuses their `welcome`, and pins nothing),
+  but they receive the phone's proof and can test guesses of a weak pairing token offline. Scan
+  the code, or use a long random token (*Generate*, or a new HUD's own: about 139 bits), pair
+  where the Wi-Fi is yours, and compare the fingerprint the companion shows with the settings
+  app's Phone section. Recorded traffic is no longer enough: a passive listener sees only TLS. An
+  open HUD (no pairing token) is exactly as trustworthy as that first confirmation.
+- **The pairing code on the display.** While *Pair a phone* is up (parked, at most 3 minutes),
+  anyone who can see the panel — it lies under the windshield — can scan the pairing token.
+  Show it when nobody else is at the car, and generate a new token (then pair again) if someone
+  may have scanned it.
 - **The browser pages are plain HTTP.** The kiosk, the developer console and the settings app
   opened in a browser use `http://` on `server.port`, and a browser outside the Pi sends the API
   token in clear text there. The same pages are served over TLS on `server.tlsPort` (the

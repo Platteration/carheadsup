@@ -182,16 +182,27 @@ function diagnostics(
   extra: Partial<DiagnosticsFrame> & Pick<DiagnosticsFrame, 'page' | 'pageIndex' | 'title'>,
 ): DiagnosticsFrame {
   return {
-    pageCount: 7,
+    // Overview, engine, fuel, electrical, trouble codes, trip, maintenance, pair a phone.
+    pageCount: 8,
     gauges: [],
     dtcs: [],
     milOn: false,
     trip: null,
     maintenance: [],
+    pairing: null,
     vehicle: VEHICLE,
     ...extra,
   };
 }
+
+/**
+ * A pairing URI as `composePairing` makes it (the HUD's id, certificate fingerprint, a generated
+ * pairing token, the hotspot address and the mDNS name, the TLS port, the HUD's name).
+ */
+export const PAIRING_URI_SAMPLE =
+  'carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw' +
+  '&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531' +
+  '&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=10.42.0.1,carheadsup.local&p=8443&n=Golf%20HUD';
 
 const TRIP_WIDGET: TripSummaryWidget = {
   id: 'tripSummary',
@@ -498,6 +509,45 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
         service('cabin-filter', 'Cabin filter', 'unknown', null, null),
         service('coolant', 'Coolant', 'unknown', null, null),
       ],
+    }),
+  }),
+
+  /**
+   * Parked, "Pair a phone" (the settings app's button, or the last dashboard page): the pairing
+   * code for the companion app to scan — the HUD's id, certificate, pairing token and addresses.
+   */
+  'parked-pairing': frame({
+    context: 'parked',
+    widgets: [clock()],
+    diagnostics: diagnostics({
+      page: 'pair',
+      pageIndex: 7,
+      title: 'Pair a phone',
+      pairing: {
+        status: 'ready',
+        hudName: 'Golf HUD',
+        uri: PAIRING_URI_SAMPLE,
+        fingerprint: 'FDC1 53EE DCA2 B536 4DD7',
+        closesInS: 161,
+      },
+    }),
+  }),
+
+  /** Parked, "Pair a phone" on a HUD without a pairing token: how to set one, no code. */
+  'parked-pairing-open': frame({
+    context: 'parked',
+    widgets: [clock()],
+    diagnostics: diagnostics({
+      page: 'pair',
+      pageIndex: 7,
+      title: 'Pair a phone',
+      pairing: {
+        status: 'open',
+        hudName: 'Golf HUD',
+        uri: null,
+        fingerprint: 'FDC1 53EE DCA2 B536 4DD7',
+        closesInS: 180,
+      },
     }),
   }),
 

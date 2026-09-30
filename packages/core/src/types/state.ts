@@ -49,6 +49,21 @@ export interface EnvironmentState {
   brightness: BrightnessState;
 }
 
+/**
+ * Where phones reach this HUD, as the pairing page's QR code tells them (see
+ * `protocol/pairing.ts`). The server knows it; the core only shows it.
+ */
+export interface PairingEndpoint {
+  /** The HUD's id on the phone link. */
+  hudId: string;
+  /** SHA-256 of the HUD's TLS certificate, 64 lowercase hex digits. */
+  certFingerprint: string;
+  /** The TLS listener's port. */
+  tlsPort: number;
+  /** The HUD's addresses, most preferred first: IPv4 literals and `<hostname>.local`. */
+  hosts: string[];
+}
+
 export interface UiState {
   blanked: boolean;
   /** Dashboard page index. */
@@ -59,6 +74,12 @@ export interface UiState {
    * shows the dashboard anyway).
    */
   dashboardRequested: boolean;
+  /**
+   * When the dashboard turned to its "Pair a phone" page (null while it is not on it). The page
+   * shows the pairing token as a QR code, so it turns back to the overview
+   * `PAIRING_PAGE_TIMEOUT_MS` later.
+   */
+  pairingShownAt: number | null;
   /** Manual brightness trim from the driver, −0.5–0.5. */
   brightnessOffset: number;
   /** When the driver last dismissed the current toast. */
@@ -102,6 +123,8 @@ export interface HudState {
   messages: MessageInfo[];
   phone: PhoneLinkStatus;
   adas: AdasState;
+  /** Where phones reach this HUD (the pairing page); null while the phone link is off. */
+  pairing: PairingEndpoint | null;
   env: EnvironmentState;
   alerts: Alert[];
   ui: UiState;

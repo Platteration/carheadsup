@@ -43,6 +43,7 @@ const DEFAULT_SHOTS: ReadonlyArray<readonly [string, readonly Size[]]> = [
   ['parked-trouble-codes', [SMALL]],
   ['parked-trip', [SMALL]],
   ['parked-maintenance', [SMALL]],
+  ['parked-pairing', [SMALL, WIDE]],
 ];
 
 const rendererRoot = fileURLToPath(new URL('../../', import.meta.url));

@@ -389,7 +389,7 @@ describe('scenario: a complete drive', () => {
     // Browse the dashboard.
     const pages = diagnosticsPageKinds(h.state);
     expect(pages[0]).toBe('overview');
-    expect(pages.slice(-3)).toEqual(['trouble-codes', 'trip', 'maintenance']);
+    expect(pages.slice(-4)).toEqual(['trouble-codes', 'trip', 'maintenance', 'pair']);
     h.input('next-page');
     expect(h.frame().diagnostics).toMatchObject({
       page: pages[1],
@@ -398,7 +398,13 @@ describe('scenario: a complete drive', () => {
     });
     h.input('prev-page');
     h.input('prev-page');
-    expect(h.frame().diagnostics).toMatchObject({ page: 'maintenance' });
+    // "Pair a phone" (the server has not said where phones reach the HUD in this test).
+    expect(h.frame().diagnostics).toMatchObject({
+      page: 'pair',
+      pairing: { status: 'unavailable', hudName: 'My car HUD', uri: null },
+    });
+    h.input('prev-page');
+    expect(h.frame().diagnostics).toMatchObject({ page: 'maintenance', pairing: null });
     h.input('prev-page');
     const trip = h.frame().diagnostics;
     expect(trip?.page).toBe('trip');

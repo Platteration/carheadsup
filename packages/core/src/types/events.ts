@@ -3,6 +3,7 @@ import type { HudConfig } from './config.ts';
 import type { Hazard, NavInfo, RoadInfo } from './nav.ts';
 import type { CallInfo, MediaInfo, MessageInfo } from './phone.ts';
 import type { SignalId } from './signals.ts';
+import type { PairingEndpoint } from './state.ts';
 import type { ObdLinkState } from './vehicle.ts';
 
 /** Driver inputs, from GPIO buttons, a gesture sensor, the keyboard, or the phone. */
@@ -100,6 +101,19 @@ export type HudEvent =
 
   // Driver
   | { type: 'input'; action: InputAction; at: number }
+
+  // Pairing a phone (from the server and the settings app)
+  /**
+   * Where phones reach this HUD — its id, certificate and addresses — for the pairing page's QR
+   * code; null while the phone link (TLS) is not running. Sent by the server on start and
+   * whenever it changes (e.g. the Wi-Fi came up with another address).
+   */
+  | { type: 'pairing/endpoint'; endpoint: PairingEndpoint | null; at: number }
+  /**
+   * Turn the parked dashboard to its "Pair a phone" page (the settings app's button), unblanking
+   * the HUD. Ignored unless parked.
+   */
+  | { type: 'pairing/show'; at: number }
 
   // Maintenance bookkeeping (from the settings app)
   | { type: 'maintenance/done'; itemId: string; odometerKm: number | null; at: number }

@@ -72,6 +72,11 @@ export interface StartOptions {
   config?: DeepPartial<HudConfig>;
   /** Listen on this port (e.g. to restart a server where a page expects it); default: any free port. */
   port?: number;
+  /**
+   * The addresses the pairing QR code names. Default: none — the server listens on 127.0.0.1,
+   * which no phone can reach, so the pairing page has no code to show.
+   */
+  pairingHosts?: string[];
 }
 
 /**
@@ -98,6 +103,9 @@ export async function startSimulatedHud(options: StartOptions = {}): Promise<Sim
     tlsPort: 0,
     host: '127.0.0.1',
     backlight: false,
+    ...(options.pairingHosts !== undefined
+      ? { pairingHosts: () => [...(options.pairingHosts ?? [])] }
+      : {}),
   });
   let port: number;
   let tlsPort: number | null;

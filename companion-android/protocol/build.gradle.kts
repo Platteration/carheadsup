@@ -25,6 +25,8 @@ kotlin {
 
 dependencies {
     api(libs.kotlinx.serialization.json)
+    // Pairing QR codes (`pairing/QrDecoder`): pure Java, no Android dependency.
+    implementation(libs.zxing.core)
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)

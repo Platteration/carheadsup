@@ -5,9 +5,13 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import dev.carheadsup.protocol.link.HudEndpoint
 import okhttp3.Dns
 import okhttp3.OkHttpClient
+import java.io.IOException
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.UnknownHostException
 import javax.net.SocketFactory
@@ -81,6 +85,25 @@ class LocalNetwork(context: Context) {
 
     fun unbindProcess() {
         connectivity.bindProcessToNetwork(null)
+    }
+
+    /**
+     * Whether a TCP connection to [endpoint] opens within [timeoutMs], over the Wi-Fi network
+     * when there is one (else the default network). Blocking: call it off the main thread. Only
+     * opens and closes the connection — nothing is sent.
+     */
+    fun canConnect(endpoint: HudEndpoint, timeoutMs: Int): Boolean {
+        val network = wifi
+        return try {
+            val addresses = network?.getAllByName(endpoint.host) ?: InetAddress.getAllByName(endpoint.host)
+            val address = addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull() ?: return false
+            (network?.socketFactory ?: SocketFactory.getDefault()).createSocket().use { socket ->
+                socket.connect(InetSocketAddress(address, endpoint.port), timeoutMs)
+                true
+            }
+        } catch (e: IOException) {
+            false
+        }
     }
 
     /** [client] with sockets and DNS bound to the Wi-Fi network, or unchanged without Wi-Fi. */

@@ -284,7 +284,7 @@ the phone.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `phone.pairingToken` | `""` | Shared secret phone and HUD prove to each other when the phone connects (it is never sent; [details](protocol.md#authentication)). Use a long random one (the settings app's *Generate*). Empty = the HUD is open: any phone on the network may connect, and the phone cannot verify the HUD (it asks the user to confirm it). Changing or removing it disconnects a phone paired with the old one. |
+| `phone.pairingToken` | `""`, but random in a new `config.json` | Shared secret phone and HUD prove to each other when the phone connects (it is never sent; [details](protocol.md#authentication)). The phone gets it by scanning the HUD's pairing QR code (parked: the dashboard's last page, or *Phone → Show pairing code on the HUD*; [details](protocol.md#pairing-by-qr-code)) or by typing it in. When the server creates `config.json`, it sets a random one (24 letters and digits, about 139 bits), so a new HUD is never open; an existing file is never given one. Use a long random one (the settings app's *Generate*). Empty = the HUD is open: any phone on the network may connect, and the phone cannot verify the HUD (it asks the user to confirm it); the pairing page then says so instead of showing a code. Changing or removing it disconnects a phone paired with the old one. |
 | `phone.showMessageSender` | `true` | Show who sent a message (the content is never shown). |
 | `phone.readMessagesAloud` | `true` | Ask the phone to read messages aloud (sent in `welcome`). |
 | `phone.showMedia` | `true` | Song and artist toast on track change. |
@@ -536,7 +536,7 @@ polled less and less often (back-off up to a minute).
 | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
 | `--sim` | `CARHEADSUP_SIM=1` | off | Run against the built-in vehicle, phone, light-sensor and ADAS simulator. Forces `obd.transport = simulator`, adds the simulated tyre-pressure PIDs and `hasTpms`, without saving that to the config. |
-| `--config <file>` | `CARHEADSUP_CONFIG` | `<data dir>/config.json` | Config file (created with defaults if missing). |
+| `--config <file>` | `CARHEADSUP_CONFIG` | `<data dir>/config.json` | Config file (created with defaults and a random pairing code if missing). |
 | `--data-dir <dir>` | `CARHEADSUP_DATA_DIR` | `$XDG_DATA_HOME/carheadsup` or `~/.local/share/carheadsup`; with `--sim` its `sim` subdirectory | State, trips, the HUD's identity and TLS certificate, and (by default) the config. |
 | `--port <n>` | `CARHEADSUP_PORT` | `server.port` | Override the port (`0` = any free port). Not saved. |
 | `--tls-port <n\|off>` | `CARHEADSUP_TLS_PORT` | `server.tlsPort` | Override the TLS port of the phone link (`0` = any free port, `off` = no TLS listener). Not saved. |

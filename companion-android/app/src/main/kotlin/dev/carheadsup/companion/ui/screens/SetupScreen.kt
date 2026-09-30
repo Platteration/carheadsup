@@ -1,9 +1,15 @@
 package dev.carheadsup.companion.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.text.format.DateFormat
+import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -13,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -25,6 +32,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
@@ -32,17 +40,23 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.carheadsup.companion.BuildConfig
 import dev.carheadsup.companion.R
 import dev.carheadsup.companion.data.CompanionSettings
 import dev.carheadsup.companion.ui.HudPage
 import dev.carheadsup.companion.ui.MainViewModel
+import dev.carheadsup.companion.ui.Permissions
+import dev.carheadsup.companion.ui.QrPairing
+import dev.carheadsup.companion.ui.scan.QrScanner
 import dev.carheadsup.companion.ui.theme.StatusColors
 import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.HudPin
 import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.link.HudEndpoint
+import dev.carheadsup.protocol.pairing.PairingScan
+import dev.carheadsup.protocol.pairing.PairingUri
 import dev.carheadsup.protocol.traffic.TomTomTraffic
 import dev.carheadsup.protocol.traffic.TrafficState
 import dev.carheadsup.protocol.traffic.TrafficStatus
@@ -74,6 +88,7 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (HudPage) -> Unit) 
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         SectionCard(stringResource(R.string.section_connection)) {
+            ScanPairing(viewModel)
             ToggleRow(
                 title = stringResource(R.string.setting_discovery),
                 description =
@@ -217,6 +232,128 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (HudPage) -> Unit) 
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+private const val TAG = "SetupScreen"
+
+/**
+ * Pairing by the QR code on the HUD: the camera permission is asked for only now, the scanner
+ * reads codes until one is a carheadsup pairing code (saying why others are not), and the view
+ * model stores it and connects (see [MainViewModel.pairWithQrCode]).
+ */
+@Composable
+private fun ScanPairing(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    val pairing by viewModel.qrPairing.collectAsStateWithLifecycle()
+    var scanning by rememberSaveable { mutableStateOf(false) }
+    var problem by rememberSaveable { mutableStateOf<Int?>(null) }
+    var cameraError by rememberSaveable { mutableStateOf<String?>(null) }
+    var denied by rememberSaveable { mutableStateOf(false) }
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val askForCamera =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            denied = !granted
+            scanning = granted
+        }
+
+    fun startScanning() {
+        problem = null
+        cameraError = null
+        denied = false
+        viewModel.resetQrPairing()
+        val granted =
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (granted) scanning = true else askForCamera.launch(Manifest.permission.CAMERA)
+    }
+
+    Text(stringResource(R.string.setup_scan_intro), style = MaterialTheme.typography.bodySmall, color = muted)
+    if (scanning) {
+        QrScanner(
+            onText = { text ->
+                when (val result = PairingUri.parse(text)) {
+                    is PairingScan.Valid -> {
+                        scanning = false
+                        problem = null
+                        viewModel.pairWithQrCode(result.payload)
+                    }
+
+                    PairingScan.Foreign -> problem = R.string.scan_foreign
+
+                    is PairingScan.UnsupportedVersion -> problem = R.string.scan_newer_version
+
+                    is PairingScan.Invalid -> {
+                        Log.w(TAG, "Unreadable pairing code: ${result.detail}")
+                        problem = R.string.scan_invalid
+                    }
+                }
+            },
+            onError = { message ->
+                scanning = false
+                cameraError = message
+            },
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(MaterialTheme.shapes.medium),
+        )
+        Text(
+            stringResource(problem ?: R.string.scan_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (problem == null) muted else StatusColors.warning,
+        )
+        OutlinedButton(onClick = { scanning = false }) { Text(stringResource(R.string.action_cancel)) }
+    } else {
+        FilledTonalButton(onClick = ::startScanning) { Text(stringResource(R.string.action_scan_qr)) }
+    }
+    if (denied) {
+        Text(
+            stringResource(R.string.scan_camera_denied),
+            style = MaterialTheme.typography.bodySmall,
+            color = StatusColors.warning,
+        )
+        TextButton(onClick = { context.startSafely(Permissions.appDetailsIntent(context)) }) {
+            Text(stringResource(R.string.action_app_settings))
+        }
+    }
+    cameraError?.let {
+        Text(
+            stringResource(R.string.scan_camera_failed, it),
+            style = MaterialTheme.typography.bodySmall,
+            color = StatusColors.error,
+        )
+    }
+    QrPairingOutcome(pairing)
+}
+
+/** What became of the last scanned pairing code. */
+@Composable
+private fun QrPairingOutcome(pairing: QrPairing) {
+    val unnamed = stringResource(R.string.scan_unnamed_hud)
+    when (pairing) {
+        QrPairing.Idle -> Unit
+
+        is QrPairing.Pairing ->
+            Text(
+                stringResource(R.string.scan_pairing, pairing.hudName ?: unnamed),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+        is QrPairing.Paired -> {
+            val name = pairing.hudName ?: unnamed
+            val certificate = CertFingerprint.short(pairing.certFingerprint)
+            val address = pairing.endpoint.display()
+            Text(
+                if (pairing.reached) {
+                    stringResource(R.string.scan_paired, name, certificate, address)
+                } else {
+                    stringResource(R.string.scan_paired_unreached, name, certificate, address)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (pairing.reached) StatusColors.ok else StatusColors.warning,
+            )
+            if (!pairing.serviceStarted) {
+                Text(stringResource(R.string.service_start_refused), color = StatusColors.error)
+            }
+        }
     }
 }
 

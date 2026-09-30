@@ -2,7 +2,10 @@ export * from './compose.ts';
 export {
   DIAGNOSTICS_PAGE_SIGNALS,
   DIAGNOSTICS_PAGE_TITLES,
+  PAIRING_PAGE_TIMEOUT_MS,
+  composePairing,
   diagnosticDtcs,
+  diagnosticsPageKind,
   diagnosticsPageKinds,
   gaugeDisplayUnit,
 } from './diagnostics.ts';

@@ -1,5 +1,10 @@
-import { randomBytes } from 'node:crypto';
-import { DEFAULT_CONFIG, parseConfig } from '@carheadsup/core';
+import { randomBytes, randomInt } from 'node:crypto';
+import {
+  DEFAULT_CONFIG,
+  GENERATED_TOKEN_ALPHABET,
+  GENERATED_TOKEN_LENGTH,
+  parseConfig,
+} from '@carheadsup/core';
 import type { HudConfig } from '@carheadsup/core';
 import type { Logger } from '@carheadsup/obd';
 import { SerialQueue, readJsonFile, writeFileAtomic } from './atomic.ts';
@@ -36,6 +41,19 @@ function lockedToken(): string {
   return randomBytes(24).toString('base64url');
 }
 
+/**
+ * A pairing token for a new config: {@link GENERATED_TOKEN_LENGTH} characters drawn uniformly
+ * (`crypto.randomInt`) from the settings app's alphabet — about 139 bits, printable ASCII that
+ * is easy to type into a phone, well within the schema's 256 characters.
+ */
+export function generatePairingToken(): string {
+  let token = '';
+  for (let i = 0; i < GENERATED_TOKEN_LENGTH; i++) {
+    token += GENERATED_TOKEN_ALPHABET[randomInt(GENERATED_TOKEN_ALPHABET.length)];
+  }
+  return token;
+}
+
 /** `config` with the given token fields replaced by random ones. */
 function lockTokens(config: HudConfig, fields: readonly string[]): HudConfig {
   const next = structuredClone(config);
@@ -47,8 +65,10 @@ function lockTokens(config: HudConfig, fields: readonly string[]): HudConfig {
 /**
  * `config.json` in the data directory (or wherever `--config` points).
  *
- * Loading is forgiving: a missing file is created from DEFAULT_CONFIG; invalid fields fall back
- * to defaults field by field (see `parseConfig`) and are logged. When the loaded config differs
+ * Loading is forgiving: a missing file is created from DEFAULT_CONFIG — with a random pairing
+ * token ({@link generatePairingToken}), so a new HUD is never open to every phone (the driver
+ * pairs by scanning the QR code on the HUD itself; an existing file is never given one) —;
+ * invalid fields fall back to defaults field by field (see `parseConfig`) and are logged. When the loaded config differs
  * from the file it is saved back normalised, after keeping the original as `<file>.bak` so a
  * hand edit is never silently lost.
  *
@@ -91,10 +111,17 @@ export class ConfigStore {
     }
 
     if (read.kind === 'missing') {
-      const { config } = parseConfig(DEFAULT_CONFIG);
+      const defaults = parseConfig(DEFAULT_CONFIG).config;
+      const config: HudConfig = {
+        ...defaults,
+        phone: { ...defaults.phone, pairingToken: generatePairingToken() },
+      };
       try {
         await this.save(config);
-        this.logger.info(`Config: created ${this.path} with default settings`);
+        this.logger.info(
+          `Config: created ${this.path} with default settings and a random pairing code ` +
+            '(pair the phone with the QR code on the HUD: parked, last dashboard page)',
+        );
       } catch (err) {
         this.logger.warn(`Config: cannot create ${this.path}: ${describe(err)}; using defaults`);
       }

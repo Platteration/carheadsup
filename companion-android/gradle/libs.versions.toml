@@ -5,6 +5,8 @@
 #  - Compose 1.12+ (BOM 2026.08+) and Lifecycle 2.11+ compile against API 37 and need AGP 9.2,
 #    so the Compose BOM stays on the 1.11 line (2026.06.01) and Lifecycle on 2.10.
 #  - androidx.core 1.18+ / activity 1.13+ require compileSdk 36.1; we compile against 36.
+#  - CameraX stays on the 1.4 line (1.4.2), whose AAR metadata allows compileSdk 36 with AGP 8.13.
+#  - ZXing core (pure Java, Maven Central) decodes the HUD's pairing QR code in :protocol.
 [versions]
 agp = "8.13.2"
 kotlin = "2.3.21"
@@ -17,6 +19,8 @@ androidx-core = "1.17.0"
 androidx-activity = "1.12.4"
 androidx-lifecycle = "2.10.0"
 compose-bom = "2026.06.01"
+camerax = "1.4.2"
+zxing = "3.5.4"
 
 [libraries]
 # Build logic: put on the root buildscript classpath (see ../build.gradle.kts) and applied by id,
@@ -31,6 +35,7 @@ kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 
 # :app
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinx-coroutines" }
@@ -45,3 +50,7 @@ androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 androidx-compose-foundation = { module = "androidx.compose.foundation:foundation" }
 androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
+androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "camerax" }
+androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
+androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
+androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }

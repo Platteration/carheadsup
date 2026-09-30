@@ -663,7 +663,8 @@ describe('sample frames vs frames composed from the same readings', () => {
       },
       FIXTURE_TIME,
     );
-    // The maintenance page is the last one.
+    // The maintenance page comes last but one, before "Pair a phone".
+    state = reduce(state, { type: 'input', action: 'prev-page', at: FIXTURE_TIME }, config);
     state = reduce(state, { type: 'input', action: 'prev-page', at: FIXTURE_TIME }, config);
     const composed = composeFrame(state, config).diagnostics;
     expect(composed?.page).toBe('maintenance');
@@ -680,5 +681,43 @@ describe('sample frames vs frames composed from the same readings', () => {
       null,
       null,
     ]);
+  });
+
+  it('parked-pairing: the code the HUD composes for its endpoint and pairing token', () => {
+    const config: HudConfig = {
+      ...testConfig({ name: 'Golf' }),
+      phone: { ...DEFAULT_CONFIG.phone, pairingToken: 'K7fQ2mZrP4xW9sLt3HvNbC8e' },
+    };
+    let state = createInitialState(config, EMPTY_PERSISTED_STATE, FIXTURE_TIME - 19_000);
+    state = reduce(
+      state,
+      {
+        type: 'pairing/endpoint',
+        endpoint: {
+          hudId: 'AAECAwQFBgcICQoLDA0ODw',
+          certFingerprint: 'fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531',
+          tlsPort: 8443,
+          hosts: ['10.42.0.1', 'carheadsup.local'],
+        },
+        at: FIXTURE_TIME - 19_000,
+      },
+      config,
+    );
+    state = reduce(state, { type: 'pairing/show', at: FIXTURE_TIME - 19_000 }, config);
+    state = reduce(state, { type: 'tick', at: FIXTURE_TIME }, config);
+    const composed = composeFrame(state, config).diagnostics;
+    const sample = fixture('parked-pairing').diagnostics;
+    expect(composed?.pairing).toEqual(sample?.pairing);
+    expect(composed?.page).toBe('pair');
+    // The last page, as in the fixture.
+    expect(composed?.pageIndex).toBe((composed?.pageCount ?? 0) - 1);
+    expect(sample?.pageIndex).toBe((sample?.pageCount ?? 0) - 1);
+    // Without a pairing token the page explains instead (the "open" fixture).
+    const open = { ...config, phone: DEFAULT_CONFIG.phone };
+    const openPage = composeFrame(state, open).diagnostics?.pairing;
+    expect(openPage).toEqual({
+      ...fixture('parked-pairing-open').diagnostics?.pairing,
+      closesInS: openPage?.closesInS,
+    });
   });
 });

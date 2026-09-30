@@ -1,17 +1,27 @@
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_CONFIG, EMPTY_PERSISTED_STATE, parseConfig, tripsToCsv } from '@carheadsup/core';
+import {
+  DEFAULT_CONFIG,
+  EMPTY_PERSISTED_STATE,
+  GENERATED_TOKEN_ALPHABET,
+  parseConfig,
+  tripsToCsv,
+} from '@carheadsup/core';
 import type { PersistedState, TripRecord } from '@carheadsup/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SerialQueue, readJsonFile, writeFileAtomic } from '../../src/store/atomic.ts';
 import {
   ConfigStore,
   ConfigUnavailableError,
+  generatePairingToken,
   serializeConfig,
 } from '../../src/store/config-store.ts';
 import { PersistStore, parsePersistedState } from '../../src/store/persist-store.ts';
 import { TripLogUnavailableError, TripStore, isTripRecord } from '../../src/store/trip-store.ts';
 import { MemoryLogger, makeTempDir } from '../helpers.ts';
+
+/** A generated token: 24 characters of the settings app's alphabet. */
+const TOKEN_PATTERN = /^[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789]{24}$/;
 
 let dir: string;
 let cleanup: () => Promise<void>;
@@ -100,13 +110,48 @@ describe('writeFileAtomic', () => {
 });
 
 describe('ConfigStore', () => {
-  it('creates the file from the defaults when missing', async () => {
+  it('creates the file from the defaults when missing, with a random pairing token', async () => {
     const store = new ConfigStore(join(dir, 'config.json'), logger);
     const result = await store.load();
     expect(result.created).toBe(true);
     expect(result.errors).toEqual([]);
-    expect(result.config).toEqual(parseConfig(DEFAULT_CONFIG).config);
+    const defaults = parseConfig(DEFAULT_CONFIG).config;
+    const token = result.config.phone.pairingToken;
+    expect(token).toMatch(TOKEN_PATTERN);
+    expect(result.config).toEqual({
+      ...defaults,
+      phone: { ...defaults.phone, pairingToken: token },
+    });
     expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(serializeConfig(result.config));
+    expect(logger.text('info')).toMatch(/random pairing code/);
+    // The defaults themselves stay open: only a new file gets a token.
+    expect(DEFAULT_CONFIG.phone.pairingToken).toBe('');
+    // Another new HUD gets another token; the file keeps its own across restarts.
+    const other = await new ConfigStore(join(dir, 'other.json'), logger).load();
+    expect(other.config.phone.pairingToken).toMatch(TOKEN_PATTERN);
+    expect(other.config.phone.pairingToken).not.toBe(token);
+    expect((await store.load()).config.phone.pairingToken).toBe(token);
+  });
+
+  it('leaves an existing config without a pairing token open', async () => {
+    const path = join(dir, 'config.json');
+    await writeFile(path, serializeConfig(parseConfig(DEFAULT_CONFIG).config));
+    const result = await new ConfigStore(path, logger).load();
+    expect(result.created).toBe(false);
+    expect(result.config.phone.pairingToken).toBe('');
+    expect(await readFile(path, 'utf8')).toBe(serializeConfig(parseConfig(DEFAULT_CONFIG).config));
+  });
+
+  it('makes pairing tokens of 24 letters and digits without look-alikes', () => {
+    const tokens = Array.from({ length: 200 }, () => generatePairingToken());
+    for (const token of tokens) expect(token).toMatch(TOKEN_PATTERN);
+    expect(new Set(tokens).size).toBe(tokens.length);
+    const used = new Set(tokens.join(''));
+    // Every character of the alphabet turns up (200 × 24 draws from 56), and nothing else.
+    expect([...used].sort().join('')).toBe([...GENERATED_TOKEN_ALPHABET].sort().join(''));
+    // Valid for the config schema (and the settings app's token rules).
+    const { errors } = parseConfig({ phone: { pairingToken: tokens[0] } });
+    expect(errors).toEqual([]);
   });
 
   it('loads a valid file without rewriting it', async () => {

@@ -143,8 +143,9 @@ the HUD's and the companion's tests both assert them.
 
 - connects over TLS only and, once paired, accepts exactly the pinned certificate; any other is a
   hard stop ("HUD certificate changed — re-pair", [below](#tls-and-the-huds-certificate));
-- pins the `hudId` and the certificate of the first HUD that proves the pairing token (per
-  token: entering another token starts a new pairing), and afterwards answers only that HUD's
+- pins the `hudId` and the certificate the HUD's [pairing QR code](#pairing-by-qr-code) names
+  when you scan it — or, pairing by hand, those of the first HUD that proves the pairing token
+  (per token: entering another token starts a new pairing) — and afterwards answers only that HUD's
   `challenge`. For any other `hudId` it sends nothing at all — not even its proof, with which a
   rogue HUD could test token guesses offline — and shows "a different HUD is answering", with a
   way to forget the old HUD;
@@ -167,13 +168,81 @@ When `phone.pairingToken` changes, the HUD checks the connected phone's proof ag
 token and disconnects it (`bad-token`, 4001) unless it still matches — also when the token is
 removed.
 
-What remains: the first pairing is trust on first use. Someone who controls the car's Wi-Fi at
-that moment can pose as the HUD with a certificate of their own; they cannot complete the
-handshake without the pairing token, and the phone pins nothing, but they receive the phone's
-proof and can test guesses of the pairing token offline. Use a long random token (the settings
-app's *Generate* makes 24 characters, about 139 bits) and compare the fingerprints. After the
-first pairing, and for anyone who only listens, there is nothing to guess from: the session is
-encrypted. See the [security model](architecture.md#security-model).
+Pairing by scanning the HUD's [QR code](#pairing-by-qr-code) leaves nothing to trust on first
+use: the phone learns the token, the `hudId` and the certificate's fingerprint from the HUD's own
+display, pins them before it connects, and sends its first proof only to a connection that
+presented that very certificate. What remains is the manual path (typing the pairing code): the
+first connection trusts the certificate it sees. Someone who controls the car's Wi-Fi at that
+moment can pose as the HUD with a certificate of their own; they cannot complete the handshake
+without the pairing token, and the phone pins nothing, but they receive the phone's proof and can
+test guesses of the pairing token offline. Scan instead, or use a long random token (the settings
+app's *Generate* and a new HUD's config make 24 characters, about 139 bits) and compare the
+fingerprints. After the first pairing, and for anyone who only listens, there is nothing to
+guess from: the session is encrypted. See the [security model](architecture.md#security-model).
+
+### Pairing by QR code
+
+The HUD's display is a channel only someone in (or right at) the car can read, so the HUD shows
+everything a phone needs to pair there, as a QR code: the parked dashboard's last page, *Pair a
+phone*. The page exists only while the car is **parked** — never while moving or merely stopped
+— and turns back to the overview 3 minutes after it came up (the code carries the pairing token,
+and the panel can be seen through the windshield). Reach it with the page buttons like the other
+pages, or with the settings app's *Phone → Show pairing code on the HUD*
+([`POST /api/pairing/show`](#pairing)), which also unblanks the HUD.
+
+The code holds the **pairing URI**, version 1
+([`core/src/protocol/pairing.ts`](../packages/core/src/protocol/pairing.ts); the companion's
+parser is `PairingUri` in `companion-android/protocol`, and shared test vectors,
+[`pairing-uri-vectors.json`](../packages/core/test/protocol/pairing-uri-vectors.json), keep them
+in step):
+
+```text
+carheadsup://pair?v=1&id=<hudId>&fp=<certificate SHA-256, hex>&k=<pairing token>&h=<host>[,<host>…]&p=<TLS port>&n=<HUD name>
+```
+
+| Parameter | Value |
+| --- | --- |
+| `v` | `1`. A later version makes the companion ask for an update, not report a broken code. |
+| `id` | The HUD's id (22 base64url characters), as in `challenge`. |
+| `fp` | The [fingerprint](#tls-and-the-huds-certificate) of the HUD's certificate: 64 lowercase hex digits. |
+| `k` | `phone.pairingToken`, 1–256 characters. A HUD without a token shows no code: the page says the HUD is open and how to set one. |
+| `h` | 1–8 hosts, comma-separated, most preferred first: the HUD's IPv4 addresses (not loopback or link-local 169.254.x.x, in the order of its network interfaces; only the listening address when `server.host` names one) and `<host name>.local`. No IPv6: a link-local address needs a zone that differs on every phone. |
+| `p` | The TLS port (`server.tlsPort`). |
+| `n` | Optional: the HUD's name as it advertises itself over mDNS, "<vehicle name> HUD" (at most 63 bytes of UTF-8). |
+
+Values are percent-encoded UTF-8 — everything but `A–Z a–z 0–9 - . _ ~`, with upper-case hex
+digits — and appear in that order; a `+` is a plus sign. Readers compare the scheme and host
+ignoring ASCII case and ignore surrounding white space, a fragment and parameters they do not
+know; anything else out of shape (a parameter twice, a malformed escape, a field out of range)
+makes the code invalid. For example:
+
+```text
+carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=10.42.0.1,carheadsup.local&p=8443&n=Golf%20HUD
+```
+
+The page draws it with 15 % error correction (a typical code is version 10, 57 × 57 modules),
+dark modules on a light square with a quiet zone of four modules — the one large light area the
+HUD ever draws — next to the HUD's name, the certificate's short fingerprint and "Scan with the
+carheadsup app". Like everything on the panel it is mirrored for the windshield; phone decoders
+read mirrored codes, and the companion also reads the code inverted (its reflection on the glass
+shows light modules on the dark road). The HUD looks up its addresses when the page comes up and
+every 5 s while it is up, so a Wi-Fi that comes up meanwhile shows in the code.
+
+**The pairing flow**, in the companion (*Setup → Scan HUD QR code*):
+
+1. The app asks for the camera permission — only now — and scans (CameraX and ZXing). A QR code
+   that is not a pairing URI, a damaged one or one of a later version is reported and scanning
+   goes on.
+2. It stores the pairing token and pins the `hudId` and the certificate fingerprint of the code,
+   replacing any earlier pin: from now on the TLS layer accepts exactly that certificate.
+3. It tries the code's hosts on the TLS port and sets the first one it reaches as the HUD's
+   address (else the first IPv4 address: the phone may not be on the car's Wi-Fi yet), switching
+   automatic discovery off, and connects.
+4. The connection proceeds as always — `challenge`, `hello`, `welcome` — except that the very
+   first connection already demands the pinned certificate and `hudId`: a device posing as the
+   HUD gets nothing, not even the phone's proof.
+
+Typing the pairing code in instead still works; see the trade-off [above](#authentication).
 
 ### TLS and the HUD's certificate
 
@@ -212,9 +281,11 @@ certificate is accepted, on the WebSocket, for REST calls and in the settings pa
 (which proceeds past its certificate warning only for the pinned certificate on the HUD's
 address). Any other certificate for the paired HUD ends the connection before anything is sent
 and stops the app from trying again: "HUD certificate changed — re-pair" (forget the HUD to pair
-anew). Pairing for the first time, the certificate the connection presents is accepted if the
-mDNS advertisement names it or names none, and bound into the handshake; it is pinned only if
-the HUD then proves the pairing token (or, for an open HUD, the user confirms it).
+anew). Paired by the HUD's [QR code](#pairing-by-qr-code), the phone pins the certificate it
+scanned before it ever connects. Pairing by hand for the first time, the certificate the
+connection presents is accepted if the mDNS advertisement names it or names none, and bound into
+the handshake; it is pinned only if the HUD then proves the pairing token (or, for an open HUD,
+the user confirms it).
 
 ### Phone → HUD
 
@@ -536,12 +607,16 @@ Points a renderer of its own must know (the full contract is `types/frame.ts`):
   driver opened the dashboard with `next-page` / `prev-page` (until `secondary` or driving off
   closes it); it replaces the widget grid with the full-screen dashboard (`DiagnosticsFrame`): `page` (`overview`, then `engine`, `fuel`,
   `electrical` — each only while it has live data — then `trouble-codes`, `trip`,
-  `maintenance`), `pageIndex` / `pageCount` and `title`; `gauges` (signal, label, value in
+  `maintenance`, and last, only while parked, `pair`), `pageIndex` / `pageCount` and `title`; `gauges` (signal, label, value in
   display units or null, unit, decimals, min, max, `status` `ok` / `warn` / `crit` /
   `unknown`); `dtcs` with `milOn`; `trip` (`DiagnosticsTrip`: the trip in progress, or the last
   completed one with `completed: true`; distance, duration, moving time, economy, fuel, cost);
   `maintenance` (`DiagnosticsMaintenanceItem`: status, remaining distance and days, due date —
-  on the overview only the items due soon or overdue); and `vehicle` (VIN, adapter, protocol).
+  on the overview only the items due soon or overdue); `pairing` on the `pair` page only
+  (`PairingFrame`: `status` `ready` / `open` / `unavailable`, `hudName`, the
+  [pairing URI](#pairing-by-qr-code) to draw as a QR code in `uri` when ready, the certificate's
+  short `fingerprint` and `closesInS`, the seconds until the page turns back to the overview);
+  and `vehicle` (VIN, adapter, protocol).
 
 ## ADAS UDP feed
 
@@ -640,6 +715,7 @@ certificate.
 | `POST /api/maintenance/:itemId/done` | `{ "odometerKm"?: number }` | `MaintenanceItemStatus[]` or 404 |
 | `POST /api/odometer` | `{ "odometerKm": number }` | `{ "ok": true }` |
 | `POST /api/input` | `{ "action": InputAction }` | `{ "ok": true }` |
+| `POST /api/pairing/show` | | `ApiPairingShowResult`; 409 unless parked |
 | `GET /api/sim` | | `SimStatus`, or 404 without `--sim` |
 | `POST /api/sim` | `SimControl` | `SimStatus`, or 404 without `--sim` |
 
@@ -754,6 +830,23 @@ See [obd.md](obd.md#clearing-trouble-codes) before using it.
   400 for an odometer outside 0–9,999,999.
 - `POST /api/odometer` with `{"odometerKm": 48210}` sets the odometer (cars that do not report
   PID `A6`).
+
+### Pairing
+
+`POST /api/pairing/show` turns the parked dashboard to its *Pair a phone* page with the
+[pairing QR code](#pairing-by-qr-code) (and unblanks the HUD); the settings app's *Show pairing
+code on the HUD* calls it. `status` says what the page shows: `ready` (the code), `open` (no
+pairing token: how to set one instead) or `unavailable` (no TLS listener, or no address a phone
+can reach — e.g. `server.host` is a loopback address). It is **refused with 409 unless the car is
+parked**:
+
+```json
+{ "ok": false, "status": null, "message": "The HUD shows its pairing code only while the car is parked" }
+```
+
+The code — and with it the pairing token — reaches the renderer only in the frames of that page
+(`diagnostics.pairing.uri`), never in any other frame (`GET /api/config` has the token, behind
+the API token).
 
 ### Input
 

@@ -16,7 +16,13 @@ import dev.carheadsup.protocol.api.TripFormatter
 import dev.carheadsup.protocol.api.TripRecord
 import dev.carheadsup.protocol.auth.HudPin
 import dev.carheadsup.protocol.link.HudAdvertisement
+import dev.carheadsup.protocol.link.HudEndpoint
+import dev.carheadsup.protocol.pairing.PairingAddress
+import dev.carheadsup.protocol.pairing.PairingPayload
 import dev.carheadsup.protocol.traffic.TrafficStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -24,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** The HUD's settings page for the WebView: its address and the certificate it must present. */
 data class HudPage(val url: String, val certFingerprint: String)
@@ -37,6 +44,27 @@ sealed interface Remote<out T> {
     data class Loaded<T>(val value: T) : Remote<T>
 
     data class Failed(val message: String) : Remote<Nothing>
+}
+
+/** Where pairing by the HUD's QR code stands, for the Setup screen. */
+sealed interface QrPairing {
+    data object Idle : QrPairing
+
+    /** A code was scanned; the phone is looking for the HUD at the code's addresses. */
+    data class Pairing(val hudName: String?) : QrPairing
+
+    /**
+     * Paired: the token, the HUD's id and certificate are stored and [endpoint] is the HUD's
+     * address — [reached] when the phone could open a connection to it just now (else it is not
+     * on the car's Wi-Fi yet; the link keeps trying).
+     */
+    data class Paired(
+        val hudName: String?,
+        val endpoint: HudEndpoint,
+        val certFingerprint: String,
+        val reached: Boolean,
+        val serviceStarted: Boolean,
+    ) : QrPairing
 }
 
 /** UI state and actions of [MainActivity]. */
@@ -99,6 +127,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (it.pairingToken.isEmpty()) it.copy(hudPin = HudPin.of(hudId, "", certFingerprint)) else it
         }
         graph.link.reconnectNow()
+    }
+
+    private val qrPairingState = MutableStateFlow<QrPairing>(QrPairing.Idle)
+
+    /** Pairing by the HUD's QR code: where it stands. */
+    val qrPairing: StateFlow<QrPairing> = qrPairingState.asStateFlow()
+
+    /**
+     * Pair with the HUD whose QR code was scanned: store its pairing token, pin its id and
+     * certificate — the scanned fingerprint replaces any earlier pin, and no certificate is ever
+     * trusted on first use this way — and set its address: the first of the code's hosts the
+     * phone reaches now (else the first IPv4 one). Then connect: start the connection service,
+     * or reconnect a running one (also out of a stop after a changed certificate).
+     */
+    fun pairWithQrCode(payload: PairingPayload) {
+        qrPairingState.value = QrPairing.Pairing(payload.hudName)
+        viewModelScope.launch {
+            val candidates = payload.endpoints()
+            val reached =
+                withContext(Dispatchers.IO) {
+                    candidates
+                        .map { endpoint ->
+                            async { endpoint.takeIf { graph.localNetwork.canConnect(it, PROBE_TIMEOUT_MS) } }
+                        }.awaitAll()
+                        .filterNotNull()
+                        .toSet()
+                }
+            val endpoint = PairingAddress.choose(candidates) { it in reached } ?: return@launch
+            graph.settingsStore.update {
+                it.copy(
+                    pairingToken = payload.pairingToken,
+                    hudPin = payload.pin(),
+                    useDiscovery = false,
+                    manualAddress = endpoint.display(),
+                )
+            }
+            val started = HudConnectionService.isRunning.value || startService()
+            graph.link.reconnectNow()
+            qrPairingState.value =
+                QrPairing.Paired(
+                    hudName = payload.hudName,
+                    endpoint = endpoint,
+                    certFingerprint = payload.certFingerprint,
+                    reached = endpoint in reached,
+                    serviceStarted = started,
+                )
+        }
+    }
+
+    /** Forget the outcome of the last QR pairing (a new scan starts). */
+    fun resetQrPairing() {
+        qrPairingState.value = QrPairing.Idle
     }
 
     /**
@@ -170,4 +250,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun currentHudPage(): HudPage? =
         graph.currentHud()?.let { HudPage(it.endpoint.settingsUrl, it.certFingerprint) }
+
+    private companion object {
+        /** How long a scanned address may take to accept a connection before the next is preferred. */
+        const val PROBE_TIMEOUT_MS = 1_500
+    }
 }

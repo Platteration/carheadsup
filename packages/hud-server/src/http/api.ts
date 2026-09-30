@@ -1,5 +1,6 @@
 import {
   INPUT_ACTIONS,
+  composePairing,
   diagnosticDtcs,
   mergeConfig,
   parseConfig,
@@ -10,6 +11,7 @@ import type {
   ApiConfigResult,
   ApiDiagnostics,
   ApiInfo,
+  ApiPairingShowResult,
   ApiTlsInfo,
   DeepPartial,
   HudConfig,
@@ -17,6 +19,7 @@ import type {
   HudState,
   InputAction,
   ObdLinkStatus,
+  PairingPageStatus,
   SignalId,
 } from '@carheadsup/core';
 import type { Clock, ClearDtcsOutcome } from '@carheadsup/obd';
@@ -62,7 +65,25 @@ export interface ApiDeps {
   simulation: Pick<Simulation, 'status' | 'control'> | null;
   /** The TLS listener and its certificate fingerprint, or null when it is not running. */
   tls(): ApiTlsInfo | null;
+  /** Look up where phones reach the HUD again (before the pairing page comes up). */
+  refreshPairing?(): void;
 }
+
+/** Why `POST /api/pairing/show` is refused right now, or null when the page may come up. */
+export function showPairingRefusal(state: HudState): string | null {
+  return state.context.context === 'parked'
+    ? null
+    : 'The HUD shows its pairing code only while the car is parked';
+}
+
+/** What `POST /api/pairing/show` says for what the page shows. */
+const PAIRING_SHOWN: Readonly<Record<PairingPageStatus, string>> = {
+  ready: 'The HUD shows its pairing code: scan it with the carheadsup app',
+  open: 'The HUD has no pairing code to show: set one under Phone first',
+  unavailable:
+    'The HUD cannot show a pairing code: its phone link (TLS) is not running, or it has no ' +
+    'address phones can reach',
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -248,6 +269,19 @@ export function createApiRouter(deps: ApiDeps): Router {
     }
     deps.engine.dispatch({ type: 'input', action: action as InputAction, at: deps.now() });
     return ok({ ok: true });
+  });
+
+  router.add('POST', '/api/pairing/show', () => {
+    const refusal = showPairingRefusal(deps.engine.state);
+    if (refusal !== null) {
+      const result: ApiPairingShowResult = { ok: false, message: refusal, status: null };
+      return ok(result, 409);
+    }
+    deps.refreshPairing?.();
+    deps.engine.dispatch({ type: 'pairing/show', at: deps.now() });
+    const { status } = composePairing(deps.engine.state, deps.engine.config);
+    const result: ApiPairingShowResult = { ok: true, message: PAIRING_SHOWN[status], status };
+    return ok(result);
   });
 
   const notSimulating = () => new HttpError(404, 'The HUD is not running the simulator');

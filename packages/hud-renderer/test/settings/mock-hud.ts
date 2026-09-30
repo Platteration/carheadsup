@@ -35,6 +35,8 @@ export interface MockHudOptions {
   token?: string;
   /** Refuse clearing DTCs (not parked with the engine off). */
   refuseClear?: boolean;
+  /** Refuse showing the pairing code (not parked). */
+  refusePairing?: boolean;
 }
 
 export interface MockResponse {
@@ -286,6 +288,22 @@ export class MockHud {
         }
         this.diagnostics = { ...this.diagnostics, dtcs: [], milOn: false };
         return json(200, { ok: true, message: 'Trouble codes cleared.' });
+      case 'POST /api/pairing/show':
+        if (this.options.refusePairing) {
+          return json(409, {
+            ok: false,
+            status: null,
+            message: 'The HUD shows its pairing code only while the car is parked',
+          });
+        }
+        return json(200, {
+          ok: true,
+          status: this.config.phone.pairingToken === '' ? 'open' : 'ready',
+          message:
+            this.config.phone.pairingToken === ''
+              ? 'The HUD has no pairing code to show: set one under Phone first'
+              : 'The HUD shows its pairing code: scan it with the carheadsup app',
+        });
       case 'GET /api/trips': {
         const limit = Number(searchParams.get('limit') ?? 50);
         const before = searchParams.has('before') ? Number(searchParams.get('before')) : Infinity;

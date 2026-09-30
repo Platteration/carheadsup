@@ -1,5 +1,13 @@
 import { lookupDtc } from '../obd/dtc-lookup.ts';
 import { SIGNAL_META } from '../obd/pids.ts';
+import {
+  PAIRING_URI,
+  encodePairingUri,
+  hudDisplayName,
+  isPairingHost,
+  pairingPayloadProblem,
+} from '../protocol/pairing.ts';
+import { shortFingerprint } from '../protocol/phone-auth.ts';
 import { freshSignal, isEngineRunning } from '../state/selectors.ts';
 import { ALERT_SEVERITY_RANK } from '../types/alerts.ts';
 import type { HudConfig } from '../types/config.ts';
@@ -11,6 +19,7 @@ import type {
   DiagnosticsPageKind,
   DiagnosticsTrip,
   GaugeStatus,
+  PairingFrame,
 } from '../types/frame.ts';
 import type { MaintenanceItemStatus, MaintenanceStatusKind } from '../types/records.ts';
 import type { SignalId, SignalMeta } from '../types/signals.ts';
@@ -39,7 +48,14 @@ export const DIAGNOSTICS_PAGE_TITLES: Readonly<Record<DiagnosticsPageKind, strin
   'trouble-codes': 'Trouble codes',
   trip: 'Trip',
   maintenance: 'Maintenance',
+  pair: 'Pair a phone',
 };
+
+/**
+ * The "Pair a phone" page turns back to the overview this long after it came up: it shows the
+ * pairing token (as a QR code) to anyone who can see the display.
+ */
+export const PAIRING_PAGE_TIMEOUT_MS = 180_000;
 
 /** Signals on the engine / fuel / electrical pages, in display order. */
 export const DIAGNOSTICS_PAGE_SIGNALS: Readonly<
@@ -88,7 +104,9 @@ const TYRE_SIGNALS: readonly SignalId[] = [
 
 /**
  * Pages in order. Engine, fuel and electrical appear only while at least one of their signals
- * has a fresh value, so the driver never pages through screens of dashes.
+ * has a fresh value, so the driver never pages through screens of dashes. "Pair a phone" comes
+ * last and only while parked — never while stopped at the lights, let alone moving: it is the
+ * one page with a large bright area (the QR code) and nothing a driver needs.
  */
 export function diagnosticsPageKinds(state: HudState): DiagnosticsPageKind[] {
   const pages: DiagnosticsPageKind[] = ['overview'];
@@ -98,7 +116,14 @@ export function diagnosticsPageKinds(state: HudState): DiagnosticsPageKind[] {
     }
   }
   pages.push('trouble-codes', 'trip', 'maintenance');
+  if (state.context.context === 'parked') pages.push('pair');
   return pages;
+}
+
+/** The dashboard page `state.ui.page` points at (whether or not the dashboard is up). */
+export function diagnosticsPageKind(state: HudState): DiagnosticsPageKind {
+  const kinds = diagnosticsPageKinds(state);
+  return kinds[pageModulo(state.ui.page, kinds.length)] ?? 'overview';
 }
 
 /** Non-negative page modulo; 0 for an empty range or a non-finite index. */
@@ -124,6 +149,7 @@ export function composeDiagnostics(state: HudState, config: HudConfig): Diagnost
     milOn: vehicle.milOn,
     trip: null,
     maintenance: [],
+    pairing: null,
     vehicle: {
       vin: vehicle.vin,
       adapter: vehicle.link.adapter,
@@ -154,7 +180,42 @@ export function composeDiagnostics(state: HudState, config: HudConfig): Diagnost
       return { ...frame, trip: tripForDashboard(state, config) };
     case 'maintenance':
       return { ...frame, maintenance: dashboardMaintenance(state, config) };
+    case 'pair':
+      return { ...frame, pairing: composePairing(state, config) };
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pairing
+
+/**
+ * The "Pair a phone" page: the pairing URI for the QR code when the HUD has a pairing token and
+ * its phone link is up with an address a phone can use; otherwise why not.
+ */
+export function composePairing(state: HudState, config: HudConfig): PairingFrame {
+  const hudName = hudDisplayName(config.vehicle.name);
+  const shownAt = state.ui.pairingShownAt ?? state.now;
+  const left = Math.max(0, shownAt + PAIRING_PAGE_TIMEOUT_MS - state.now);
+  const closesInS = Math.ceil(left / 1000);
+  const endpoint = state.pairing;
+  if (endpoint === null) {
+    return { status: 'unavailable', hudName, uri: null, fingerprint: null, closesInS };
+  }
+  const fingerprint = shortFingerprint(endpoint.certFingerprint) || null;
+  const token = config.phone.pairingToken;
+  if (token === '') return { status: 'open', hudName, uri: null, fingerprint, closesInS };
+  const payload = {
+    hudId: endpoint.hudId,
+    certFingerprint: endpoint.certFingerprint,
+    pairingToken: token,
+    hosts: [...new Set(endpoint.hosts)].filter(isPairingHost).slice(0, PAIRING_URI.maxHosts),
+    tlsPort: endpoint.tlsPort,
+    hudName,
+  };
+  if (pairingPayloadProblem(payload) !== null) {
+    return { status: 'unavailable', hudName, uri: null, fingerprint, closesInS };
+  }
+  return { status: 'ready', hudName, uri: encodePairingUri(payload), fingerprint, closesInS };
 }
 
 // ---------------------------------------------------------------------------------------------

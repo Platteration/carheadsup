@@ -63,6 +63,7 @@ describe('requests', () => {
     await api.markMaintenanceDone('brake-fluid');
     await api.setOdometer(58_100);
     await api.sendInput('next-page');
+    await api.showPairing();
     await api.getSim();
     await api.controlSim({ throttle: 0.5 });
     expect(hud.requests.map((r) => `${r.method} ${r.path}`)).toEqual([
@@ -81,6 +82,7 @@ describe('requests', () => {
       'POST /api/maintenance/brake-fluid/done',
       'POST /api/odometer',
       'POST /api/input',
+      'POST /api/pairing/show',
       'GET /api/sim',
       'POST /api/sim',
     ]);
@@ -90,7 +92,8 @@ describe('requests', () => {
     expect(bodies[12]).toEqual({});
     expect(bodies[13]).toEqual({ odometerKm: 58_100 });
     expect(bodies[14]).toEqual({ action: 'next-page' });
-    expect(bodies[16]).toEqual({ throttle: 0.5 });
+    expect(bodies[15]).toBeUndefined();
+    expect(bodies[17]).toEqual({ throttle: 0.5 });
   });
 
   it('returns parsed, typed results', async () => {
@@ -302,6 +305,21 @@ describe('errors', () => {
       ok: false,
       message: 'Park and switch the engine off before clearing codes.',
     });
+  });
+
+  it('returns a refused pairing code instead of throwing', async () => {
+    const hud = new MockHud({ refusePairing: true });
+    const api = createHudApi({ fetch: hud.fetch, tokens: memoryTokenStore() });
+    expect(await api.showPairing()).toEqual({
+      ok: false,
+      status: null,
+      message: 'The HUD shows its pairing code only while the car is parked',
+    });
+    const shown = await createHudApi({
+      fetch: new MockHud().fetch,
+      tokens: memoryTokenStore(),
+    }).showPairing();
+    expect(shown).toMatchObject({ ok: true, status: 'ready' });
   });
 
   it('accepts a config result sent with an error status', async () => {

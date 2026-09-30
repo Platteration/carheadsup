@@ -3,6 +3,7 @@ import type {
   ApiConfigResult,
   ApiDiagnostics,
   ApiInfo,
+  ApiPairingShowResult,
   DeepPartial,
   HudConfig,
   InputAction,
@@ -245,6 +246,11 @@ export interface HudApi {
   ): Promise<MaintenanceItemStatus[]>;
   setOdometer(odometerKm: number, options?: CallOptions): Promise<void>;
   sendInput(action: InputAction, options?: CallOptions): Promise<void>;
+  /**
+   * Turn the parked HUD's dashboard to its pairing QR code. A refusal (not parked) resolves with
+   * `ok: false` and the server's explanation rather than throwing.
+   */
+  showPairing(options?: CallOptions): Promise<ApiPairingShowResult>;
   /** Simulator status, or null when the HUD is connected to a real vehicle (404). */
   getSim(options?: CallOptions): Promise<SimStatus | null>;
   /** Throws a `not-found` HudApiError when the HUD is not simulating. */
@@ -290,6 +296,12 @@ const isDiagnostics = (v: unknown): v is ApiDiagnostics =>
 
 const isClearResult = (v: unknown): v is ApiClearDtcsResult =>
   isObject(v) && typeof v.ok === 'boolean' && typeof v.message === 'string';
+
+const isPairingShowResult = (v: unknown): v is ApiPairingShowResult =>
+  isObject(v) &&
+  typeof v.ok === 'boolean' &&
+  typeof v.message === 'string' &&
+  (v.status === null || typeof v.status === 'string');
 
 const isTrips = (v: unknown): v is TripRecord[] =>
   Array.isArray(v) && v.every((t) => isObject(t) && typeof t.id === 'string');
@@ -512,6 +524,15 @@ export function createHudApi(options: HudApiOptions = {}): HudApi {
         options,
       });
     },
+    showPairing: (options) =>
+      request({
+        method: 'POST',
+        path: '/api/pairing/show',
+        expect: 'json',
+        accept: isPairingShowResult,
+        acceptErrorBody: isPairingShowResult,
+        options,
+      }),
     sendInput: async (action, options) => {
       await request({
         method: 'POST',

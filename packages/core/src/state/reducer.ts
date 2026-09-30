@@ -18,7 +18,12 @@ import type { HudState } from '../types/state.ts';
 import { roundTo } from '../units.ts';
 import { createFuelState } from '../vehicle/fuel.ts';
 import { createGearState } from '../vehicle/gear.ts';
-import { followPage } from './dashboard.ts';
+import {
+  applyPairingEndpoint,
+  followPage,
+  showPairingPage,
+  trackPairingPage,
+} from './dashboard.ts';
 import { advanceBrightness, refreshMaintenance } from './derived.ts';
 import { applyInput } from './input.ts';
 import { freshSignal, wallNow } from './selectors.ts';
@@ -131,6 +136,7 @@ export function createInitialState(
       collisionUpdatedAt: null,
       collisionWarningAt: null,
     },
+    pairing: null,
     env: {
       lux: null,
       luxAt: null,
@@ -142,6 +148,7 @@ export function createInitialState(
       blanked: false,
       page: 0,
       dashboardRequested: false,
+      pairingShownAt: null,
       brightnessOffset: 0,
       toastDismissedAt: null,
       lastInputAt: null,
@@ -165,9 +172,10 @@ export function createInitialState(
  * `state.now` never moves backwards: an event stamped earlier than the previous one is applied
  * at `state.now`. A 'config' event applies (and evaluates alerts against) its own config.
  * Alerts and the shift-light flash latch are re-evaluated after every event, a dashboard the
- * driver opened while stopped closes once the vehicle is no longer stopped, and the dashboard
- * stays on the page the driver chose while pages come and go. Unknown event types (from a newer
- * peer) are ignored.
+ * driver opened while stopped closes once the vehicle is no longer stopped, the dashboard
+ * stays on the page the driver chose while pages come and go, and its "Pair a phone" page turns
+ * back to the overview after `PAIRING_PAGE_TIMEOUT_MS`. Unknown event types (from a newer peer)
+ * are ignored.
  */
 export function reduce(state: HudState, event: HudEvent, config: HudConfig): HudState {
   const at = Number.isFinite(event.at) ? Math.max(state.now, event.at) : state.now;
@@ -175,10 +183,15 @@ export function reduce(state: HudState, event: HudEvent, config: HudConfig): Hud
   const timed = at === state.now ? state : { ...state, now: at };
   // `config` is still the previous config here; a 'config' event applies its own.
   const applied = apply(timed, event, config);
+  // Events that choose the page themselves; after any other, the page follows its kind.
   const paging =
-    event.type === 'input' && (event.action === 'next-page' || event.action === 'prev-page');
+    (event.type === 'input' && (event.action === 'next-page' || event.action === 'prev-page')) ||
+    event.type === 'pairing/show';
   const paged = paging ? applied : followPage(state, applied);
-  const next = advanceShiftFlash(closeDashboardUnlessStopped(paged), effectiveConfig);
+  const next = advanceShiftFlash(
+    trackPairingPage(closeDashboardUnlessStopped(paged)),
+    effectiveConfig,
+  );
   const alerts = evaluateAlerts(next, effectiveConfig);
   return alerts === next.alerts ? next : { ...next, alerts };
 }
@@ -268,6 +281,11 @@ function apply(state: HudState, event: HudEvent, config: HudConfig): HudState {
 
     case 'input':
       return applyInput(state, event.action, config);
+
+    case 'pairing/endpoint':
+      return applyPairingEndpoint(state, event.endpoint);
+    case 'pairing/show':
+      return showPairingPage(state);
 
     case 'maintenance/done':
       return applyMaintenanceDone(state, event.itemId, event.odometerKm, config);

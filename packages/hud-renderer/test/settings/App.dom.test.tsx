@@ -581,6 +581,32 @@ describe('settings app', () => {
     await waitFor(() => hud.config.phone.pairingToken === input.value);
   });
 
+  it('shows the pairing code on the parked HUD for the companion app to scan', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    const phone = () => section(root, 'phone');
+    expect(text(phone())).toContain('Anyone who can see the display can scan it');
+    await click(button(phone(), 'Show pairing code on the HUD'));
+    const notice = await waitFor(() => phone().querySelector('.notice--ok'));
+    expect(text(notice)).toContain('scan it with the carheadsup app');
+    expect(hud.writes().map((r) => r.path)).toEqual(['/api/pairing/show']);
+    // The HUD shows the saved code: an edited one must be saved first.
+    expect(text(phone())).not.toContain('Save your changes first');
+    await type(field(phone(), 'Pairing code').querySelector('input')!, 'NewCode2345');
+    expect(text(phone())).toContain('Save your changes first');
+  });
+
+  it('passes on the HUD’s refusal to show the pairing code while not parked', async () => {
+    const root = start(new MockHud({ refusePairing: true }));
+    await ready(root);
+    const phone = section(root, 'phone');
+    await click(button(phone, 'Show pairing code on the HUD'));
+    const notice = await waitFor(() => phone.querySelector('.notice--caution'));
+    expect(text(notice)).toContain('Not shown');
+    expect(text(notice)).toContain('only while the car is parked');
+  });
+
   it('shows the certificate the phone pins, to compare when pairing', async () => {
     const root = start(new MockHud());
     await ready(root);

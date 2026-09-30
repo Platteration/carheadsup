@@ -15,7 +15,7 @@
  * hint once and runs without advertising; the static Avahi service file shipped in deploy/ is
  * the dependency-free alternative.
  */
-import { PROTOCOL_VERSION, type HudConfig } from '@carheadsup/core';
+import { PROTOCOL_VERSION, hudDisplayName, type HudConfig } from '@carheadsup/core';
 import {
   ProcessSupervisor,
   defaultSpawn,
@@ -27,29 +27,17 @@ import type { RuntimeDeps, Service } from '../sources/types.ts';
 export const MDNS_SERVICE_TYPE = '_carheadsup._tcp';
 export const MDNS_PHONE_PATH = '/ws/phone';
 export const AVAHI_PUBLISH = 'avahi-publish-service';
-/** DNS-SD instance names are one DNS label: at most 63 bytes of UTF-8. */
-const MAX_INSTANCE_BYTES = 63;
-
 const MISSING_HINT =
   `mDNS: ${AVAHI_PUBLISH} not found, so the phone cannot discover the HUD automatically. ` +
   'Install avahi-utils ("sudo apt install avahi-utils"), or copy the static Avahi service file ' +
   'from deploy/ to /etc/avahi/services/.';
 
-/** "<vehicle name> HUD", cleaned of control characters and cut to a valid DNS-SD instance name. */
+/**
+ * "<vehicle name> HUD", cleaned of control characters and cut to a valid DNS-SD instance name
+ * (one DNS label, 63 bytes of UTF-8) — the same name the pairing QR code carries.
+ */
 export function mdnsInstanceName(vehicleName: string): string {
-  const base = vehicleName
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  let name = `${base.length > 0 ? base : 'carheadsup'} HUD`;
-  const encoder = new TextEncoder();
-  while (encoder.encode(name).length > MAX_INSTANCE_BYTES) {
-    // Trim the vehicle name (by whole code points) and keep the " HUD" suffix.
-    const chars = Array.from(name.slice(0, -4));
-    chars.pop();
-    name = `${chars.join('').trimEnd()} HUD`;
-  }
-  return name;
+  return hudDisplayName(vehicleName);
 }
 
 /** What the advertisement says about this HUD besides the config. */

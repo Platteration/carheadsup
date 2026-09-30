@@ -282,7 +282,15 @@ export interface DiagnosticDtc {
 }
 
 export type DiagnosticsPageKind =
-  'overview' | 'engine' | 'fuel' | 'electrical' | 'trouble-codes' | 'trip' | 'maintenance';
+  | 'overview'
+  | 'engine'
+  | 'fuel'
+  | 'electrical'
+  | 'trouble-codes'
+  | 'trip'
+  | 'maintenance'
+  /** "Pair a phone": the pairing QR code. Last, and only while parked. */
+  | 'pair';
 
 /** The trip on the parked dashboard, in the driver's units. */
 export interface DiagnosticsTrip {
@@ -323,6 +331,31 @@ export interface DiagnosticsMaintenanceItem {
   dueAtEpochMs: number | null;
 }
 
+/**
+ * What the "Pair a phone" page shows:
+ * - 'ready': the pairing QR code ({@link PairingFrame.uri});
+ * - 'open': no pairing token is set, so there is nothing to pair with — any phone can connect;
+ *   the page explains how to set one instead of showing a code;
+ * - 'unavailable': the HUD's phone link (TLS) is not running, or it has no usable address.
+ */
+export type PairingPageStatus = 'ready' | 'open' | 'unavailable';
+
+/** The "Pair a phone" page of the parked dashboard. */
+export interface PairingFrame {
+  status: PairingPageStatus;
+  /** The HUD's name as phones see it, e.g. "My car HUD". */
+  hudName: string;
+  /**
+   * The pairing URI (`protocol/pairing.ts`) to draw as a QR code — status 'ready' only. It
+   * carries the pairing token, so it is in no other frame than this page's.
+   */
+  uri: string | null;
+  /** The certificate's fingerprint as people compare it (`shortFingerprint`); null without TLS. */
+  fingerprint: string | null;
+  /** Whole seconds until the dashboard turns back to the overview by itself. */
+  closesInS: number;
+}
+
 export interface DiagnosticsFrame {
   page: DiagnosticsPageKind;
   pageIndex: number;
@@ -335,6 +368,8 @@ export interface DiagnosticsFrame {
   trip: DiagnosticsTrip | null;
   /** Maintenance page: every item; overview: only those due soon or overdue. Most urgent first. */
   maintenance: DiagnosticsMaintenanceItem[];
+  /** The "Pair a phone" page; null on every other page. */
+  pairing: PairingFrame | null;
   vehicle: {
     vin: string | null;
     adapter: string | null;
@@ -367,7 +402,7 @@ export interface HudFrame {
   collision: CollisionLevel;
   /**
    * Full-screen diagnostics dashboard: when parked, or when stopped after the driver opened it
-   * ('next-page' / 'prev-page'); never while moving.
+   * ('next-page' / 'prev-page'); never while moving. Its "Pair a phone" page only when parked.
    */
   diagnostics: DiagnosticsFrame | null;
   status: {

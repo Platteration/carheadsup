@@ -68,7 +68,7 @@ const CONFIGS: readonly HudConfig[] = [
       highwayNavRevealM: 500,
     },
     alerts: { showDtcWhileDriving: true },
-    phone: { showMedia: false },
+    phone: { showMedia: false, pairingToken: 'K7fQ2mZrP4xW9sLt3HvNbC8e' },
     sensors: { fallbackLocation: { lat: -33.9, lon: 151.2 } },
   }),
   makeConfig({
@@ -203,7 +203,7 @@ function eventStream(seed: number): (at: number) => HudEvent {
       };
     }
     if (roll < 0.6) return { type: 'tick', at };
-    const kind = Math.floor(rand() * 23);
+    const kind = Math.floor(rand() * 25);
     switch (kind) {
       case 0:
         return {
@@ -342,6 +342,25 @@ function eventStream(seed: number): (at: number) => HudEvent {
           wallOffsetMs: pick(rand, [0, 3_600_000, -90_000, 3 * 86_400_000, Number.NaN]),
           at,
         };
+      case 22:
+        // The server's endpoint for the pairing page (sometimes none, sometimes junk hosts).
+        return {
+          type: 'pairing/endpoint',
+          endpoint: chance(rand, 0.2)
+            ? null
+            : {
+                hudId: 'AAECAwQFBgcICQoLDA0ODw',
+                certFingerprint: 'fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531',
+                tlsPort: chance(rand, 0.1) ? 0 : 8443,
+                hosts: chance(rand, 0.1) ? ['fe80::1'] : ['10.42.0.1', 'carheadsup.local'],
+              },
+          at,
+        };
+      case 23:
+        // The settings app's "show pairing code", or the driver paging on.
+        return chance(rand, 0.5)
+          ? { type: 'pairing/show', at }
+          : { type: 'input', action: 'next-page', at };
       default:
         return { type: 'config', config: pick(rand, CONFIGS), at };
     }
@@ -417,6 +436,16 @@ function assertValidFrame(frame: HudFrame, state: HudState, config: HudConfig): 
     }
     expect(frame.diagnostics.pageIndex).toBeGreaterThanOrEqual(0);
     expect(frame.diagnostics.pageIndex).toBeLessThan(frame.diagnostics.pageCount);
+    // "Pair a phone" only while parked; its payload (the pairing token) on no other page.
+    const { pairing } = frame.diagnostics;
+    if (frame.diagnostics.page === 'pair') {
+      expect(frame.context).toBe('parked');
+      expect(pairing).not.toBeNull();
+      expect(pairing?.uri !== null).toBe(pairing?.status === 'ready');
+      expect(pairing?.closesInS).toBeGreaterThan(0);
+    } else {
+      expect(pairing).toBeNull();
+    }
   } else if (!frame.blanked) {
     expect(frame.context).not.toBe('parked');
   }
@@ -437,6 +466,7 @@ function assertValidState(state: HudState, prev: HudState): void {
   expect(Math.abs(state.ui.brightnessOffset)).toBeLessThanOrEqual(0.5);
   expect(Number.isFinite(state.clock.wallOffsetMs)).toBe(true);
   if (state.ui.dashboardRequested) expect(state.context.context).toBe('stopped');
+  if (state.ui.pairingShownAt !== null) expect(state.context.context).toBe('parked');
   expect(state.odometer.integratedKm).toBeGreaterThanOrEqual(prev.odometer.integratedKm);
 }
 
@@ -459,6 +489,8 @@ function record(frame: HudFrame, effects: HudEffect[]): void {
   if (frame.toast !== null) coverage.add(`toast:${frame.toast.kind}`);
   if (frame.call !== null) coverage.add(`call:${frame.call.state}`);
   if (frame.diagnostics !== null) coverage.add(`page:${frame.diagnostics.page}`);
+  const pairing = frame.diagnostics?.pairing;
+  if (pairing) coverage.add(`pairing:${pairing.status}`);
   if (frame.diagnostics !== null && frame.context === 'stopped') coverage.add('dashboard:stopped');
   if (frame.shiftLight !== null) coverage.add('shiftLight');
   if (frame.collision !== 'none') coverage.add('collision');
@@ -533,9 +565,19 @@ describe('random event streams', () => {
       ].map((k) => `alert:${k}`),
       ...[...EFFECT_TYPES].map((e) => `effect:${e}`),
       ...['ringing', 'dialing', 'active', 'held', 'ended'].map((c) => `call:${c}`),
-      ...['overview', 'engine', 'fuel', 'electrical', 'trouble-codes', 'trip', 'maintenance'].map(
-        (p) => `page:${p}`,
-      ),
+      ...[
+        'overview',
+        'engine',
+        'fuel',
+        'electrical',
+        'trouble-codes',
+        'trip',
+        'maintenance',
+        'pair',
+      ].map((p) => `page:${p}`),
+      'pairing:ready',
+      'pairing:open',
+      'pairing:unavailable',
       'toast:message',
       'toast:media',
       'blanked',

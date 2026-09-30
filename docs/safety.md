@@ -53,6 +53,13 @@ touched on the phone. The HUD itself has no touch interaction. Change settings o
 **Safe actions only when safe.** Clearing trouble codes is refused unless the car is parked with
 the engine off.
 
+**Pairing only when parked.** The one large light area the HUD ever draws — the QR code a phone
+scans to pair ([details](protocol.md#pairing-by-qr-code)) — is on the dashboard's *Pair a phone*
+page, which exists only while the car is parked: not while moving, not at a stop (not even in
+the dashboard the driver opens at a red light), and the settings app's *Show pairing code on
+the HUD* is refused unless parked. The page gives way to the overview as soon as the car drives
+off and closes by itself after 3 minutes. Pair the phone before you set off.
+
 ## What it is not
 
 - **Not a safety system.** The blind-spot and collision warnings only show what an external

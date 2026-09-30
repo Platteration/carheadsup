@@ -18,6 +18,9 @@ everything the car itself cannot know:
 - **Trips**: the HUD's trip log (distance, time, fuel, cost) synced to the phone, plus
   maintenance reminders.
 - A big-button **remote control** and the HUD's **settings app** in a WebView.
+- **Pairing by QR code**: scan the code the parked HUD shows on its own display, and the app
+  knows the pairing code, the HUD's identity and certificate and its address — nothing to type,
+  nothing trusted on first use ([Using it](#using-it)).
 
 ## Architecture
 
@@ -41,8 +44,8 @@ The Gradle build has two modules:
 
 | Module | What | Builds where |
 | --- | --- | --- |
-| `:protocol` | Pure Kotlin/JVM: the wire protocol (mirrors `packages/core/src/types/protocol.ts`), its JSON configuration and size limits, the mutual authentication (`auth`: proofs bound to the certificate, certificate fingerprints, HUD pinning, the handshake state machine), the trust in the HUD's TLS certificate (`tls`: the pinning decisions and the `X509TrustManager` / host name check that enforce them, tested with real TLS handshakes), the mDNS advertisement (`link.HudAdvertisement`), the Google Maps notification parser, OSM speed-limit parsing, Overpass queries and road matching, traffic incidents (`traffic`: the TomTom request and response, the corridor ahead, the selection of incidents ahead, the mapping onto HUD hazards, the request policy and daily budget) and the merging of hazard sources (`hazards`), message-notification extraction, trip/maintenance models and formatting, reconnect backoff, rate limiting, heartbeat and replay state. Everything testable lives here. | Any JDK 17+ machine |
-| `:app` | The Android application (Kotlin, Jetpack Compose + Material 3, OkHttp, no Google Play services). Adapts Android APIs to `:protocol`. | Only with an Android SDK |
+| `:protocol` | Pure Kotlin/JVM: the wire protocol (mirrors `packages/core/src/types/protocol.ts`), its JSON configuration and size limits, the mutual authentication (`auth`: proofs bound to the certificate, certificate fingerprints, HUD pinning, the handshake state machine), the trust in the HUD's TLS certificate (`tls`: the pinning decisions and the `X509TrustManager` / host name check that enforce them, tested with real TLS handshakes), the mDNS advertisement (`link.HudAdvertisement`), the Google Maps notification parser, OSM speed-limit parsing, Overpass queries and road matching, traffic incidents (`traffic`: the TomTom request and response, the corridor ahead, the selection of incidents ahead, the mapping onto HUD hazards, the request policy and daily budget) and the merging of hazard sources (`hazards`), pairing by QR code (`pairing`: the pairing URI parser, the QR decoder built on ZXing — plain, inverted and mirrored codes — and the choice of the HUD's address), message-notification extraction, trip/maintenance models and formatting, reconnect backoff, rate limiting, heartbeat and replay state. Everything testable lives here. | Any JDK 17+ machine |
+| `:app` | The Android application (Kotlin, Jetpack Compose + Material 3, OkHttp, CameraX, no Google Play services). Adapts Android APIs to `:protocol`. | Only with an Android SDK |
 
 `settings.gradle.kts` includes `:app` only when an Android SDK is found (`sdk.dir` in
 `local.properties`, `ANDROID_HOME` or `ANDROID_SDK_ROOT`), and the Android Gradle Plugin is only
@@ -55,6 +58,7 @@ put on the build classpath in that case, so `./gradlew :protocol:test` works on 
 | --- | --- |
 | `HudConnectionService` | Foreground service (types `connectedDevice` + `location`) that owns the link, GPS, media, call and road monitoring while driving. Sticky; "Stop" in its notification. |
 | `HudLink` | WebSocket client for `wss://<hud>:8443/ws/phone`. Finds the HUD by mDNS (`_carheadsup._tcp`, `HudDiscovery`: the TLS port and certificate fingerprint from the TXT records `tls` and `fp`; once paired, only the paired HUD's advertisement) or uses the manual `host:port` (the TLS port, 8443 by default; an address saved by an earlier app on the old default port 8080 is moved to 8443 once); connects through a `HudTrustManager` of its own per attempt — exactly the pinned certificate, or on a first pairing the presented (or advertised) one — and records the certificate the handshake binds; answers the HUD's `challenge` through `HudHandshake` (see [Privacy](#privacy)) and reports *Connected* only once the `welcome` proof checks out, pinning the first verified HUD with its certificate; after that replays the latest nav/road/hazards/media/call state and forwards new messages rate-limited per type (nav ≤ 4 Hz, location 1 Hz, media/road/hazards ≤ 2 Hz); pings every 5 s and reconnects when the HUD is silent for 15 s; exponential backoff (1 s → 30 s, jittered); a refused or untrusted pairing (`bad-token`, a different or unconfirmed HUD, a wrong HUD proof) or a session the same phone replaced (close 4000) waits the maximum; another certificate for the paired HUD ("HUD certificate changed — re-pair") stops it until the HUD is forgotten or *Retry now*; while another phone holds the HUD it is refused with close 1013 and backs off as usual. Restarts mDNS discovery when it finds nothing for 30 s or on *Retry now*. |
+| `QrScanner` | The camera preview that scans the HUD's pairing code (Setup): CameraX's preview and image analysis bound to the screen's lifecycle (the camera closes in the background and when scanning ends); each frame's luminance plane is decoded on a background thread by `:protocol`'s `QrDecoder` (only the latest frame waits). `MainViewModel.pairWithQrCode` then stores the pairing code, pins the HUD's id and certificate from the code (replacing any earlier pin), tries the code's addresses and sets the first one it reaches (`PairingAddress`), and connects. |
 | `LocalNetwork` | Binds HUD sockets to the Wi-Fi network. The HUD usually runs an access point without internet, which Android does not use as the default network; unbound sockets would go out over mobile data and never reach it. |
 | `NavNotificationListener` | Notification access: parses Google Maps' guidance (`GoogleMapsNotificationParser`), encodes the maneuver icon as a ≤ 32 KiB PNG, ends guidance 10 s after the notification disappears (at once when the listener is unbound); extracts message senders (`MessagingNotificationExtractor`) and caller names from call notifications that describe the tracked call. |
 | `MessageRelay` / `MessageReader` | Sends `message` (sender, app, `readingAloud`) while connected; reads the text aloud with TextToSpeech under transient, ducking audio focus (`SpeechQueue`). Pauses for navigation prompts and resumes afterwards; never talks over a call — messages wait for it to end (up to 3 min). `readingAloud` is only set for messages that will be read. |
@@ -65,7 +69,7 @@ put on the build classpath in that case, so `./gradlew :protocol:test` works on 
 | `TrafficProvider` | Optional: TomTom incidents in a corridor about 10 km ahead (over the internet, never the HUD's Wi-Fi), polled per `TrafficPolicy` within a daily budget (`TrafficBudgetStore`); on each fix the incidents ahead → `HazardAggregator`. Status (last update, incidents ahead, errors, requests today) on the Setup screen. See [Traffic](#traffic-tomtom). |
 | `HazardAggregator` | (`:protocol`) Merges cameras and traffic into the one `hazards` list the HUD takes (it replaces its whole list with each message): ids unique, nearest first, at most 50; sent at once when anything but the distances changes, otherwise every 5 s. Each provider reports through its own feed (`HazardFeed`), which it closes when it stops, so a fix still being processed then cannot bring its hazards back. |
 | `TripStore` / `HudApi` | Trip log merged from `trip-completed`, `trips` and `GET /api/trips`; maintenance from `GET /api/maintenance`; units from `GET /api/config`; `POST /api/input` for the remote when the socket is down. REST calls (they carry the API token) only go over HTTPS to the HUD that last proved itself (`HudLink.trusted`), through a client that accepts exactly the certificate it proved itself with. |
-| `MainActivity` | Compose UI: **Status** (connection and the HUD's certificate fingerprint, "a different HUD is answering" and "HUD certificate changed — re-pair" with *Forget paired HUD*, the confirmation of a HUD without pairing code with its certificate, permission checklist, battery optimisation), **Remote** (primary / secondary / pages / blank / brightness), **Trips** (log + maintenance), **Setup** (address, pairing code and the paired HUD with its certificate, API token, feature switches, traffic with the TomTom key and its status, HUD settings). |
+| `MainActivity` | Compose UI: **Status** (connection and the HUD's certificate fingerprint, "a different HUD is answering" and "HUD certificate changed — re-pair" with *Forget paired HUD*, the confirmation of a HUD without pairing code with its certificate, permission checklist, battery optimisation), **Remote** (primary / secondary / pages / blank / brightness), **Trips** (log + maintenance), **Setup** (*Scan HUD QR code*, address, pairing code and the paired HUD with its certificate, API token, feature switches, traffic with the TomTom key and its status, HUD settings). |
 | `HudSettingsActivity` | The HUD's `/settings` page over HTTPS in a WebView (the process is bound to the HUD's Wi-Fi while it is open), only for a HUD that has proven itself. The WebView does not know the HUD's self-signed certificate: `onReceivedSslError` proceeds only when the certificate is the pinned one on the HUD's address, and otherwise cancels and says why. The API token is handed to the page as `?token=` (`HudEndpoint.withApiToken`): the page keeps it in its storage, removes it from the address and sends it with its own API calls, which a WebView cannot add a header to. A WebView drops the page's `blob:` downloads, so files the page generates (the trips CSV) go through `FileExportBridge` (`window.CarheadsupAndroid.saveFile`): into *Downloads* on Android 10+ (MediaStore, no permission), through the share sheet (a `FileProvider` cache file) on Android 8–9; name and type are sanitised (`ExportFile`). |
 
 ### Protocol conformance
@@ -77,11 +81,14 @@ keys ignored and unknown enum values tolerated when decoding. `PhoneWire.encode`
 message through `WireSanitizer` first, which applies the HUD validator's limits (100-character
 names, 44 KiB icon, 50 hazards, finite in-range numbers, no control characters…), so a single odd
 notification never gets an update rejected. `ContractSyncTest` reads the TypeScript sources
-(`nav.ts`, `phone.ts`, `events.ts`, `records.ts`, `protocol.ts`, `validate.ts`, `phone-auth.ts`)
-and fails if enum values, message types, the protocol version, the size limits or the
-authentication constants drift; `PhoneAuthTest` asserts the shared authentication test vectors
-(`packages/core/test/protocol/phone-auth-vectors.json`, which the HUD's tests assert as well, and
-`ContractSyncTest` checks the module's copy against).
+(`nav.ts`, `phone.ts`, `events.ts`, `records.ts`, `protocol.ts`, `validate.ts`, `phone-auth.ts`,
+`pairing.ts`) and fails if enum values, message types, the protocol version, the size limits or
+the authentication and pairing constants drift; `PhoneAuthTest` and `PairingUriTest` assert the
+shared test vectors (`packages/core/test/protocol/phone-auth-vectors.json` and
+`pairing-uri-vectors.json`, which the HUD's tests assert as well, and `ContractSyncTest` checks
+the module's copies against). `QrDecoderTest` decodes the very QR code the HUD's renderer draws
+(`src/test/resources/pairing/hud-qr.txt`, which the renderer's tests keep equal to its output),
+as drawn, mirrored as the panel shows it and inverted as its reflection shows it.
 
 ## Permissions and why
 
@@ -98,6 +105,7 @@ authentication constants drift; `PhoneAuthTest` asserts the shared authenticatio
 | `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Lets the user exempt the app from Doze so the link survives a locked phone. |
 | `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | The HUD link (`wss://` and `https://` on the car's LAN, pinned to the HUD's certificate), Overpass and TomTom (HTTPS), binding to the HUD's Wi-Fi. |
 | `CHANGE_WIFI_MULTICAST_STATE`, `CHANGE_NETWORK_STATE` | mDNS discovery; also the prerequisites Android 14 requires for the `connectedDevice` service type. |
+| `CAMERA` | Scanning the HUD's pairing QR code. Asked for only when you tap *Scan HUD QR code*; declared with the camera as an optional feature, so phones without one install the app and pair by typing the code. |
 
 `<queries>` declares the TTS service and launcher apps, so the app can use TextToSpeech and show
 app names ("WhatsApp", "Spotify"). Cleartext traffic is not allowed (`network_security_config.xml`):
@@ -243,7 +251,8 @@ Requirements: JDK 17+ (the build runs on JDK 21), an Android SDK with platform 3
 > **Status:** `:protocol` is built and tested on every change. `:app` has so far only been
 > type-checked against stubs of the Android and Compose APIs — it has not been built with the
 > Android Gradle Plugin or run on a phone, so expect fixes on the first real build (notification
-> parsing, discovery, pairing screens, the foreground service and file export in particular).
+> parsing, discovery, pairing screens, the QR scanner, the foreground service and file export in
+> particular).
 
 - **Android Studio**: open `companion-android/`, let it create `local.properties`, run the `app`
   configuration.
@@ -268,23 +277,36 @@ Requirements: JDK 17+ (the build runs on JDK 21), an Android SDK with platform 3
 Toolchain versions (`gradle/libs.versions.toml`) are the newest that work together on the Gradle
 8.14 wrapper: AGP 8.13.2 (AGP 9 needs Gradle 9), Kotlin 2.3.21 (Kotlin 2.4 needs the R8 of AGP 9),
 Compose BOM 2026.06.01 (Compose 1.11; 1.12 needs AGP 9.2), Lifecycle 2.10, Activity 1.12,
-Core 1.17 (newer versions need compileSdk 36.1). Moving to Gradle 9 + AGP 9 lifts all of these
+Core 1.17 (newer versions need compileSdk 36.1), CameraX 1.4.2 (a line whose AAR metadata allows
+compileSdk 36) and ZXing core 3.5.4 (Maven Central, used by `:protocol`). Moving to Gradle 9 + AGP 9 lifts all of these
 together.
 
 ## Using it
 
 1. Put the HUD in phone mode (`server.host = 0.0.0.0`, `server.mdns = true`) and join the phone to
    the car's Wi-Fi.
-2. *Setup*: leave "Find the HUD automatically" on (or enter the HUD's address with its TLS port,
-   e.g. `10.42.0.1:8443`), enter the HUD's pairing
-   code (`phone.pairingToken`; generate one in the HUD's settings under *Phone* if it has none)
-   and the API token if the REST API is protected (`server.apiToken`).
-3. *Status*: grant the permissions, exempt the app from battery optimisation, tap *Connect to HUD*.
-   The first HUD that proves the pairing code is remembered as yours, with its certificate
-   ("Paired with HUD … · certificate …" in *Setup*); compare that fingerprint with the HUD's
-   settings (*Phone → Encrypted link*). A HUD without pairing code cannot prove anything: the app
-   shows it as unverified, with its certificate, and connects only after you tap *This is my
-   HUD — connect*.
+2. **Pair by scanning** (parked): open the HUD's *Pair a phone* page — in its settings app
+   *Phone → Show pairing code on the HUD*, or page to the dashboard's last page with the page
+   button — then *Setup → Scan HUD QR code* and point the camera at the HUD's display (the panel,
+   mirrored, or its reflection in the windshield). The app asks for the camera permission only
+   now. The code holds the pairing code, the HUD's id, its certificate's fingerprint and its
+   addresses ([details](../docs/protocol.md#pairing-by-qr-code)): the app stores the code, pins
+   the HUD and certificate right away, sets the first address it reaches (automatic discovery
+   off) and connects. A code of another app, a damaged one or one of a newer HUD is reported and
+   scanning goes on. A HUD without pairing code shows none: set one in its settings first (a new
+   HUD makes one itself).
+
+   **Or by hand**: leave "Find the HUD automatically" on (or enter the HUD's address with its TLS
+   port, e.g. `10.42.0.1:8443`) and enter the HUD's pairing code (`phone.pairingToken`). The
+   first HUD that proves the pairing code is remembered as yours, with its certificate ("Paired
+   with HUD … · certificate …" in *Setup*); compare that fingerprint with the HUD's settings
+   (*Phone → Encrypted link*). A HUD without pairing code cannot prove anything: the app shows it
+   as unverified, with its certificate, and connects only after you tap *This is my HUD —
+   connect*.
+
+   Either way, enter the API token if the REST API is protected (`server.apiToken`).
+3. *Status*: grant the permissions, exempt the app from battery optimisation, tap *Connect to HUD*
+   (after a scan the app has started the connection itself).
 4. Start navigation in Google Maps on the phone.
 5. Optionally, for traffic ahead, enter a TomTom API key in *Setup* ([Traffic](#traffic-tomtom)).
 
@@ -300,7 +322,8 @@ services aggressively — allow auto-start / exclude the app there as well.
 - **Encrypted, and pinned to the HUD's certificate** ([details](../docs/protocol.md#tls-and-the-huds-certificate)).
   Everything goes to the HUD over TLS — the WebSocket (`wss://`), REST calls and the settings
   page (`https://`); the app does not allow cleartext at all (`network_security_config.xml`). The
-  HUD has a self-signed certificate, which the app pins at the first pairing: from then on it
+  HUD has a self-signed certificate, which the app pins when it pairs — from the scanned code,
+  or at the first connection when you pair by hand: from then on it
   accepts exactly that certificate, and a different one — someone posing as the HUD, or a HUD
   that was reset — is a hard stop, "HUD certificate changed — re-pair", until you *Forget paired
   HUD*. Certificate authorities and host names play no part (the HUD is reached by IP address).
@@ -308,8 +331,9 @@ services aggressively — allow auto-start / exclude the app there as well.
   The pairing code never leaves the phone: the HUD sends a `challenge`, the phone answers with an
   HMAC proof over it, and the HUD proves the code in return — both proofs bound to the
   certificate the phone was shown, so a relay with a certificate of its own cannot get through.
-  The app pins the id and certificate of the first HUD that proves the code (per pairing code;
-  when the mDNS advertisement names a certificate, it must be that one) and from then on:
+  The app pins the id and certificate from the HUD's QR code, or — pairing by hand — those of the
+  first HUD that proves the code (per pairing code; when the mDNS advertisement names a
+  certificate, it must be that one), and from then on:
   - sends nothing — no position, navigation, media, calls, messages, no REST call with the API
     token, not even its proof — to a HUD with another id or certificate ("A different HUD is
     answering" / "HUD certificate changed"; if you replaced or reset your HUD, *Forget paired
@@ -317,11 +341,15 @@ services aggressively — allow auto-start / exclude the app there as well.
   - sends nothing and ignores everything (call actions included) from its own HUD until the HUD's
     proof checks out;
   - with automatic discovery, only uses the paired HUD's mDNS advertisement (or one without an id).
-- **The first pairing trusts the certificate it sees.** Someone who controls the car's Wi-Fi at
-  that moment cannot get in without the pairing code, but receives the phone's proof and could
-  test guesses of a weak code offline: use a long random one (the HUD's *Generate*), and compare
-  the certificate the app shows with the HUD's settings. After that, and for anyone who only
-  listens, there is nothing to read or guess from.
+- **Scanning trusts nothing on first use; pairing by hand does.** A scanned code comes from the
+  HUD's own display, and the app pins its certificate before connecting: a device posing as the
+  HUD on the Wi-Fi gets nothing, not even the phone's proof. Paired by hand, the first connection
+  trusts the certificate it sees: someone who controls the car's Wi-Fi at that moment cannot get
+  in without the pairing code, but receives the phone's proof and could test guesses of a weak
+  code offline — use a long random one (the HUD's *Generate*), and compare the certificate the
+  app shows with the HUD's settings. After that, and for anyone who only listens, there is
+  nothing to read or guess from. The camera is used only while the scanner is open, and frames
+  never leave the phone.
 - **A HUD without pairing code is not verified.** Anyone can make the proofs then. The app shows
   such a HUD as unverified with its certificate's fingerprint, connects only after you confirm
   it, and pins both. Set a pairing code on the HUD. Use the car's own password-protected Wi-Fi

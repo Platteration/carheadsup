@@ -12,7 +12,8 @@
 #     server, and "carheadsup-kiosk" (video, render, input) that runs the kiosk browser;
 #   - copies the built code to /opt/carheadsup (owned by root, without devDependencies);
 #   - creates /var/lib/carheadsup (data) and /etc/carheadsup (config.json, created with defaults
-#     by the server on its first start), keeping whatever is already there;
+#     and a random pairing code by the server on its first start), keeping whatever is already
+#     there;
 #   - installs /etc/default/carheadsup (once), a udev rule for the display backlight, the kiosk's
 #     PAM stack, the static Avahi advertisement when avahi-utils is missing, and the systemd
 #     units carheadsup.service, carheadsup-kiosk.service and obd-rfcomm@.service;
@@ -475,13 +476,13 @@ summary() {
   if [[ $tls_port == off ]]; then
     phone="off: server.tlsPort is null, so the companion app cannot connect"
   else
-    phone="TLS port ${tls_port} (open it in any firewall); the certificate's fingerprint is in the settings app under Phone"
+    phone="TLS port ${tls_port} (open it in any firewall); to pair, park and scan the QR code the HUD shows (settings app: Phone, Show pairing code on the HUD)"
   fi
   cat <<EOF
 
 carheadsup is installed.
   code     ${PREFIX}
-  config   ${CONFIG_FILE}   (created with defaults on the first start)
+  config   ${CONFIG_FILE}   (created with defaults and a random pairing code on the first start)
   data     ${DATA_DIR}   (tls.pem: the HUD's TLS key and certificate, made on the first start)
   logs     journalctl -u carheadsup -f     (kiosk: journalctl -u carheadsup-kiosk -f)
   settings http://${host}.local:${port}/settings   (or http://<HUD address>:${port}/settings)

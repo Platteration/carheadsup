@@ -37,11 +37,13 @@ function page(h: Harness, index: number): DiagnosticsFrame {
 describe('pages', () => {
   it('lists only the pages with live data, in a fixed order', () => {
     const bare = new Harness();
+    expect(bare.state.context.context).toBe('parked');
     expect(diagnosticsPageKinds(bare.state)).toEqual([
       'overview',
       'trouble-codes',
       'trip',
       'maintenance',
+      'pair',
     ]);
     const h = parked({ rpm: 780, longFuelTrimB1: 4.7, controlModuleVoltage: 14.1 });
     expect(diagnosticsPageKinds(h.state)).toEqual([
@@ -52,6 +54,7 @@ describe('pages', () => {
       'trouble-codes',
       'trip',
       'maintenance',
+      'pair',
     ]);
   });
 
@@ -61,15 +64,16 @@ describe('pages', () => {
     expect(page(h, 1)).toMatchObject({
       page: 'engine',
       pageIndex: 1,
-      pageCount: 5,
+      pageCount: 6,
       title: 'Engine',
     });
-    expect(page(h, 7)).toMatchObject({
+    expect(page(h, 8)).toMatchObject({
       page: 'trouble-codes',
       pageIndex: 2,
       title: 'Trouble codes',
     });
-    expect(page(h, -1)).toMatchObject({ page: 'maintenance', pageIndex: 4 });
+    expect(page(h, -1)).toMatchObject({ page: 'pair', pageIndex: 5, title: 'Pair a phone' });
+    expect(page(h, -2)).toMatchObject({ page: 'maintenance', pageIndex: 4 });
     expect(page(h, 0).vehicle).toEqual({
       vin: 'WVWZZZAUZKW123456',
       adapter: 'ELM327 v1.5',

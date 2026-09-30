@@ -342,12 +342,21 @@ Open the settings app from the phone — the companion's *Setup → HUD settings
 `http://10.42.0.1:8080/settings` (HUD hotspot) or `http://hud.local:8080/settings` — and go
 through it. Changes apply immediately. At least:
 
-1. **Security**: *Phone → Pairing code* and *Server → API token* (both have a generate button),
-   then enter the same values in the companion's *Setup*. When the companion connects the first
-   time, it shows the HUD certificate's fingerprint (*Status*); it should be the one under
-   *Phone → Encrypted link* in the settings app (or in `journalctl -u carheadsup | grep 'Phone
-   link'`). The companion remembers the certificate from then on. From the Pi itself (loopback
-   needs no token) the same is:
+1. **Pair the phone** — parked: the HUD made a random pairing code when it created its
+   `config.json`. In the settings app, *Phone → Show pairing code on the HUD* (or page to the
+   dashboard's last page, *Pair a phone*, with the page button): the HUD shows a QR code. In the
+   companion, *Setup → Scan HUD QR code* and point the phone at the HUD's display. The app now
+   knows the pairing code, the HUD's identity and its certificate — it pins them without trusting
+   anything on first use — and the HUD's address, and connects. The page closes by itself after
+   3 minutes and only exists while parked
+   ([details](protocol.md#pairing-by-qr-code)). A HUD installed before this had no pairing code:
+   generate one under *Phone → Pairing code*, save, then show the code.
+2. **Security**: *Server → API token* (generate), then enter it in the companion's *Setup*. To
+   pair by hand instead of scanning, enter *Phone → Pairing code* there too: when the companion
+   connects the first time, it shows the HUD certificate's fingerprint (*Status*); it should be
+   the one under *Phone → Encrypted link* in the settings app (or in
+   `journalctl -u carheadsup | grep 'Phone link'`). The companion remembers the certificate from
+   then on. From the Pi itself (loopback needs no token) setting both tokens is:
 
    ```sh
    API_TOKEN=$(openssl rand -hex 16)
@@ -362,12 +371,12 @@ through it. Changes apply immediately. At least:
    `http://hud.local:8080/settings?token=<token>` or `/dev?token=<token>` once). The kiosk on
    the Pi itself needs none.
 
-2. **Vehicle**: fuel type, tank size, engine displacement, transmission, redline, fuel price.
-3. **Units**: km/h or mph, economy, temperature, pressure, clock, currency.
-4. **OBD**: serial path or TCP address if not the Bluetooth default.
-5. **Projection**: sit in the driver's seat, turn on the calibration grid, square it up with the
+3. **Vehicle**: fuel type, tank size, engine displacement, transmission, redline, fuel price.
+4. **Units**: km/h or mph, economy, temperature, pressure, clock, currency.
+5. **OBD**: serial path or TCP address if not the Bluetooth default.
+6. **Projection**: sit in the driver's seat, turn on the calibration grid, square it up with the
    keystone corners, size and position; turn the grid off.
-6. **Sensors and buttons**, **Layout**, **Alerts**, **Maintenance** (enter the date and odometer
+7. **Sensors and buttons**, **Layout**, **Alerts**, **Maintenance** (enter the date and odometer
    of each item's last service).
 
 Leave *Server → Port*, *Phone port (TLS)* and *Listen address* alone unless you need them: they
@@ -527,6 +536,8 @@ renderer clients pass their token) or message content.
 | Companion says "HUD certificate changed — re-pair" | The HUD at the paired address presented another TLS certificate than the paired one, and the app stopped. Expected after `/var/lib/carheadsup/tls.pem` was deleted or replaced, or the Pi's card was set up anew: then *Forget paired HUD* and pair again, comparing the new fingerprint with the settings app. Otherwise another device is posing as the HUD — do not forget the HUD; check who is on the car's Wi-Fi. |
 | Companion says "A different HUD is answering" | It is paired with another HUD id than this one's (`/var/lib/carheadsup/hud-id`): the Pi was replaced or its data directory reset. If this is your HUD, *Forget paired HUD* in the companion; it pairs again with the next HUD that proves the code. |
 | Companion asks "This is my HUD — connect" | The HUD has no pairing code, so the phone cannot verify it. Confirm only if it is yours; better, set a pairing code. |
+| The pairing page shows no QR code | "No pairing code set": generate one under *Phone → Pairing code* and save. "Pairing unavailable": the TLS listener is not running (`server.tlsPort`, see the log) or the HUD listens only on a loopback address (`server.host`). The page exists only while parked. |
+| The companion does not read the QR code | Hold the phone close to the display and square to it, and avoid glare; turning the HUD brighter helps. Scanning the reflection in the windshield works too. It reports a code that is not a carheadsup pairing code, or one it cannot read. Pairing by hand still works. |
 | Settings app asks for a token | `server.apiToken` is set: enter it (it is stored in that browser). |
 | Developer console from another device: "No feed", no live HUD | `server.apiToken` is set: enter it when the console asks, or open `/dev?token=<token>` once. |
 | Browser says "Unknown host name" | The HUD answers only to its IP address, `localhost`, `<hostname>` and `<hostname>.local` (protection against DNS rebinding). Use one of those, or add the name to `CARHEADSUP_ALLOWED_HOSTS` in `/etc/default/carheadsup`. |

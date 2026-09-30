@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
-import { hostname } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { mergeConfig, shortFingerprint } from '@carheadsup/core';
 import type {
@@ -11,11 +11,13 @@ import type {
   HudConfig,
   HudFrame,
   HudToPhone,
+  PairingEndpoint,
 } from '@carheadsup/core';
 import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
 import { advertiseHud as defaultAdvertiseHud } from './discovery/mdns.ts';
 import type { MdnsAdvert } from './discovery/mdns.ts';
+import { PAIRING_HOSTS_REFRESH_MS, pairingHosts } from './discovery/pairing-hosts.ts';
 import { HudEngine, maintenanceDueMessage } from './engine.ts';
 import { createApiRouter } from './http/api.ts';
 import type { ConfigChange } from './http/api.ts';
@@ -119,6 +121,12 @@ export interface HudServerOptions {
   createSensorSources?: (config: HudConfig) => EventSource[];
   createFrameSinks?: (options: FrameSinkOptions, deps: RuntimeDeps) => FrameSink[];
   advertiseHud?: (config: HudConfig, advert: MdnsAdvert, deps: RuntimeDeps) => Service | null;
+  /**
+   * The HUD's addresses for the pairing QR code, most preferred first, given the address the
+   * server listens on. Default: from the network interfaces and the host name (see
+   * `pairingHosts`).
+   */
+  pairingHosts?: (listenHost: string) => string[];
   createObdService?: ObdServiceFactory;
   tuning?: HudServerTuning;
 }
@@ -143,6 +151,11 @@ export interface HudServer {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** The HUD's addresses from its network interfaces and host name (see `pairingHosts`). */
+function defaultPairingHosts(listenHost: string): string[] {
+  return pairingHosts(listenHost, networkInterfaces(), hostname());
 }
 
 /**
@@ -257,6 +270,42 @@ export function createHudServer(options: HudServerOptions): HudServer {
       mdns = null;
       logger.warn(`mDNS: advertising failed: ${describe(err)}`);
     }
+  }
+
+  /** When the HUD's addresses for the pairing QR code were last looked up (wall clock). */
+  let pairingHostsAt = Number.NEGATIVE_INFINITY;
+  /** The address the listeners are bound to (a new `server.host` needs a restart). */
+  let listenHost: string | null = null;
+
+  /**
+   * Where phones reach this HUD, for the pairing page's QR code: its id, the TLS listener's port
+   * and certificate, and its addresses. Null while the TLS listener is not running.
+   */
+  function pairingEndpoint(): PairingEndpoint | null {
+    const tls = tlsInfo();
+    if (tls === null || hudId === null || listenHost === null) return null;
+    let hosts: string[];
+    try {
+      hosts = (options.pairingHosts ?? defaultPairingHosts)(listenHost);
+    } catch (err) {
+      logger.warn(`Pairing: cannot list the HUD's addresses: ${describe(err)}`);
+      hosts = [];
+    }
+    return { hudId, certFingerprint: tls.fingerprint, tlsPort: tls.port, hosts };
+  }
+
+  /** Tell the engine where phones reach the HUD now (it ignores an unchanged endpoint). */
+  function refreshPairingEndpoint(): void {
+    if (engine === null || stopping !== null) return;
+    pairingHostsAt = now();
+    engine.dispatch({ type: 'pairing/endpoint', endpoint: pairingEndpoint(), at: 0 });
+  }
+
+  /** While the pairing page is up, follow address changes (e.g. the Wi-Fi came up). */
+  function refreshPairingWhileShown(frame: HudFrame): void {
+    if (frame.diagnostics?.page !== 'pair') return;
+    if (Math.abs(now() - pairingHostsAt) < PAIRING_HOSTS_REFRESH_MS) return;
+    refreshPairingEndpoint();
   }
 
   /** Re-advertise with a new config; serialised so rapid changes never orphan an advertisement. */
@@ -567,6 +616,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
       },
       trips: tripStore,
       tls: tlsInfo,
+      refreshPairing: refreshPairingEndpoint,
       simulation:
         sim === null
           ? null
@@ -630,6 +680,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
     }
 
     hudEngine.start();
+    listenHost = config.server.host;
+    refreshPairingEndpoint();
     obd.start();
     if (sim !== null) sim.start();
     const ctx: SourceContext = { ...deps, emit: (event) => hudEngine.dispatch(event) };
@@ -643,6 +695,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
     }
     unsubscribeSinks = hudEngine.onFrame((frame) => {
       switchGridOffWhenMoving(frame);
+      refreshPairingWhileShown(frame);
       for (const sink of sinks) {
         try {
           sink.onFrame(frame);

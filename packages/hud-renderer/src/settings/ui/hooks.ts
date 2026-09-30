@@ -1,3 +1,4 @@
+import { GENERATED_TOKEN_ALPHABET, GENERATED_TOKEN_LENGTH } from '@carheadsup/core';
 import type { RefObject } from 'preact';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { isAbortError } from '../../common/api.ts';
@@ -175,14 +176,14 @@ export async function copyText(text: string): Promise<boolean> {
   return ok;
 }
 
-/** Characters for generated tokens: letters and digits without look-alikes (0/O, 1/l/I). */
-const TOKEN_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+const TOKEN_ALPHABET = GENERATED_TOKEN_ALPHABET;
 
 /**
  * Random token for pairing / API access from the Crypto API: 24 characters ≈ 139 bits, easy to
- * type into a phone. Rejection sampling keeps every character equally likely.
+ * type into a phone (letters and digits without look-alikes, as the HUD makes the pairing token
+ * of a new config). Rejection sampling keeps every character equally likely.
  */
-export function generateToken(length = 24): string {
+export function generateToken(length = GENERATED_TOKEN_LENGTH): string {
   const limit = 256 - (256 % TOKEN_ALPHABET.length);
   let out = '';
   while (out.length < length) {

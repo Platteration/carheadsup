@@ -10,6 +10,7 @@ import type {
 import type { ComponentChildren } from 'preact';
 import { MISSING, formatCurrency, formatDurationS, formatNumber } from '../../common/format.ts';
 import { Glyph } from '../icons/index.ts';
+import { PairingPage } from './Pairing.tsx';
 import { clamp01, cx, economyUnitLabel, gaugeTone, lookup, pct, splitDistance } from '../util.ts';
 import type { Tone } from '../util.ts';
 
@@ -316,6 +317,8 @@ function PageBody({ d }: { d: DiagnosticsFrame }) {
       return <TripPage trip={d.trip} />;
     case 'maintenance':
       return <MaintenanceList items={d.maintenance} />;
+    case 'pair':
+      return d.pairing ? <PairingPage pairing={d.pairing} /> : <Empty>Pairing unavailable</Empty>;
     case 'overview':
       return (
         <>
