@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The HUD serves plain HTTP/WebSocket on the car's local network at an address that is only
-     known at runtime (DHCP / mDNS), so cleartext cannot be limited to a fixed domain. Everything
-     on the internet (Overpass) is requested over HTTPS. -->
+<!-- Nothing leaves the app in the clear. The HUD is reached over TLS only (wss:// and https://
+     to its self-signed certificate: the app pins that certificate itself, in HudTrustManager for
+     its own connections and by fingerprint in the settings page's WebView), and everything on
+     the internet (Overpass, TomTom) over HTTPS, trusting the system's certificate authorities. -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

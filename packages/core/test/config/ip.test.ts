@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeIpAddress } from '../../src/index.ts';
+import { ipAddressBytes, normalizeIpAddress } from '../../src/index.ts';
 
 describe('normalizeIpAddress', () => {
   it.each([
@@ -95,6 +95,35 @@ describe('normalizeIpAddress', () => {
       const once = normalizeIpAddress(input);
       expect(once).not.toBeNull();
       expect(normalizeIpAddress(once!)).toBe(once);
+    }
+  });
+});
+
+describe('ipAddressBytes', () => {
+  it('gives 4 bytes for IPv4 and 16 for IPv6', () => {
+    expect(Array.from(ipAddressBytes('10.42.0.1') ?? [])).toEqual([10, 42, 0, 1]);
+    expect(Array.from(ipAddressBytes('127.0.0.1') ?? [])).toEqual([127, 0, 0, 1]);
+    expect(Array.from(ipAddressBytes('::1') ?? [])).toEqual([...new Array<number>(15).fill(0), 1]);
+    expect(Array.from(ipAddressBytes('2001:DB8::a:1') ?? [])).toEqual([
+      0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a, 0, 0x01,
+    ]);
+  });
+
+  it('treats an IPv4-mapped IPv6 address as IPv4', () => {
+    expect(Array.from(ipAddressBytes('::ffff:10.42.0.50') ?? [])).toEqual([10, 42, 0, 50]);
+  });
+
+  it('refuses what is not an address literal', () => {
+    for (const bad of [
+      '',
+      'localhost',
+      '10.42.0',
+      '010.1.1.1',
+      '::1%eth0',
+      '[::1]',
+      '1.2.3.4/24',
+    ]) {
+      expect(ipAddressBytes(bad)).toBeNull();
     }
   });
 });

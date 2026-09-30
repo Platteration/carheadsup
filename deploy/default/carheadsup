@@ -16,6 +16,11 @@
 #CARHEADSUP_PORT=8080
 #CARHEADSUP_HOST=0.0.0.0
 
+# Override server.tlsPort: the HTTPS port the companion app connects to (its link is encrypted
+# and pinned to the HUD's certificate), or "off". Re-run deploy/install.sh if it installed the
+# static Avahi file.
+#CARHEADSUP_TLS_PORT=8443
+
 # Extra host names (comma-separated) under which browsers may reach the HUD. IP addresses,
 # localhost, the Pi's host name and <hostname>.local always work; any other name is refused
 # (protection against DNS rebinding).

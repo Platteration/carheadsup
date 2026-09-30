@@ -103,3 +103,20 @@ export function normalizeIpAddress(text: string): string | null {
   }
   return formatIpv6(groups);
 }
+
+/**
+ * The bytes of an IPv4 (4 bytes) or IPv6 (16 bytes) address literal, as X.509 `iPAddress`
+ * names hold them, or null when `text` is not one. An IPv4-mapped IPv6 address gives its IPv4
+ * bytes, like {@link normalizeIpAddress}.
+ */
+export function ipAddressBytes(text: string): Uint8Array | null {
+  const canonical = normalizeIpAddress(text);
+  if (canonical === null) return null;
+  if (!canonical.includes(':')) {
+    const v4 = parseIpv4(canonical);
+    return v4 === null ? null : Uint8Array.from(v4);
+  }
+  const groups = parseIpv6(canonical);
+  if (groups === null) return null;
+  return Uint8Array.from(groups.flatMap((g) => [g >> 8, g & 0xff]));
+}

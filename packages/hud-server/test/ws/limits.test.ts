@@ -147,6 +147,27 @@ describe('limitConnections', () => {
     await listen({});
     expect(server?.headersTimeout).toBe(10_000);
   });
+
+  it('shares one budget between several listeners (HTTP and HTTPS)', async () => {
+    const second = createServer((_req, res) => res.end('ok'));
+    try {
+      server = createServer((_req, res) => res.end('ok'));
+      limitConnections([server, second], { maxPerAddress: 2, exempt: () => false });
+      await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+      await new Promise<void>((resolve) => second.listen(0, '127.0.0.1', resolve));
+      const port = (server.address() as AddressInfo).port;
+      const other = (second.address() as AddressInfo).port;
+      expect(second.headersTimeout).toBe(10_000);
+      expect(await openIdle(port)).toBe(false);
+      expect(await openIdle(other)).toBe(false);
+      // The third connection from this address is refused on either listener.
+      expect(await openIdle(other)).toBe(true);
+      expect(await openIdle(port)).toBe(true);
+    } finally {
+      for (const client of clients.splice(0)) client.destroy();
+      await new Promise<void>((resolve) => second.close(() => resolve()));
+    }
+  });
 });
 
 function lanAddress(): string | null {

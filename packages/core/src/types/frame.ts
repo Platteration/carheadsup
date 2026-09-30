@@ -110,7 +110,7 @@ export interface HazardWidget extends WidgetBase {
   speedLimit: number | null;
   /** Sign style for `speedLimit` (the driver's configured speed-limit sign). */
   limitStyle: SpeedLimitSignStyle;
-  /** Expected delay for traffic, whole minutes. */
+  /** Expected delay for traffic, whole minutes (rounded; null when under half a minute). */
   delayMinutes: number | null;
   label: string;
 }

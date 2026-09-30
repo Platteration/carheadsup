@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# carheadsup: tests for the port detection in deploy/install.sh (effective_port), which fills in
-# the static Avahi advertisement and the summary. Sources the installer's functions without
-# running it; needs Node.js, no root, and changes nothing outside a temporary directory.
+# carheadsup: tests for the port detection in deploy/install.sh (effective_port and
+# effective_tls_port), which fills in the static Avahi advertisement and the summary. Sources the
+# installer's functions without running it; needs Node.js, no root, and changes nothing outside a
+# temporary directory.
 set -euo pipefail
 
 TEST_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -49,6 +50,57 @@ expect "server.port in the unit's --config file" 8090 "$shipped" "${WORK}/env-em
 expect "CARHEADSUP_PORT beats server.port" 8092 "$shipped" "${WORK}/env-port" "${WORK}/etc-config.json"
 expect "--config from a drop-in (read-only root)" 8091 "$dropin_config" "${WORK}/env-empty" "${WORK}/etc-config.json"
 expect "--port from a drop-in beats everything" 8093 "$dropin_port" "${WORK}/env-port" "${WORK}/etc-config.json"
+
+# The TLS port of the phone link: --tls-port, CARHEADSUP_TLS_PORT, server.tlsPort, else 8443;
+# "off" when switched off.
+printf '{ "server": { "port": 8090, "tlsPort": 9443 } }\n' >"${WORK}/tls-config.json"
+printf '{ "server": { "tlsPort": null } }\n' >"${WORK}/tls-off-config.json"
+printf 'CARHEADSUP_TLS_PORT=9444\n' >"${WORK}/env-tls"
+printf "CARHEADSUP_TLS_PORT='off'\n" >"${WORK}/env-tls-off"
+dropin_tls=$(printf '%s\n[Service]\nExecStart=\nExecStart=/usr/bin/node main.ts --tls-port 9445 --config %s\n' \
+  "$shipped" "${WORK}/tls-config.json")
+dropin_tls_off=$(printf '%s\n[Service]\nExecStart=\nExecStart=/usr/bin/node main.ts --tls-port=OFF\n' "$shipped")
+
+# expect_tls <description> <expected> <unit text> <env file> <default config>
+expect_tls() {
+  local description=$1 expected=$2 actual
+  actual=$(effective_tls_port "$3" "$4" "$5")
+  if [[ $actual == "$expected" ]]; then
+    printf 'ok    install.sh TLS port: %s\n' "$description"
+  else
+    printf 'FAIL  install.sh TLS port: %s: expected %s, got %s\n' "$description" "$expected" "$actual" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+expect_tls "nothing configured" 8443 "" "${WORK}/missing-env" "${WORK}/missing.json"
+expect_tls "server.tlsPort in the config file" 9443 "" "${WORK}/env-empty" "${WORK}/tls-config.json"
+expect_tls "server.tlsPort null switches it off" off "" "${WORK}/env-empty" "${WORK}/tls-off-config.json"
+expect_tls "a config without tlsPort" 8443 "" "${WORK}/env-empty" "${WORK}/etc-config.json"
+printf '{ "server": { "port": 8443 } }\n' >"${WORK}/legacy-8443-config.json"
+expect_tls "a config from before TLS on port 8443" 8444 "" "${WORK}/env-empty" "${WORK}/legacy-8443-config.json"
+expect_tls "CARHEADSUP_TLS_PORT beats server.tlsPort" 9444 "" "${WORK}/env-tls" "${WORK}/tls-config.json"
+expect_tls "CARHEADSUP_TLS_PORT=off" off "" "${WORK}/env-tls-off" "${WORK}/tls-config.json"
+expect_tls "--tls-port from a drop-in beats everything" 9445 "$dropin_tls" "${WORK}/env-tls" "${WORK}/tls-config.json"
+expect_tls "--tls-port=OFF" off "$dropin_tls_off" "${WORK}/env-tls" "${WORK}/tls-config.json"
+expect_tls "--port does not set the TLS port" 8443 "$dropin_port" "${WORK}/env-port" "${WORK}/missing.json"
+
+# The static Avahi file gets both ports, or no tls record when TLS is off.
+readonly AVAHI_TEMPLATE="${TEST_DIR}/../avahi/carheadsup.service"
+expect_avahi() {
+  local description=$1 port=$2 tls=$3 pattern=$4 absent=$5 text
+  text=$(static_avahi_service "$port" "$tls" <"$AVAHI_TEMPLATE")
+  if [[ $text == *"$pattern"* && ( -z $absent || $text != *"$absent"* ) ]]; then
+    printf 'ok    install.sh Avahi file: %s\n' "$description"
+  else
+    printf 'FAIL  install.sh Avahi file: %s\n%s\n' "$description" "$text" >&2
+    failures=$((failures + 1))
+  fi
+}
+expect_avahi "ports filled in" 8090 9443 "<port>8090</port>" "<port>8080</port>"
+expect_avahi "TLS port in the tls record" 8090 9443 "<txt-record>tls=9443</txt-record>" "tls=8443"
+expect_avahi "no tls record when TLS is off" 8080 off "<port>8080</port>" "tls="
+expect_avahi "protocol version 3" 8080 8443 "<txt-record>v=3</txt-record>" ""
 
 if ((failures > 0)); then
   printf '%d install.sh test(s) failed\n' "$failures" >&2

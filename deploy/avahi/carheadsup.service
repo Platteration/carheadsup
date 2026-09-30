@@ -3,22 +3,26 @@
 <!--
   Static mDNS / DNS-SD advertisement of the HUD for the companion app, for systems without
   avahi-utils. Normally the HUD server advertises itself through avahi-publish-service (named
-  after the vehicle, following server.port); install this file only when that tool is missing,
-  otherwise the phone sees the HUD twice. deploy/install.sh handles this automatically and
-  replaces the port below with server.port from /etc/carheadsup/config.json.
+  after the vehicle, following server.port and server.tlsPort); install this file only when that
+  tool is missing, otherwise the phone sees the HUD twice. deploy/install.sh handles this
+  automatically and replaces the ports below with server.port and server.tlsPort from
+  /etc/carheadsup/config.json (dropping the tls record when TLS is off).
 
   Installed as /etc/avahi/services/carheadsup.service; avahi-daemon picks it up by itself.
-  TXT records: v = phone protocol version, path = the phone WebSocket endpoint. The server's own
-  advertisement also carries id = the HUD's identity (<data dir>/hud-id), which this static file
-  cannot know: the companion then learns the id from the HUD's challenge on first pairing and
-  pins it just the same (the challenge and the HUD's proof decide, not this record).
+  TXT records: v = phone protocol version, path = the phone WebSocket endpoint, tls = the port
+  of the phone link (wss://, TLS; the service's own port is the plain HTTP one). The server's own
+  advertisement also carries id = the HUD's identity (<data dir>/hud-id) and fp = the SHA-256
+  fingerprint of its TLS certificate (<data dir>/tls.pem), which this static file cannot know:
+  the companion then learns both at the first pairing and pins them just the same (the
+  certificate pin and the handshake's proofs decide, not these records).
 -->
 <service-group>
   <name replace-wildcards="yes">%h HUD</name>
   <service>
     <type>_carheadsup._tcp</type>
     <port>8080</port>
-    <txt-record>v=2</txt-record>
+    <txt-record>v=3</txt-record>
     <txt-record>path=/ws/phone</txt-record>
+    <txt-record>tls=8443</txt-record>
   </service>
 </service-group>

@@ -1,0 +1,204 @@
+{
+  "incidents": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [9.9005, 53.596], [9.9006, 53.599], [9.9008, 53.603], [9.901, 53.61]
+        ]
+      },
+      "properties": {
+        "id": "4819f7d0a15db3d9b0c3cd9203be7ba5",
+        "iconCategory": 6,
+        "magnitudeOfDelay": 3,
+        "events": [
+          { "description": "Stationary traffic", "code": 101, "iconCategory": 6 },
+          { "description": "Accident", "code": 201, "iconCategory": 1 }
+        ],
+        "from": "Hamburg-Stellingen (26)",
+        "to": "Hamburg-Schnelsen-Nord (23)",
+        "length": 1558.2,
+        "delay": 540,
+        "roadNumbers": ["A7", "E45"],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "certain"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [9.903, 53.61], [9.9028, 53.603], [9.9026, 53.599], [9.9025, 53.596]
+        ]
+      },
+      "properties": {
+        "id": "b2c4e1f09d8a7c6b5a4f3e2d1c0b9a88",
+        "iconCategory": 6,
+        "magnitudeOfDelay": 2,
+        "events": [{ "description": "Queuing traffic", "code": 108, "iconCategory": 6 }],
+        "from": "Hamburg-Schnelsen-Nord (23)",
+        "to": "Hamburg-Stellingen (26)",
+        "length": 1560.0,
+        "delay": 240,
+        "roadNumbers": ["A7"],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "certain"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [[9.9002, 53.578], [9.9003, 53.5795], [9.9004, 53.581]]
+      },
+      "properties": {
+        "id": "0f9e8d7c6b5a49382716f5e4d3c2b1a0",
+        "iconCategory": 1,
+        "magnitudeOfDelay": 1,
+        "events": [{ "description": "Accident", "code": 201, "iconCategory": 1 }],
+        "from": "Hamburg-Bahrenfeld (27)",
+        "to": "Hamburg-Stellingen (26)",
+        "length": 310.5,
+        "delay": 75,
+        "roadNumbers": ["A7"],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "probable"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [[9.905, 53.569], [9.91, 53.569], [9.915, 53.5691]]
+      },
+      "properties": {
+        "id": "7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d",
+        "iconCategory": 8,
+        "magnitudeOfDelay": 4,
+        "events": [{ "description": "Closed", "code": 401, "iconCategory": 8 }],
+        "from": "Luruper Chaussee",
+        "to": "Stadionstraße",
+        "length": 668.1,
+        "delay": 0,
+        "roadNumbers": [],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "certain"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [9.9, 53.551] },
+      "properties": {
+        "id": "1122334455667788990011223344aabb",
+        "iconCategory": 9,
+        "magnitudeOfDelay": 0,
+        "events": [{ "description": "Roadworks", "code": 701, "iconCategory": 9 }],
+        "length": 0.0,
+        "delay": null,
+        "roadNumbers": ["A7"],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "certain"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [[9.901, 53.668], [9.9012, 53.67]]
+      },
+      "properties": {
+        "id": "aabbccddeeff00112233445566778899",
+        "iconCategory": 9,
+        "magnitudeOfDelay": 1,
+        "events": [{ "description": "Roadworks", "code": 701, "iconCategory": 9 }],
+        "length": 223.0,
+        "delay": 30,
+        "roadNumbers": ["A7"],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "certain"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [9.9001, 53.5654] },
+      "properties": {
+        "id": "99887766554433221100ffeeddccbbaa",
+        "iconCategory": 14,
+        "magnitudeOfDelay": 0,
+        "events": [{ "description": "Broken down vehicle", "code": 211, "iconCategory": 14 }],
+        "length": 0.0,
+        "delay": null,
+        "roadNumbers": ["A7"],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "certain"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [9.9004, 53.605] },
+      "properties": { "iconCategory": 2 }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [[9.902, 53.632], [9.9022, 53.635]]
+      },
+      "properties": {
+        "id": "5f5f5f5f4e4e4e4e3d3d3d3d2c2c2c2c",
+        "iconCategory": 7,
+        "magnitudeOfDelay": 2,
+        "events": [{ "description": "Lane closed", "code": 500, "iconCategory": 7 }],
+        "length": 334.0,
+        "delay": 120,
+        "roadNumbers": ["A7"],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "certain"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [[9.9001, 53.57], [9.9002, 53.572]]
+      },
+      "properties": {
+        "id": "future00future00future00future00",
+        "iconCategory": 9,
+        "magnitudeOfDelay": 0,
+        "events": [{ "description": "Roadworks", "code": 701, "iconCategory": 9 }],
+        "length": 222.0,
+        "delay": 0,
+        "roadNumbers": ["A7"],
+        "timeValidity": "future",
+        "probabilityOfOccurrence": "certain"
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "id": "nogeometry0nogeometry0nogeometry", "iconCategory": 1 }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [9.9005, 53.596], [9.9006, 53.599], [9.9008, 53.603], [9.901, 53.61]
+        ]
+      },
+      "properties": {
+        "id": "4819f7d0a15db3d9b0c3cd9203be7ba5",
+        "iconCategory": 6,
+        "magnitudeOfDelay": 3,
+        "events": [{ "description": "Stationary traffic", "code": 101, "iconCategory": 6 }],
+        "length": 1558.2,
+        "delay": 540,
+        "roadNumbers": ["A7", "E45"],
+        "timeValidity": "present",
+        "probabilityOfOccurrence": "certain"
+      }
+    }
+  ]
+}

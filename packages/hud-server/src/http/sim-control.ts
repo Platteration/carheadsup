@@ -23,6 +23,7 @@ const PHONE_KINDS = [
   'next-track',
   'message',
   'speed-camera',
+  'traffic-jam',
   'disconnect',
   'connect',
 ] as const;

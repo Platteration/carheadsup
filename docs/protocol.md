@@ -1,13 +1,16 @@
 # Protocols and API
 
-Everything the HUD server exposes, on one port (8080 by default):
+Everything the HUD server exposes. The pages, the REST API and the WebSockets are served twice:
+plainly on `server.port` (8080 by default) and over TLS on `server.tlsPort` (8443 by default),
+with the HUD's self-signed certificate ([TLS](#tls-and-the-huds-certificate)). The phone link
+`/ws/phone` is served over TLS only — on the plain port just with `server.allowPlainPhone`.
 
 | Endpoint | Transport | Used by |
 | --- | --- | --- |
-| [`/ws/phone`](#phone-websocket-wsphone) | WebSocket, JSON text frames | the Android companion |
-| [`/ws/hud`](#renderer-websocket-wshud) | WebSocket, JSON text frames | the HUD page (kiosk) and the developer console |
-| [`/api/*`](#rest-api) | HTTP, JSON | the settings app, the developer console, the companion, scripts |
-| `/`, `/settings`, `/dev` | HTTP | the three web pages |
+| [`/ws/phone`](#phone-websocket-wsphone) | WebSocket over TLS (`wss://`, port 8443), JSON text frames | the Android companion |
+| [`/ws/hud`](#renderer-websocket-wshud) | WebSocket, JSON text frames (`ws://` or `wss://`) | the HUD page (kiosk) and the developer console |
+| [`/api/*`](#rest-api) | HTTP or HTTPS, JSON | the settings app, the developer console, the companion (HTTPS), scripts |
+| `/`, `/settings`, `/dev` | HTTP (HTTPS for the companion's settings page) | the three web pages |
 | [UDP `sensors.adasUdpPort`](#adas-udp-feed) | UDP, newline-delimited JSON | an optional ADAS module |
 | [`_carheadsup._tcp`](#mdns-discovery) | mDNS / DNS-SD | discovery by the companion |
 
@@ -22,14 +25,17 @@ throughout: km/h, m, kPa, epoch milliseconds.
 
 ## Phone WebSocket (`/ws/phone`)
 
-**Protocol version: 2** (version 1, which sent the pairing token in clear text and did not
-authenticate the HUD, is gone).
+**Protocol version: 3** — over TLS, with both proofs bound to the HUD's certificate. Version 2
+(the same messages over plain `ws://`, proofs not bound to a certificate) and version 1 (which
+sent the pairing token in clear text and did not authenticate the HUD) are gone.
 
 ### Connection
 
-1. Open `ws://<hud>:8080/ws/phone` (find the HUD with [mDNS](#mdns-discovery) or use a
-   configured address). No HTTP authentication: phone and HUD
-   [authenticate each other](#authentication) in the first three messages.
+1. Open `wss://<hud>:8443/ws/phone` — the TLS port comes from [mDNS](#mdns-discovery) (TXT
+   `tls`) or a configured address. The HUD presents its self-signed certificate, which the
+   phone accepts by its pin ([TLS](#tls-and-the-huds-certificate)). No HTTP authentication:
+   phone and HUD [authenticate each other](#authentication) in the first three messages, bound
+   to that certificate.
 2. The HUD sends `challenge` at once: its identity and a fresh nonce.
 3. The phone answers with `hello` within **5 s**, proving that it knows the pairing token. The
    HUD answers `welcome`, proving the same in return — or `error` and closes the socket.
@@ -37,6 +43,12 @@ authenticate the HUD, is gone).
    HUD sends. Right after `welcome`, the HUD sends `maintenance-due` if any service item is due.
 5. From then on the phone sends state updates whenever something changes; the HUD sends call
    actions, finished trips and maintenance notices.
+
+On the plain port, `ws://<hud>:8080/ws/phone` is refused with `403` and the text "The phone
+link needs TLS: connect to wss://<this HUD>:8443/ws/phone" — unless `server.allowPlainPhone` is
+on (for development and custom clients; the companion always uses TLS). A plain session binds
+nothing: its proofs cover an empty fingerprint, so a phone's TLS proof is no use there either.
+Switching the option off closes plain sessions (4005).
 
 There is **one active phone**. A newer session from the *same* phone (same `hello.deviceId`, a
 random id per app install — not the device name, which two phones of one model share) replaces
@@ -60,7 +72,7 @@ absolute times such as the ETA.
 ### `challenge` → `hello` → `welcome`
 
 ```json
-{ "t": "challenge", "v": 2, "hudId": "AAECAwQFBgcICQoLDA0ODw", "nonce": "EBESExQVFhcYGRobHB0eHw" }
+{ "t": "challenge", "v": 3, "hudId": "AAECAwQFBgcICQoLDA0ODw", "nonce": "EBESExQVFhcYGRobHB0eHw" }
 ```
 
 `hudId` is the HUD's identity: 16 random bytes as 22 base64url characters, made on the first
@@ -70,80 +82,139 @@ fresh random bytes (22 base64url characters) per connection.
 
 ```json
 {
-  "t": "hello", "v": 2, "device": "Pixel 9", "deviceId": "8PHy8_T19vf4-fr7_P3-_w",
+  "t": "hello", "v": 3, "device": "Pixel 9", "deviceId": "8PHy8_T19vf4-fr7_P3-_w",
   "app": "carheadsup-companion", "appVersion": "1.0.0",
-  "nonce": "ICEiIyQlJicoKSorLC0uLw", "proof": "mm0V3w_MTQxN1Eo5QmrfJ3EpsfnnlUZYJPzZ0YPD62s"
+  "nonce": "ICEiIyQlJicoKSorLC0uLw", "proof": "llVyYellZIIYR5tEC9APzsA-YTGRKi45irjLwiuenwc"
 }
 ```
 
 | Field | Rules |
 | --- | --- |
-| `v` | Must be `2`; otherwise `error unsupported-version` and close 4002 (also for a version-1 `hello`). |
+| `v` | Must be `3`; otherwise `error unsupported-version` and close 4002 (also for a version-1 or version-2 `hello`). |
 | `device`, `app` | Up to 100 characters (shown in logs and as the phone's name). |
 | `deviceId` | The phone's identity: exactly 22 base64url characters (`A–Z a–z 0–9 - _`), random per app install. |
 | `appVersion` | Up to 64 characters. |
 | `nonce` | Exactly 22 base64url characters: 16 fresh random bytes per connection. |
-| `proof` | Exactly 43 base64url characters; must be the phone proof below for `phone.pairingToken` (compared in constant time), otherwise `error bad-token` and close 4001. |
+| `proof` | Exactly 43 base64url characters; must be the phone proof below for `phone.pairingToken` and this connection's certificate (compared in constant time), otherwise `error bad-token` and close 4001. |
 
 ```json
 {
-  "t": "welcome", "v": 2, "hudName": "My car", "hudVersion": "0.1.0", "readMessagesAloud": true,
-  "hudId": "AAECAwQFBgcICQoLDA0ODw", "proof": "wIu7H--GvAeClpHJIEVrddKdvL1LPRWflY9h4CG8DMo"
+  "t": "welcome", "v": 3, "hudName": "My car", "hudVersion": "0.1.0", "readMessagesAloud": true,
+  "hudId": "AAECAwQFBgcICQoLDA0ODw", "proof": "VGcXTWHc-snsk4-LN_Foi-sePPjY8kR6nMQSCQdhUHs"
 }
 ```
 
 `hudName` is `vehicle.name`; `readMessagesAloud` is `phone.readMessagesAloud` — the phone reads
 messages aloud only when this is true (and the user wants it on the phone). `hudId` repeats the
 challenge's; `proof` is the HUD proof below. (The examples are the first
-[test vector](#authentication), pairing token `K7fQ2mZrP4xW9sLt3HvNbC8e`.)
+[test vector](#authentication): pairing token `K7fQ2mZrP4xW9sLt3HvNbC8e`, over a connection
+whose certificate has the fingerprint `fdc153ee…bfdd4531`.)
 
 ### Authentication
 
 The pairing token (`phone.pairingToken`) never travels. Each side proves that it knows it with an
-HMAC over the other side's fresh nonce:
+HMAC over the other side's fresh nonce and the certificate of the connection:
 
 ```
 MAC(message)  = base64url( HMAC-SHA256( key = UTF-8 bytes of the pairing token,
                                         data = UTF-8 bytes of message ) )      (no padding: 43 characters)
-phone proof   = MAC( "carheadsup-phone-v2|" + hudId + "|" + hudNonce + "|" + phoneNonce + "|" + deviceId )
-HUD proof     = MAC( "carheadsup-hud-v2|"   + hudId + "|" + phoneNonce + "|" + hudNonce + "|" + deviceId )
+phone proof   = MAC( "carheadsup-phone-v3|" + hudId + "|" + hudNonce + "|" + phoneNonce + "|" + deviceId + "|" + certFingerprint )
+HUD proof     = MAC( "carheadsup-hud-v3|"   + hudId + "|" + phoneNonce + "|" + hudNonce + "|" + deviceId + "|" + certFingerprint )
 ```
 
-`hudNonce` is `challenge.nonce`, `phoneNonce` is `hello.nonce`. The fixed base64url formats keep
-the joined fields unambiguous, the two prefixes keep one side's proof from passing as the
-other's, and each nonce makes the other side's proof unusable on any other connection. Shared
-test vectors — including an empty token and a non-ASCII token longer than the 64-byte HMAC
-block — are in
+`hudNonce` is `challenge.nonce`, `phoneNonce` is `hello.nonce`. `certFingerprint` is the
+[fingerprint](#tls-and-the-huds-certificate) of the TLS certificate of this connection — as the
+phone saw it, and as the HUD knows its own (empty on a plain `ws://` session). The fixed formats
+(base64url, lowercase hex) keep the joined fields unambiguous, the two prefixes keep one side's
+proof from passing as the other's, and each nonce makes the other side's proof unusable on any
+other connection.
+
+The fingerprint is the **channel binding**: a relay between phone and HUD has to terminate the
+phone's TLS with a certificate of its own (it does not have the HUD's key). The phone's proof
+then names the relay's certificate, and the HUD, which checks it against its own, refuses it —
+whether the relay forwards it live or replays a recorded handshake. Nor can the relay produce
+the HUD's proof for the phone. Shared test vectors — including an empty token, a non-ASCII token
+longer than the 64-byte HMAC block, the same session through a relay, a plain session, and real
+certificates made by the HUD's generator with their fingerprints and short forms — are in
 [`packages/core/test/protocol/phone-auth-vectors.json`](../packages/core/test/protocol/phone-auth-vectors.json);
 the HUD's and the companion's tests both assert them.
 
 **The companion app** (details in its [README](../companion-android/README.md#privacy)):
 
-- pins the `hudId` of the first HUD that proves the pairing token (per token: entering another
-  token starts a new pairing), and afterwards answers only that HUD's `challenge`. For any other
-  `hudId` it sends nothing at all — not even its proof, with which a rogue HUD could test token
-  guesses offline — and shows "a different HUD is answering", with a way to forget the old HUD;
+- connects over TLS only and, once paired, accepts exactly the pinned certificate; any other is a
+  hard stop ("HUD certificate changed — re-pair", [below](#tls-and-the-huds-certificate));
+- pins the `hudId` and the certificate of the first HUD that proves the pairing token (per
+  token: entering another token starts a new pairing), and afterwards answers only that HUD's
+  `challenge`. For any other `hudId` it sends nothing at all — not even its proof, with which a
+  rogue HUD could test token guesses offline — and shows "a different HUD is answering", with a
+  way to forget the old HUD;
 - checks the `welcome` proof before it counts as connected: before that it sends no location,
   navigation, media, call or message data, makes no REST calls (they carry the API token), and
   ignores `call-action` and everything else the HUD sends;
 - with automatic discovery, connects only to the paired HUD's advertisement (TXT `id`), or to
-  one without an id (the [static Avahi file](#mdns-discovery)), whose `challenge` is checked.
+  one without an id (the [static Avahi file](#mdns-discovery)), whose certificate and
+  `challenge` are checked; pairing for the first time, it requires the certificate the
+  advertisement names (TXT `fp`), if it names one.
 
 **Without a pairing token** the HUD is *open*: both proofs are computed with the empty key, which
 anyone can do, so they prove nothing. The HUD accepts only proofs made with the empty key — a
 phone that holds a token is refused (`bad-token`) rather than silently trusting an open HUD. The
-companion shows such a HUD as unverified and connects only after the user confirms it, then
-pins its `hudId`; a spoofed HUD that copies that id is not detected. Set a pairing token.
+companion shows such a HUD as unverified, with its certificate's short fingerprint to compare
+with the settings app, and connects only after the user confirms it, then pins its `hudId` and
+certificate. Set a pairing token.
 
 When `phone.pairingToken` changes, the HUD checks the connected phone's proof against the new
 token and disconnects it (`bad-token`, 4001) unless it still matches — also when the token is
 removed.
 
-What this does not do: the connection is not encrypted, so someone on the Wi-Fi can read the
-session, and a man-in-the-middle who relays both directions can alter it after the handshake
-(protect the Wi-Fi with WPA2). And someone who records a handshake (or impersonates the HUD before
-the first pairing) can test guesses of the pairing token offline: use a long random token (the
-settings app's *Generate* makes 24 characters, about 139 bits).
+What remains: the first pairing is trust on first use. Someone who controls the car's Wi-Fi at
+that moment can pose as the HUD with a certificate of their own; they cannot complete the
+handshake without the pairing token, and the phone pins nothing, but they receive the phone's
+proof and can test guesses of the pairing token offline. Use a long random token (the settings
+app's *Generate* makes 24 characters, about 139 bits) and compare the fingerprints. After the
+first pairing, and for anyone who only listens, there is nothing to guess from: the session is
+encrypted. See the [security model](architecture.md#security-model).
+
+### TLS and the HUD's certificate
+
+The HUD makes its TLS identity itself on the first start (with `node:crypto` and a small DER
+encoder, `hud-server/src/tls/`; no openssl command needed) and keeps it in `<data dir>/tls.pem`,
+mode `0600`: an ECDSA P-256 private key (PKCS#8) followed by a self-signed X.509 v3 certificate —
+
+| Field | Value |
+| --- | --- |
+| Subject, issuer | `O=carheadsup, CN=carheadsup HUD (<host name>)` |
+| subjectAltName | `DNS:<host name>`, `DNS:<host name>.local`, `DNS:localhost`, `IP:127.0.0.1`, `IP:::1` |
+| Validity | From a day before it was made (a Pi without a real-time clock may run behind) to `99991231235959Z`, RFC 5280's "no well-defined expiration": the phone pins the certificate, so an expiry could only break a working pairing |
+| Extensions | basicConstraints `CA:FALSE` (critical), keyUsage `digitalSignature` (critical), extKeyUsage `serverAuth`, subjectKeyIdentifier |
+| Signature | ECDSA with SHA-256; 16-byte random serial number |
+
+It is never renewed. A corrupt file (no key, no certificate, or a certificate for another key)
+is moved to `tls.pem.corrupt` (mode `0600`: it may hold a key) and replaced — paired phones then report "HUD certificate changed"
+until they are paired again; an unreadable one is left alone and a temporary certificate is used
+for that run. To replace it deliberately, delete `tls.pem` (or put a key and certificate of your
+own in it, PEM) and restart; then *Forget paired HUD* in the companion and pair again. The
+listener speaks TLS 1.2 and 1.3; a client has 10 s to finish its handshake.
+
+The certificate's **fingerprint** is the SHA-256 of its DER encoding in lowercase hex (64
+digits). People compare its **short form**: the first 20 hex digits in upper case, in groups of
+four — `FDC1 53EE DCA2 B536 4DD7`. The HUD shows it in the settings app (Phone), in
+[`GET /api/info`](#info) (`tls.fingerprint`), in its log at start ("Phone link: TLS on …,
+certificate SHA-256 …") and in its mDNS advertisement (TXT `fp`); on the Pi,
+`sudo openssl x509 -in /var/lib/carheadsup/tls.pem -noout -fingerprint -sha256` prints it with
+colons. The companion shows the certificate it sees when it asks to confirm an open HUD, while
+connected (Status) and next to the paired HUD (Setup).
+
+**How the companion trusts it** (`HudTrustManager` in `companion-android/protocol`): the HUD is
+reached by IP address and has no certificate authority behind it, so neither authorities nor
+host names nor dates are checked — the certificate itself is. Once paired, exactly the pinned
+certificate is accepted, on the WebSocket, for REST calls and in the settings page's WebView
+(which proceeds past its certificate warning only for the pinned certificate on the HUD's
+address). Any other certificate for the paired HUD ends the connection before anything is sent
+and stops the app from trying again: "HUD certificate changed — re-pair" (forget the HUD to pair
+anew). Pairing for the first time, the certificate the connection presents is accepted if the
+mDNS advertisement names it or names none, and bound into the handshake; it is pinned only if
+the HUD then proves the pairing token (or, for an open HUD, the user confirms it).
 
 ### Phone → HUD
 
@@ -205,25 +276,52 @@ is `"speedLimitKph": null, "unlimited": true`. `source`: `osm`, `nav`, `sign-rec
 `service`, `other`. The limit is shown only while the phone is connected.
 
 **`hazards`** — the complete list of hazards ahead (replaces the previous list; send `[]` to
-clear).
+clear). A phone with several sources sends them merged in one list: the companion app combines
+speed cameras from OpenStreetMap and traffic incidents from TomTom (its `HazardAggregator`), so
+that one source's update never wipes the other's.
 
 ```json
 {
   "t": "hazards",
   "items": [
     { "id": "osm-node-2512381124", "type": "speed-camera", "distanceM": 820, "speedLimitKph": 100, "delaySeconds": null, "description": null },
-    { "id": "jam-17", "type": "traffic-jam", "distanceM": 3200, "speedLimitKph": null, "delaySeconds": 420, "description": null }
+    { "id": "tomtom-4819f7d0a15db3d9b0c3cd9203be7ba5", "type": "traffic-jam", "distanceM": 3200, "speedLimitKph": null, "delaySeconds": 420, "description": "Stationary traffic" },
+    { "id": "tomtom-7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d", "type": "other", "distanceM": 5400, "speedLimitKph": null, "delaySeconds": null, "description": "Road closed" }
   ]
 }
 ```
 
-Up to 50 items with unique `id`s (≤ 256 characters). Types: `speed-camera`, `red-light-camera`,
-`section-control`, `police`, `accident`, `road-works`, `traffic-jam`, `slowdown`,
-`object-on-road`, `weather`, `school-zone`, `railway-crossing`, `other`. The HUD labels each type
-itself ("Speed camera" …); only for `other` does the `description` (≤ 300 characters) become the
-label, cut to 24 characters, and only while the car is stopped or parked — while it moves an
-`other` hazard is labelled "Hazard". Other types' descriptions are never shown. Distances are dead-reckoned like the nav distance; a hazard is
-dropped when it is 50 m behind the car or not refreshed for 2 minutes.
+| Field | Rules and meaning |
+| --- | --- |
+| `id` | Required, unique in the list, ≤ 256 characters. Stable from one message to the next (the companion uses `osm-node-…` / `osm-relation-…` for cameras and `tomtom-…` for incidents). |
+| `type` | `speed-camera`, `red-light-camera`, `section-control`, `police`, `accident`, `road-works`, `traffic-jam`, `slowdown`, `object-on-road`, `weather`, `school-zone`, `railway-crossing`, `other`. |
+| `distanceM` | Straight-line or road distance ahead, 0–1,000,000 m; for traffic, to where traffic reaches the incident (the tail of a jam). `null` when unknown (never shown). |
+| `speedLimitKph` | The enforced limit of a camera, or `null`. |
+| `delaySeconds` | The expected delay of a traffic hazard, 0–86400 s, or `null`. The HUD shows it in whole minutes ("+8 min"; from 100 minutes in hours, "+2 h"); under half a minute it is left out. |
+| `description` | ≤ 300 characters; see below. |
+
+Up to 50 items. The HUD labels each type itself ("Speed camera", "Traffic jam" …); only for
+`other` does the `description` become the label, cut to 24 characters, and only while the car is
+stopped or parked — while it moves an `other` hazard is labelled "Hazard". Other types'
+descriptions are never shown. The companion maps traffic incidents as follows (TomTom's
+`iconCategory` and `magnitudeOfDelay`):
+
+| Incident | `type` | `description` |
+| --- | --- | --- |
+| Jam, queuing or stationary traffic (moderate or major delay; unknown magnitude with ≥ 5 min delay) | `traffic-jam` | "Queuing traffic", "Stationary traffic", "Traffic jam" |
+| Jam, slow traffic (minor delay, or unknown with less delay) | `slowdown` | "Slow traffic" |
+| Accident | `accident` | "Accident" |
+| Road works | `road-works` | "Road works" |
+| Fog, rain, ice, wind, flooding | `weather` | "Fog", "Heavy rain", "Ice", "Strong wind", "Flooding" |
+| Broken-down vehicle | `object-on-road` | "Broken-down vehicle" |
+| Road closed, lane closed | `other` | "Road closed", "Lane closed" |
+| Dangerous conditions, unknown | `other` | TomTom's event text, else "Dangerous conditions" / "Traffic incident" |
+
+The HUD shows the nearest hazard within `display.hazardRevealM` (1 km); on the highway, traffic
+hazards — `traffic-jam`, `slowdown`, `accident`, `road-works` and anything with a delay — from
+`display.trafficRevealM` (3 km) ([configuration](configuration.md#display-other)). Distances are
+dead-reckoned like the nav distance; a hazard is dropped when it is 50 m behind the car or not
+refreshed for 2 minutes, so a phone re-sends the list (with fresh distances) at least that often.
 
 **`media`** — now playing.
 
@@ -345,10 +443,12 @@ messages per second (bursts of up to 100); messages over the limit are dropped, 
 | 4002 | Unsupported protocol version. |
 | 4003 | No valid `hello` as the first message within 5 s. |
 | 4004 | Too many invalid messages in a row. |
+| 4005 | A plain (`ws://`) session while plain sessions are no longer allowed (`server.allowPlainPhone` switched off). |
 
 ## Renderer WebSocket (`/ws/hud`)
 
-Used by the HUD page and the developer console.
+Used by the HUD page and the developer console, on either port (the pages use `wss:` when they
+were loaded over HTTPS).
 
 - **Access**: clients on the Pi itself are always allowed. When `server.apiToken` is set, other
   clients must pass it as `?token=<token>` or `Authorization: Bearer <token>`; otherwise the
@@ -500,9 +600,10 @@ Examples: [hardware.md](hardware.md#optional-adas-module).
 
 ## REST API
 
-JSON in, JSON out, under `/api/`. The client in the renderer
+JSON in, JSON out, under `/api/`, on both ports. The client in the renderer
 ([`common/api.ts`](../packages/hud-renderer/src/common/api.ts)) and the companion's `HudApi` use
-exactly these endpoints.
+exactly these endpoints; the companion over HTTPS on the TLS port, pinned to the HUD's
+certificate.
 
 **Conventions**
 
@@ -555,17 +656,20 @@ curl http://hud.local:8080/api/info
   "simulated": false,
   "uptimeS": 5,
   "obd": { "state": "connected", "adapter": "ELM327 v1.5", "protocol": "ISO 15765-4 (CAN 11/500)", "message": null, "since": 1790190236113 },
-  "phoneConnected": true
+  "phoneConnected": true,
+  "tls": { "port": 8443, "fingerprint": "fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531" }
 }
 ```
 
 `obd.state` is `disconnected`, `connecting`, `initializing`, `connected` or `error` (with the
-reason in `message`).
+reason in `message`). `tls` is the phone link's TLS listener — its port and its certificate's
+[fingerprint](#tls-and-the-huds-certificate) — or `null` when it is off (`server.tlsPort` null)
+or could not start (the log says why).
 
 ### Config
 
 `GET /api/config` returns the stored configuration — including both tokens, so protect the API
-with a token. It never contains runtime overrides (`--sim`, `--port`, `--host`).
+with a token. It never contains runtime overrides (`--sim`, `--port`, `--tls-port`, `--host`).
 
 `PATCH` deep-merges a partial config (objects merge; arrays and `null` replace); `PUT` replaces
 the whole config (missing fields take their current values). Both validate per field
@@ -694,13 +798,13 @@ the simulated phone is then silent (no messages, no link changes) until the real
 | `dtcs` | up to 32 codes such as `"P0420"`; replaces the injected codes, and the HUD reads the codes again at once (instead of at the next `obd.dtcIntervalMs`), so the change shows within a moment |
 | `coolantOverrideC`, `voltageOverrideV`, `fuelLevelOverridePct` | force a value; `null` releases it |
 | `lux`, `ambientTempC` | simulated light level (0–200000) and outside temperature (−60–70) |
-| `phone.kind` | `nav-start`, `nav-stop`, `incoming-call` (optional `name`), `end-call`, `next-track`, `message` (optional `sender`), `speed-camera`, `disconnect`, `connect` |
+| `phone.kind` | `nav-start`, `nav-stop`, `incoming-call` (optional `name`), `end-call`, `next-track`, `message` (optional `sender`), `speed-camera` (700 m ahead), `traffic-jam` (900 m ahead, +7 min), `disconnect`, `connect` |
 | `adas` | `blindSpotLeft`, `blindSpotRight` (booleans), `collision` (`none`, `caution`, `warning`) |
 | `tirePressuresKpa` | `{ "fl", "fr", "rl", "rr" }` in kPa, or `null` to remove the tyre-pressure module |
 
 ### Pages and other paths
 
-`GET /`, `/settings`, `/dev` serve the three pages from the built renderer; hashed assets under
+`GET /`, `/settings`, `/dev` serve the three pages from the built renderer, on both ports; hashed assets under
 `/assets/` are cached for a year, pages are revalidated. Without a build every page answers `503`
 with instructions. `/ws/*` without a WebSocket upgrade answers `426`. The HUD page understands
 `?preview=1` (ignore mirroring, rotation and keystone) and `?fixture=<name>` (draw a sample frame
@@ -710,21 +814,24 @@ without a server, e.g. `?fixture=city-nav&preview=1`).
 
 The HUD advertises itself with DNS-SD so the companion finds it without an address:
 
-- service type **`_carheadsup._tcp`**, port `server.port`;
+- service type **`_carheadsup._tcp`**, port `server.port` (plain HTTP);
 - instance name **"&lt;vehicle name&gt; HUD"** (e.g. "My car HUD");
-- TXT records **`v=2`** (the phone protocol version), **`path=/ws/phone`** and **`id=<HUD id>`**
-  (the `hudId` of the [`challenge`](#challenge--hello--welcome)). A paired companion uses only the
-  advertisement with its HUD's id. The id is public and not a proof: the `challenge` and the
-  `welcome` proof decide.
+- TXT records **`v=3`** (the phone protocol version), **`path=/ws/phone`**, **`id=<HUD id>`**
+  (the `hudId` of the [`challenge`](#challenge--hello--welcome)) and, while the TLS listener
+  runs, **`tls=<port>`** (the port the phone connects to, `wss://`) and **`fp=<fingerprint>`**
+  (its certificate's [SHA-256](#tls-and-the-huds-certificate), 64 hex digits). A paired
+  companion uses only the advertisement with its HUD's id; one pairing for the first time
+  requires the certificate named by `fp`. None of it is a proof: the certificate pin, the
+  `challenge` and the `welcome` proof decide. Without `tls` the companion tries 8443.
 
 The server publishes this through `avahi-publish-service` (package `avahi-utils`) while
 `server.mdns` is on, and re-publishes when the vehicle name or the setting changes. Without
 `avahi-utils` it logs a hint and does not advertise; the static
 [`deploy/avahi/carheadsup.service`](../deploy/avahi/carheadsup.service) (named after the host)
-does the same job, and the installer puts it in place in that case. That file cannot know the
-HUD's id, so it has no `id` record: the companion then learns the id from the `challenge` at the
-first pairing and pins it just the same. To check from a Linux
-machine on the same network:
+does the same job, and the installer puts it in place in that case (with `server.port` and
+`server.tlsPort` filled in). That file cannot know the HUD's id or certificate, so it has no `id`
+or `fp` record: the companion then learns both at the first pairing and pins them just the same.
+To check from a Linux machine on the same network:
 
 ```sh
 avahi-browse -rt _carheadsup._tcp

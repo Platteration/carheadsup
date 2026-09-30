@@ -60,6 +60,7 @@ async function startSimulatedHud(): Promise<Run> {
     rendererDir: temp.dir,
     sim: true,
     port: 0,
+    tlsPort: 0,
     host: '127.0.0.1',
     now: clock.now,
     timers: clock,
@@ -154,7 +155,7 @@ describe('the simulated HUD through the demo drive', () => {
     expect(ringing?.frame.call).toMatchObject({ name: 'Sam Taylor', canAccept: true });
     expect(redLight.some((s) => s.frame.call?.state === 'active')).toBe(true);
 
-    // Highway: clutter drops to the essentials, the 120 limit, then the camera in the 100 zone.
+    // Highway: clutter drops to the essentials, the 120 limit, then the camera in the 100 zone…
     const highway = inStep('highway').filter((s) => s.frame.context === 'highway');
     expect(highway.length).toBeGreaterThan(0);
     for (const { frame } of highway) {
@@ -165,6 +166,18 @@ describe('the simulated HUD through the demo drive', () => {
     expect(highway.some((s) => find(s.frame, 'speedLimit')?.value === 120)).toBe(true);
     const camera = highway.map((s) => find(s.frame, 'hazard')).find((h) => h !== undefined);
     expect(camera).toMatchObject({ type: 'speed-camera', speedLimit: 100 });
+    // Once the camera is passed, the jam on the A7 beyond the exit, from 3 km on the highway
+    // (`display.trafficRevealM`), with its delay — never flipping back and forth with the camera.
+    const shown = highway.map((s) => find(s.frame, 'hazard')?.type).filter((t) => t !== undefined);
+    expect(shown.filter((t, i) => i === 0 || t !== shown[i - 1])).toEqual([
+      'speed-camera',
+      'traffic-jam',
+    ]);
+    const jam = highway.map((s) => find(s.frame, 'hazard')).find((h) => h?.type === 'traffic-jam');
+    expect(jam).toMatchObject({ label: 'Traffic jam', delayMinutes: 8, speedLimit: null });
+    expect(jam?.distance?.unit).toBe('km');
+    // The route leaves the A7 before the jam: gone after the exit.
+    expect(inStep('arriving').some((s) => find(s.frame, 'hazard') !== undefined)).toBe(false);
     // Guidance for the exit reappears in time, with lane advice before the exit.
     expect(
       samples.some(

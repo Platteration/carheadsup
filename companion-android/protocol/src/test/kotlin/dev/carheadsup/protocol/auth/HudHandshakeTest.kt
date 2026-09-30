@@ -3,6 +3,7 @@ package dev.carheadsup.protocol.auth
 import dev.carheadsup.protocol.HudChallenge
 import dev.carheadsup.protocol.HudWelcome
 import dev.carheadsup.protocol.PROTOCOL_VERSION
+import dev.carheadsup.protocol.PhoneHello
 import dev.carheadsup.protocol.PhoneWire
 import dev.carheadsup.protocol.auth.HudHandshake.ChallengeResult
 import dev.carheadsup.protocol.auth.HudHandshake.WelcomeResult
@@ -19,11 +20,21 @@ class HudHandshakeTest {
     private val deviceId = "8PHy8_T19vf4-fr7_P3-_w"
     private val myHud = "AAECAwQFBgcICQoLDA0ODw"
     private val otherHud = "0F1PEGIqj-Lfw5HU0--o3A"
+    private val myCert = SHARED_CERTIFICATE_VECTORS[0].fingerprint
+    private val relayCert = SHARED_CERTIFICATE_VECTORS[1].fingerprint
 
-    /** A HUD with [hudId] that knows [token]: challenges, and welcomes a hello it can verify. */
-    private inner class FakeHud(val hudId: String, val token: String) {
+    /**
+     * A HUD with [hudId] that knows [token] and serves the certificate [cert]: challenges, and
+     * welcomes a hello it can verify — against its own certificate.
+     */
+    private inner class FakeHud(val hudId: String, val token: String, val cert: String = myCert) {
         val nonce: String = PhoneAuth.newId()
         val challenge = HudChallenge(PROTOCOL_VERSION, hudId, nonce)
+
+        fun accepts(hello: PhoneHello): Boolean = PhoneAuth.proofsEqual(
+            PhoneAuth.phoneProof(token, hudId, nonce, hello.nonce, hello.deviceId, cert),
+            hello.proof,
+        )
 
         fun welcome(helloNonce: String, hudNonce: String = nonce): HudWelcome = HudWelcome(
             v = PROTOCOL_VERSION,
@@ -31,24 +42,34 @@ class HudHandshakeTest {
             hudVersion = "1.0",
             readMessagesAloud = true,
             hudId = hudId,
-            proof = PhoneAuth.hudProof(token, hudId, hudNonce, helloNonce, deviceId),
+            proof = PhoneAuth.hudProof(token, hudId, hudNonce, helloNonce, deviceId, cert),
         )
     }
 
-    private fun handshake(token: String, pin: HudPin? = null) =
-        HudHandshake(pairingToken = token, deviceId = deviceId, device = "Pixel 9", appVersion = "1.0", pin = pin)
+    /** The phone's side, over a connection that presented [cert]. */
+    private fun handshake(token: String, pin: HudPin? = null, cert: String = myCert) = HudHandshake(
+        pairingToken = token,
+        deviceId = deviceId,
+        device = "Pixel 9",
+        appVersion = "1.0",
+        pin = pin,
+        certFingerprint = cert,
+    )
 
     private fun helloFor(handshake: HudHandshake, hud: FakeHud) =
         (handshake.onChallenge(hud.challenge) as ChallengeResult.SendHello).hello
 
     @Test
-    fun `first pairing with a token proves the token, checks the HUD's proof and pins the HUD`() {
+    fun `first pairing with a token proves the token, checks the HUD's proof and pins the HUD and its certificate`() {
         val hud = FakeHud(myHud, "s3cret")
         val phone = handshake("s3cret")
         val hello = helloFor(phone, hud)
-        // What the HUD checks: a proof over its own nonce, the phone's nonce and the device id.
-        assertEquals(PhoneAuth.phoneProof("s3cret", myHud, hud.nonce, hello.nonce, deviceId), hello.proof)
+        // What the HUD checks: a proof over its own nonce, the phone's nonce, the device id and
+        // the certificate it serves.
+        assertEquals(PhoneAuth.phoneProof("s3cret", myHud, hud.nonce, hello.nonce, deviceId, myCert), hello.proof)
+        assertTrue(hud.accepts(hello))
         assertEquals(deviceId, hello.deviceId)
+        assertEquals(PROTOCOL_VERSION, hello.v)
         assertTrue(PhoneAuth.isValidId(hello.nonce))
         assertFalse(PhoneWire.encodeUnchecked(hello).contains("s3cret"))
         assertFalse(phone.verified)
@@ -57,7 +78,20 @@ class HudHandshakeTest {
         assertTrue(phone.verified)
         assertEquals(myHud, verified.hudId)
         assertTrue(verified.authenticated)
-        assertEquals(HudPin.of(myHud, "s3cret"), verified.newPin)
+        assertEquals(HudPin.of(myHud, "s3cret", myCert), verified.newPin)
+    }
+
+    @Test
+    fun `a relay with a certificate of its own can neither pass the phone's proof on nor answer it`() {
+        // The phone sees the relay's certificate and binds its proof to it…
+        val relay = handshake("s3cret", cert = relayCert)
+        val hud = FakeHud(myHud, "s3cret", cert = myCert)
+        val hello = helloFor(relay, hud)
+        // …so the real HUD, which checks against its own certificate, refuses the relayed hello…
+        assertFalse(hud.accepts(hello))
+        // …and the real HUD's welcome, bound to its own certificate, fails on the phone.
+        assertEquals(WelcomeResult.Refuse(TrustProblem.BadProof), relay.onWelcome(hud.welcome(hello.nonce)))
+        assertFalse(relay.verified)
     }
 
     @Test
@@ -79,7 +113,7 @@ class HudHandshakeTest {
 
     @Test
     fun `once paired, another HUD is refused before anything is sent`() {
-        val pin = HudPin.of(myHud, "s3cret")
+        val pin = HudPin.of(myHud, "s3cret", myCert)
         val phone = handshake("s3cret", pin)
         assertEquals(
             ChallengeResult.Refuse(TrustProblem.DifferentHud(myHud, otherHud)),
@@ -93,35 +127,67 @@ class HudHandshakeTest {
     }
 
     @Test
-    fun `a new pairing token starts a new pairing`() {
-        val oldPin = HudPin.of(myHud, "old code")
-        val hud = FakeHud(otherHud, "new code")
-        val phone = handshake("new code", oldPin)
-        val verified = phone.onWelcome(hud.welcome(helloFor(phone, hud).nonce)) as WelcomeResult.Verified
-        assertEquals(HudPin.of(otherHud, "new code"), verified.newPin)
+    fun `once paired, another certificate is refused before anything is sent`() {
+        val pin = HudPin.of(myHud, "s3cret", myCert)
+        assertEquals(
+            ChallengeResult.Refuse(TrustProblem.CertificateChanged(myCert, relayCert)),
+            handshake("s3cret", pin, cert = relayCert).onChallenge(FakeHud(myHud, "s3cret", relayCert).challenge),
+        )
     }
 
     @Test
-    fun `without a pairing token the user confirms the HUD first, and it stays unauthenticated`() {
+    fun `a pin from before TLS gets the certificate of the next verified connection`() {
+        val legacy = HudPin.of(myHud, "s3cret")
+        assertNull(legacy.certFingerprint)
+        val hud = FakeHud(myHud, "s3cret")
+        val phone = handshake("s3cret", legacy)
+        val verified = phone.onWelcome(hud.welcome(helloFor(phone, hud).nonce)) as WelcomeResult.Verified
+        assertEquals(HudPin.of(myHud, "s3cret", myCert), verified.newPin)
+        // Through a relay, the proofs fail: the relay's certificate is never pinned.
+        val relayed = handshake("s3cret", legacy, cert = relayCert)
+        val relayedHello = helloFor(relayed, hud)
+        assertEquals(WelcomeResult.Refuse(TrustProblem.BadProof), relayed.onWelcome(hud.welcome(relayedHello.nonce)))
+    }
+
+    @Test
+    fun `a new pairing token starts a new pairing`() {
+        val oldPin = HudPin.of(myHud, "old code", myCert)
+        val hud = FakeHud(otherHud, "new code", relayCert)
+        val phone = handshake("new code", oldPin, cert = relayCert)
+        val verified = phone.onWelcome(hud.welcome(helloFor(phone, hud).nonce)) as WelcomeResult.Verified
+        assertEquals(HudPin.of(otherHud, "new code", relayCert), verified.newPin)
+    }
+
+    @Test
+    fun `without a pairing token the user confirms the HUD and its certificate first, and it stays unauthenticated`() {
         val hud = FakeHud(myHud, "")
         assertEquals(
-            ChallengeResult.Refuse(TrustProblem.UnconfirmedOpenHud(myHud)),
+            ChallengeResult.Refuse(TrustProblem.UnconfirmedOpenHud(myHud, myCert)),
             handshake("").onChallenge(hud.challenge),
         )
-        // A pin made with a token does not count as the user's confirmation.
+        // A pin made with a token does not count as the user's confirmation…
         assertEquals(
-            ChallengeResult.Refuse(TrustProblem.UnconfirmedOpenHud(myHud)),
-            handshake("", HudPin.of(myHud, "s3cret")).onChallenge(hud.challenge),
+            ChallengeResult.Refuse(TrustProblem.UnconfirmedOpenHud(myHud, myCert)),
+            handshake("", HudPin.of(myHud, "s3cret", myCert)).onChallenge(hud.challenge),
         )
-        val confirmed = HudPin.of(myHud, "")
+        // …nor does a confirmation from before TLS, which covered no certificate.
+        assertEquals(
+            ChallengeResult.Refuse(TrustProblem.UnconfirmedOpenHud(myHud, myCert)),
+            handshake("", HudPin.of(myHud, "")).onChallenge(hud.challenge),
+        )
+        val confirmed = HudPin.of(myHud, "", myCert)
         val phone = handshake("", confirmed)
         val verified = phone.onWelcome(hud.welcome(helloFor(phone, hud).nonce)) as WelcomeResult.Verified
         assertFalse(verified.authenticated)
         assertNull(verified.newPin)
-        // Another open HUD is still "a different HUD".
+        // Another open HUD is still "a different HUD", and another certificate a changed one.
         assertEquals(
             ChallengeResult.Refuse(TrustProblem.DifferentHud(myHud, otherHud)),
             handshake("", confirmed).onChallenge(FakeHud(otherHud, "").challenge),
+        )
+        assertEquals(
+            ChallengeResult.Refuse(TrustProblem.CertificateChanged(myCert, relayCert)),
+            handshake("", confirmed, cert = relayCert).onChallenge(hud.challenge),
         )
     }
 
@@ -130,6 +196,11 @@ class HudHandshakeTest {
         assertEquals(
             ChallengeResult.UnsupportedVersion(1),
             handshake("t").onChallenge(HudChallenge(1, myHud, PhoneAuth.newId())),
+        )
+        // A HUD of the previous protocol (no channel binding) is refused as well.
+        assertEquals(
+            ChallengeResult.UnsupportedVersion(2),
+            handshake("t").onChallenge(HudChallenge(2, myHud, PhoneAuth.newId())),
         )
         for (bad in listOf(HudChallenge(PROTOCOL_VERSION, "", ""), HudChallenge(PROTOCOL_VERSION, "$myHud|x", myHud))) {
             assertInstanceOf(ChallengeResult.Refuse::class.java, handshake("t").onChallenge(bad))
@@ -152,18 +223,31 @@ class HudHandshakeTest {
     }
 
     @Test
-    fun `the device id must be well-formed`() {
+    fun `the device id and the certificate fingerprint must be well-formed`() {
         assertThrows(IllegalArgumentException::class.java) {
-            HudHandshake("t", deviceId = "Pixel 9", device = "Pixel 9", appVersion = "1", pin = null)
+            HudHandshake(
+                "t",
+                deviceId = "Pixel 9",
+                device = "Pixel 9",
+                appVersion = "1",
+                pin = null,
+                certFingerprint = myCert,
+            )
         }
+        for (bad in listOf("", "A".repeat(64), myCert.dropLast(1))) {
+            assertThrows(IllegalArgumentException::class.java) {
+                HudHandshake("t", deviceId, device = "Pixel 9", appVersion = "1", pin = null, certFingerprint = bad)
+            }
+        }
+        assertThrows(IllegalArgumentException::class.java) { HudPin(myHud, "x", certFingerprint = "abc") }
     }
 
     @Test
     fun `discovery skips advertised HUDs other than the paired one`() {
-        val pin = HudPin.of(myHud, "s3cret")
+        val pin = HudPin.of(myHud, "s3cret", myCert)
         assertTrue(HudPin.acceptsAdvertisement(pin, "s3cret", myHud))
         assertFalse(HudPin.acceptsAdvertisement(pin, "s3cret", otherHud))
-        // The static Avahi service file has no id: the challenge decides.
+        // The static Avahi service file has no id: the certificate and the challenge decide.
         assertTrue(HudPin.acceptsAdvertisement(pin, "s3cret", null))
         // Not paired (or paired with another token): any HUD may be the one to pair with.
         assertTrue(HudPin.acceptsAdvertisement(null, "s3cret", otherHud))

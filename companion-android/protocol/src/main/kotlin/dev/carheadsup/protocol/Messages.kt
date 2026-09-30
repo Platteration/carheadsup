@@ -6,7 +6,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /*
- * Phone ⇄ HUD WebSocket protocol (`ws://<hud>:<port>/ws/phone`), mirroring
+ * Phone ⇄ HUD WebSocket protocol (`wss://<hud>:<tls port>/ws/phone`), mirroring
  * packages/core/src/types/protocol.ts. Every frame is a JSON object whose `t` field names the
  * message type; encode and decode through [ProtocolJson] / [PhoneWire] / [HudCodec] so the
  * discriminator, explicit nulls and the HUD's size limits are always applied.
@@ -17,9 +17,10 @@ import kotlinx.serialization.Serializable
 
 /**
  * Protocol version of `challenge.v`, `hello.v` and `welcome.v`; must match the HUD's
- * `PROTOCOL_VERSION`. Version 2 authenticates both sides (see [dev.carheadsup.protocol.auth]).
+ * `PROTOCOL_VERSION`. Version 3 runs over TLS and binds both sides' proofs to the HUD's
+ * certificate (see [dev.carheadsup.protocol.auth] and [dev.carheadsup.protocol.tls]).
  */
-public const val PROTOCOL_VERSION: Int = 2
+public const val PROTOCOL_VERSION: Int = 3
 
 /** A turn-by-turn maneuver (core `Maneuver`). */
 @Serializable
@@ -81,7 +82,10 @@ public data class PhoneHello(
     val appVersion: String,
     /** This connection's random nonce (22 base64url characters). */
     val nonce: String,
-    /** HMAC proof that the phone knows the pairing token (43 base64url characters). */
+    /**
+     * HMAC proof that the phone knows the pairing token, bound to this challenge and to the TLS
+     * certificate the phone was shown (43 base64url characters).
+     */
     val proof: String,
 ) : PhoneToHud
 

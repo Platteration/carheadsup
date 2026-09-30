@@ -218,6 +218,12 @@ export interface DisplayConfig {
   laneRevealM: number;
   /** Show a hazard only within this distance. */
   hazardRevealM: number;
+  /**
+   * On the highway, show traffic hazards (jams, slowdowns, accidents, road works, anything with a
+   * delay) within this distance instead — never less than `hazardRevealM`: at motorway speed the
+   * end of a jam needs more warning than a camera.
+   */
+  trafficRevealM: number;
   /** Maximum simultaneously displayed alert banners. */
   maxAlerts: number;
 }
@@ -407,7 +413,19 @@ export interface SensorsConfig {
 }
 
 export interface ServerConfig {
+  /** Plain HTTP and WebSocket port: the kiosk, the settings app and the developer console. */
   port: number;
+  /**
+   * HTTPS and secure WebSocket port (the same pages, API and sockets, over TLS with the HUD's
+   * self-signed certificate): the companion app's link. Null switches TLS off, and with it the
+   * phone link (unless `allowPlainPhone`).
+   */
+  tlsPort: number | null;
+  /**
+   * Also accept the phone link (`/ws/phone`) on the plain port, unencrypted and without channel
+   * binding — for development and custom clients only. Off: phones must use TLS.
+   */
+  allowPlainPhone: boolean;
   /** Bind address; "0.0.0.0" to allow the phone on the car's Wi-Fi. */
   host: string;
   /** Bearer token required for the config API from non-local clients. Empty = open. */

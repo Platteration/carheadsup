@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { PROTOCOL_VERSION, isAuthId } from '@carheadsup/core';
+import { NO_CHANNEL_BINDING, PROTOCOL_VERSION, isAuthId } from '@carheadsup/core';
 import type { HudConfig, HudEvent, TripRecord } from '@carheadsup/core';
 import { describe, expect, it } from 'vitest';
 import type { WebSocket } from 'ws';
@@ -10,14 +10,20 @@ import {
   PHONE_CLOSE,
   PhoneChannel,
 } from '../../src/ws/phone-channel.ts';
+import type { PhoneTransport } from '../../src/ws/phone-channel.ts';
 import { FakeClock, memoryLogger } from '../sensors/fakes.ts';
 import { answerChallenge, testConfig, testDeviceId } from '../helpers.ts';
 import type { TestPhone } from '../helpers.ts';
+
+/** The fingerprint of the HUD's certificate in these tests. */
+const CERT = 'ab'.repeat(32);
 
 /** Just enough of a `ws` WebSocket for the channel. */
 class FakeSocket extends EventEmitter {
   readyState = 1;
   bufferedAmount = 0;
+  /** The certificate a phone on this connection sees (none on a plain one). */
+  binding: string = CERT;
   readonly sent: Array<Record<string, unknown>> = [];
   closeCode: number | null = null;
 
@@ -59,6 +65,7 @@ class FakeSocket extends EventEmitter {
     const hello = answerChallenge(
       this.challenge,
       typeof phone === 'string' ? { device: phone } : phone,
+      this.binding,
     );
     this.receive(hello);
     return hello;
@@ -89,14 +96,18 @@ function trip(n: number): TripRecord {
   };
 }
 
-function setup(options: { pairingToken?: string } = {}) {
+function setup(options: { pairingToken?: string; allowPlainPhone?: boolean } = {}) {
   const clock = new FakeClock();
   const events: HudEvent[] = [];
   const phoneChanges: boolean[] = [];
-  let config = testConfig({ phone: { pairingToken: options.pairingToken ?? '' } });
+  let config = testConfig({
+    phone: { pairingToken: options.pairingToken ?? '' },
+    server: { allowPlainPhone: options.allowPlainPhone ?? false },
+  });
   const logger = memoryLogger();
   const channel = new PhoneChannel({
     hudId: HUD_ID,
+    certFingerprint: CERT,
     dispatch: (event) => events.push(event),
     getConfig: () => config,
     tripsEndedAfter: (_since, limit) =>
@@ -108,9 +119,10 @@ function setup(options: { pairingToken?: string } = {}) {
     timers: clock,
     logger,
   });
-  const connect = (address: string): FakeSocket => {
+  const connect = (address: string, transport: PhoneTransport = 'tls'): FakeSocket => {
     const socket = new FakeSocket();
-    channel.accept(socket as unknown as WebSocket, address);
+    socket.binding = transport === 'tls' ? CERT : NO_CHANNEL_BINDING;
+    channel.accept(socket as unknown as WebSocket, address, transport);
     return socket;
   };
   const links = (): Array<{ connected: boolean; device: string | null | undefined }> =>
@@ -146,10 +158,71 @@ describe('PhoneChannel: mutual authentication', () => {
       hudNonce: String(phone.challenge['nonce']),
       phoneNonce: String(hello['nonce']),
       deviceId: String(hello['deviceId']),
+      certFingerprint: CERT,
     };
     expect(welcome).toMatchObject({ v: PROTOCOL_VERSION, hudId: HUD_ID });
     expect(welcome?.['proof']).toBe(hudProof('s3cret', input));
     expect(welcome?.['proof']).not.toBe(hudProof('', input));
+    // Bound to the HUD's certificate: useless to a relay that showed the phone another one.
+    expect(welcome?.['proof']).not.toBe(hudProof('s3cret', { ...input, certFingerprint: '' }));
+    expect(channel.connected).toBe(true);
+  });
+
+  it('refuses a proof bound to another certificate (a relay in between)', async () => {
+    const { connect, channel } = setup({ pairingToken: 's3cret' });
+    const relayed = connect('10.42.0.23');
+    relayed.binding = 'cd'.repeat(32);
+    relayed.sayHello({ device: 'Pixel', token: 's3cret' });
+    await flush();
+    expect(relayed.sent.map((m) => m['t'])).toEqual(['challenge', 'error']);
+    expect(relayed.closeCode).toBe(PHONE_CLOSE.badToken);
+    expect(channel.connected).toBe(false);
+  });
+
+  it('binds nothing on a plain connection, so a TLS proof does not pass there', async () => {
+    const { connect, channel } = setup({ pairingToken: 's3cret', allowPlainPhone: true });
+    const relayed = connect('10.42.0.23', 'plain');
+    relayed.binding = CERT; // a TLS phone's proof, carried to the plain port
+    relayed.sayHello({ device: 'Pixel', token: 's3cret' });
+    const plain = connect('10.42.0.24', 'plain');
+    const hello = plain.sayHello({ device: 'Dev', token: 's3cret' });
+    await flush();
+    expect(relayed.closeCode).toBe(PHONE_CLOSE.badToken);
+    const [welcome] = plain.ofType('welcome');
+    expect(welcome?.['proof']).toBe(
+      hudProof('s3cret', {
+        hudId: HUD_ID,
+        hudNonce: String(plain.challenge['nonce']),
+        phoneNonce: String(hello['nonce']),
+        deviceId: String(hello['deviceId']),
+        certFingerprint: NO_CHANNEL_BINDING,
+      }),
+    );
+    expect(channel.connected).toBe(true);
+  });
+
+  it('closes plain sessions once they are no longer allowed, and keeps TLS ones', async () => {
+    const { connect, channel, changeConfig, links } = setup({ allowPlainPhone: true });
+    const plain = connect('10.42.0.23', 'plain');
+    plain.sayHello('Dev');
+    const waiting = connect('10.42.0.24', 'plain');
+    const secure = connect('10.42.0.25');
+    await flush();
+    expect(channel.connected).toBe(true);
+    changeConfig(testConfig({ server: { allowPlainPhone: true, frameRate: 10 } }));
+    expect(plain.closeCode).toBeNull();
+    changeConfig(testConfig({ server: { allowPlainPhone: false } }));
+    await flush();
+    expect(plain.closeCode).toBe(PHONE_CLOSE.tlsRequired);
+    expect(waiting.closeCode).toBe(PHONE_CLOSE.tlsRequired);
+    expect(secure.closeCode).toBeNull();
+    expect(channel.connected).toBe(false);
+    expect(links()).toEqual([
+      { connected: true, device: 'Dev' },
+      { connected: false, device: undefined },
+    ]);
+    secure.sayHello('Pixel');
+    await flush();
     expect(channel.connected).toBe(true);
   });
 
@@ -168,7 +241,7 @@ describe('PhoneChannel: mutual authentication', () => {
   it("refuses a proof recorded on another connection (the HUD's nonce differs)", async () => {
     const { connect } = setup({ pairingToken: 's3cret' });
     const first = connect('10.42.0.23');
-    const recorded = answerChallenge(first.challenge, { device: 'Pixel', token: 's3cret' });
+    const recorded = answerChallenge(first.challenge, { device: 'Pixel', token: 's3cret' }, CERT);
     const replay = connect('10.42.0.66');
     replay.receive(recorded);
     await flush();
@@ -176,7 +249,7 @@ describe('PhoneChannel: mutual authentication', () => {
     expect(replay.closeCode).toBe(PHONE_CLOSE.badToken);
     // A proof bound to another phone's id does not pass either.
     const other = connect('10.42.0.67');
-    const hello = answerChallenge(other.challenge, { device: 'Pixel', token: 's3cret' });
+    const hello = answerChallenge(other.challenge, { device: 'Pixel', token: 's3cret' }, CERT);
     other.receive({ ...hello, deviceId: testDeviceId('someone else') });
     await flush();
     expect(other.closeCode).toBe(PHONE_CLOSE.badToken);
@@ -219,14 +292,17 @@ describe('PhoneChannel: mutual authentication', () => {
     expect(logger.lines('warn').join('\n')).toMatch(/Galaxy from 10\.42\.0\.24 sent a wrong/);
   });
 
-  it('refuses a hello of another protocol version, v1 included', async () => {
+  it('refuses a hello of another protocol version, v1 and v2 included', async () => {
     const { connect } = setup();
     const v1 = connect('10.42.0.23');
     v1.receive({ t: 'hello', v: 1, device: 'Pixel', app: 'a', appVersion: '1', token: '' });
-    const v3 = connect('10.42.0.24');
-    v3.sayHello({ device: 'Pixel', v: PROTOCOL_VERSION + 1 });
+    // A v2 phone looks like a v3 one but binds no certificate.
+    const v2 = connect('10.42.0.26');
+    v2.sayHello({ device: 'Pixel', v: 2 });
+    const v4 = connect('10.42.0.24');
+    v4.sayHello({ device: 'Pixel', v: PROTOCOL_VERSION + 1 });
     await flush();
-    for (const socket of [v1, v3]) {
+    for (const socket of [v1, v2, v4]) {
       expect(socket.ofType('error')[0]).toMatchObject({ code: 'unsupported-version' });
       expect(socket.closeCode).toBe(PHONE_CLOSE.unsupportedVersion);
     }

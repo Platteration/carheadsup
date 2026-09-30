@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Android 11 and older (backup is also disabled with allowBackup="false"): exclude everything,
-    for the same reason as data_extraction_rules.xml. The settings hold pairing secrets and this
-    install's phone id; a new phone pairs with the HUD again.
+    for the same reason as data_extraction_rules.xml. The settings hold pairing secrets, the
+    TomTom API key and this install's phone id; a new phone pairs with the HUD again.
 -->
 <full-backup-content>
     <exclude domain="root" path="." />

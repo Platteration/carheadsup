@@ -44,6 +44,19 @@ export interface ApiInfo {
   uptimeS: number;
   obd: ObdLinkStatus;
   phoneConnected: boolean;
+  /** The TLS listener the phone connects to, or null when it is off or failed to start. */
+  tls: ApiTlsInfo | null;
+}
+
+/** The HUD's TLS listener (`server.tlsPort`) and its certificate. */
+export interface ApiTlsInfo {
+  /** The port it listens on. */
+  port: number;
+  /**
+   * SHA-256 of the HUD's certificate (DER), 64 lowercase hex digits: what the companion app pins
+   * and binds its proofs to. People compare `shortFingerprint(fingerprint)`.
+   */
+  fingerprint: string;
 }
 
 export interface ApiConfigResult {
@@ -120,6 +133,7 @@ export interface SimControl {
     | { kind: 'next-track' }
     | { kind: 'message'; sender?: string }
     | { kind: 'speed-camera' }
+    | { kind: 'traffic-jam' }
     | { kind: 'disconnect' }
     | { kind: 'connect' };
   adas?: {

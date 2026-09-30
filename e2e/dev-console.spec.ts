@@ -60,3 +60,24 @@ test('injected trouble codes reach the HUD within a polling cycle', async ({ pag
   const preview = page.getByRole('region', { name: 'HUD preview' });
   await expect(preview).toContainText('P0420', { timeout: 5000 });
 });
+
+test('a traffic jam from the phone controls shows on the HUD preview with its delay', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (err) => errors.push(err.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${hud.base}/dev#live`);
+  await expect(page.locator('.feed-badge')).toContainText('Live');
+  // Drive off, so that the HUD leaves the parked dashboard for the driving layout.
+  await hud.sim({ mode: 'manual', engineRunning: true, throttle: 0.3, brake: 0, dtcs: [] });
+
+  await page.getByRole('button', { name: 'Traffic jam', exact: true }).click();
+  const hazard = page
+    .getByRole('region', { name: 'HUD preview' })
+    .locator('[data-widget="hazard"]');
+  await expect(hazard).toContainText('Traffic jam', { timeout: 15_000 });
+  await expect(hazard).toContainText('+7 min');
+  await expect(hazard.locator('[data-hazard="traffic-jam"]')).toHaveCount(1);
+  expect(errors).toEqual([]);
+});

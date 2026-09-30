@@ -293,14 +293,14 @@ class LinkTest {
     inner class Endpoint {
         @ParameterizedTest
         @CsvSource(
-            "192.168.4.1, 192.168.4.1, 8080",
-            "192.168.4.1:9000, 192.168.4.1, 9000",
-            "  hud.local  , hud.local, 8080",
-            "hud.local.:8081, hud.local, 8081",
-            "http://10.0.0.5:8080/settings, 10.0.0.5, 8080",
-            "ws://carheadsup:8080/ws/phone, carheadsup, 8080",
-            "'[fe80::1%wlan0]:8080', fe80::1%wlan0, 8080",
-            "'fd00::10', fd00::10, 8080",
+            "192.168.4.1, 192.168.4.1, 8443",
+            "192.168.4.1:9443, 192.168.4.1, 9443",
+            "  hud.local  , hud.local, 8443",
+            "hud.local.:8444, hud.local, 8444",
+            "https://10.0.0.5:8443/settings, 10.0.0.5, 8443",
+            "wss://carheadsup:8443/ws/phone, carheadsup, 8443",
+            "'[fe80::1%wlan0]:8443', fe80::1%wlan0, 8443",
+            "'fd00::10', fd00::10, 8443",
         )
         fun `parses manual addresses`(input: String, host: String, port: Int) {
             assertEquals(HudEndpoint(host, port), HudEndpoint.parse(input))
@@ -318,25 +318,28 @@ class LinkTest {
         }
 
         @Test
-        fun `builds URLs, bracketing IPv6`() {
+        fun `builds TLS URLs on the HUD's TLS port, bracketing IPv6`() {
             val v4 = HudEndpoint("192.168.4.1")
-            assertEquals("ws://192.168.4.1:8080/ws/phone", v4.webSocketUrl)
-            assertEquals("http://192.168.4.1:8080/settings", v4.settingsUrl)
-            assertEquals("http://192.168.4.1:8080/api/trips", v4.apiUrl("/api/trips"))
-            assertEquals("http://192.168.4.1:8080/api/info", v4.apiUrl("api/info"))
-            assertEquals("ws://[fd00::10]:8080/ws/phone", HudEndpoint("fd00::10").webSocketUrl)
-            assertEquals("[fd00::10]:8080", HudEndpoint("fd00::10").display())
+            assertEquals(8443, HudEndpoint.DEFAULT_PORT)
+            assertEquals("wss://192.168.4.1:8443/ws/phone", v4.webSocketUrl)
+            assertEquals("https://192.168.4.1:8443/settings", v4.settingsUrl)
+            assertEquals("https://192.168.4.1:8443/api/trips", v4.apiUrl("/api/trips"))
+            assertEquals("https://192.168.4.1:8443/api/info", v4.apiUrl("api/info"))
+            assertEquals("wss://[fd00::10]:8443/ws/phone", HudEndpoint("fd00::10").webSocketUrl)
+            assertEquals("[fd00::10]:8443", HudEndpoint("fd00::10").display())
+            // Nothing goes to the HUD in the clear.
+            assertTrue(v4.webSocketUrl.startsWith("wss://") && v4.httpBaseUrl.startsWith("https://"))
         }
 
         @Test
         fun `hands the API token to the settings page`() {
             val hud = HudEndpoint("192.168.4.1")
-            assertEquals("http://192.168.4.1:8080/settings", hud.settingsUrl(""))
-            assertEquals("http://192.168.4.1:8080/settings", hud.settingsUrl("   "))
-            assertEquals("http://192.168.4.1:8080/settings?token=K7f-Q2_z~9", hud.settingsUrl(" K7f-Q2_z~9 "))
+            assertEquals("https://192.168.4.1:8443/settings", hud.settingsUrl(""))
+            assertEquals("https://192.168.4.1:8443/settings", hud.settingsUrl("   "))
+            assertEquals("https://192.168.4.1:8443/settings?token=K7f-Q2_z~9", hud.settingsUrl(" K7f-Q2_z~9 "))
             // Spaces, reserved and non-ASCII characters are percent-encoded (URLSearchParams decodes them).
             assertEquals(
-                "http://192.168.4.1:8080/settings?token=a%20b%26c%3D%2B%C3%A4",
+                "https://192.168.4.1:8443/settings?token=a%20b%26c%3D%2B%C3%A4",
                 hud.settingsUrl("a b&c=+ä"),
             )
             assertEquals(
@@ -345,10 +348,72 @@ class LinkTest {
             )
         }
 
+        @ParameterizedTest
+        @CsvSource(
+            "10.42.0.1:8080, 10.42.0.1:8443",
+            "http://hud.local:8080/settings, hud.local:8443",
+            "ws://[fd00::10]:8080/ws/phone, [fd00::10]:8443",
+            // No port: the default is the TLS port already. Another port: only the user knows.
+            "10.42.0.1, 10.42.0.1",
+            "10.42.0.1:8090, 10.42.0.1:8090",
+            "10.42.0.1:8443, 10.42.0.1:8443",
+            "not an address, not an address",
+        )
+        fun `moves an address saved before the TLS link from the plain port to the TLS port`(
+            saved: String,
+            upgraded: String,
+        ) {
+            assertEquals(upgraded, HudEndpoint.upgradeLegacyAddress(saved))
+        }
+
         @Test
         fun `constructor validates`() {
             assertThrows(IllegalArgumentException::class.java) { HudEndpoint(" ") }
             assertThrows(IllegalArgumentException::class.java) { HudEndpoint("h", 0) }
+        }
+    }
+
+    @Nested
+    inner class Advertisement {
+        private val fingerprint = "fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531"
+
+        @Test
+        fun `connects to the advertised TLS port with the advertised id and certificate`() {
+            val txt = mapOf(
+                "v" to "3",
+                "path" to "/ws/phone",
+                "id" to "AAECAwQFBgcICQoLDA0ODw",
+                "tls" to "9443",
+                "fp" to fingerprint,
+            )
+            assertEquals(
+                HudAdvertisement(HudEndpoint("10.42.0.1", 9443), "AAECAwQFBgcICQoLDA0ODw", fingerprint),
+                HudAdvertisement.fromTxt("10.42.0.1", txt),
+            )
+        }
+
+        @Test
+        fun `falls back to the default TLS port and leaves out what is malformed`() {
+            // The static Avahi file of an older installation: no tls, id or fp.
+            assertEquals(
+                HudAdvertisement(HudEndpoint("10.42.0.1", 8443), null, null),
+                HudAdvertisement.fromTxt("10.42.0.1", mapOf("v" to "2", "path" to "/ws/phone")),
+            )
+            assertEquals(
+                HudAdvertisement(HudEndpoint("10.42.0.1", 8443), null, null),
+                HudAdvertisement.fromTxt("10.42.0.1", mapOf("id" to "short", "fp" to "abc", "tls" to null)),
+            )
+            // A fingerprint written with colons in upper case is the same fingerprint.
+            val colons = fingerprint.uppercase().chunked(2).joinToString(":")
+            assertEquals(fingerprint, HudAdvertisement.fromTxt("hud", mapOf("fp" to colons))?.certFingerprint)
+        }
+
+        @Test
+        fun `skips an unusable address or port`() {
+            assertNull(HudAdvertisement.fromTxt("", emptyMap()))
+            for (port in listOf("0", "70000", "tls", "")) {
+                assertNull(HudAdvertisement.fromTxt("10.42.0.1", mapOf("tls" to port)), port)
+            }
         }
     }
 

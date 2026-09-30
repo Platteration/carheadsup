@@ -8,7 +8,8 @@
  *    about once a second and the next maneuver comes up once one is reached.
  *  - red-light: an incoming call that auto-answers after 6 s (unless the HUD accepts or
  *    declines it first) and ends 20 s after pickup.
- *  - highway: speed limits 120/100 and a fixed speed camera in the 100 zone.
+ *  - highway: speed limits 120/100, a fixed speed camera in the 100 zone, and a traffic jam
+ *    on the A7 beyond the exit (reported from the merge, withdrawn at the exit).
  *  - arriving: a message notification (sender only); guidance ends at the destination.
  *  - parked: the driver presses the companion app's remote "next page" button (an `input`
  *    message), which opens the diagnostics dashboard at once — the HUD would otherwise show it
@@ -35,10 +36,11 @@ import type { VehicleSimulator } from '@carheadsup/obd/sim';
 import type { EventSource, PhoneMessageTranslator, SourceContext } from '../sources/types.ts';
 import { OnceLogger, TimerSlots, cleanLabel, errorMessage } from '../sensors/util.ts';
 import {
-  HAZARD_ANNOUNCE_M,
   ROUTE_LENGTH_M,
   ROUTE_MANEUVERS,
   SCRIPTED_HAZARDS,
+  announceAt,
+  dropAt,
   locationAt,
   nextManeuverIndex,
   remainingSeconds,
@@ -80,6 +82,12 @@ export const ARRIVED_END_MS = 3000;
 export const MANUAL_CAMERA_AHEAD_M = 700;
 /** A manually triggered camera is forgotten after this long if the car never reaches it. */
 export const MANUAL_HAZARD_TTL_MS = 120_000;
+/** Where a manually triggered jam starts, ahead of the car (within every reveal distance). */
+export const MANUAL_JAM_AHEAD_M = 900;
+/** A manually triggered jam's delay, seconds. */
+export const MANUAL_JAM_DELAY_S = 420;
+/** A manually triggered jam is forgotten after this long if the car never reaches it. */
+export const MANUAL_JAM_TTL_MS = 300_000;
 
 export interface Track {
   title: string;
@@ -109,10 +117,13 @@ const NAME_MAX = 100;
 interface ActiveHazard {
   id: string;
   at: number;
+  /** Withdrawn once the car reaches this route position (normally `at`). */
+  dropAt: number;
   type: PhoneHazards['items'][number]['type'];
   speedLimitKph: number | null;
+  delaySeconds: number | null;
   description: string;
-  /** Manual cameras expire; scripted ones last until passed. */
+  /** Manual hazards expire; scripted ones last until dropped. */
   expiresAt: number | null;
 }
 
@@ -167,6 +178,7 @@ export class SimPhone implements EventSource {
   private callSeq = 0;
   private messageSeq = 0;
   private cameraSeq = 0;
+  private jamSeq = 0;
 
   constructor(options: SimPhoneOptions) {
     this.vehicle = options.vehicle;
@@ -264,6 +276,9 @@ export class SimPhone implements EventSource {
         return;
       case 'speed-camera':
         this.addManualCamera();
+        return;
+      case 'traffic-jam':
+        this.addManualJam();
         return;
       case 'disconnect':
         this.disconnect();
@@ -444,13 +459,35 @@ export class SimPhone implements EventSource {
     if (ctx === null) return;
     this.cameraSeq += 1;
     const limit = roadAt(this.position).speedLimitKph;
+    const at = this.position + MANUAL_CAMERA_AHEAD_M;
     this.hazards.set(`sim-camera-${this.cameraSeq}`, {
       id: `sim-camera-${this.cameraSeq}`,
-      at: this.position + MANUAL_CAMERA_AHEAD_M,
+      at,
+      dropAt: at,
       type: 'speed-camera',
       speedLimitKph: limit,
+      delaySeconds: null,
       description: 'Mobile speed camera',
       expiresAt: ctx.now() + MANUAL_HAZARD_TTL_MS,
+    });
+    this.sendHazards();
+  }
+
+  /** A traffic jam ahead, as the companion's traffic look-up reports one. */
+  private addManualJam(): void {
+    const ctx = this.ctx;
+    if (ctx === null) return;
+    this.jamSeq += 1;
+    const at = this.position + MANUAL_JAM_AHEAD_M;
+    this.hazards.set(`sim-jam-${this.jamSeq}`, {
+      id: `sim-jam-${this.jamSeq}`,
+      at,
+      dropAt: at,
+      type: 'traffic-jam',
+      speedLimitKph: null,
+      delaySeconds: MANUAL_JAM_DELAY_S,
+      description: 'Stationary traffic',
+      expiresAt: ctx.now() + MANUAL_JAM_TTL_MS,
     });
     this.sendHazards();
   }
@@ -461,14 +498,23 @@ export class SimPhone implements EventSource {
     const now = ctx.now();
     let changed = false;
     for (const hazard of SCRIPTED_HAZARDS) {
-      const ahead = hazard.at - this.position;
-      if (this.announced.has(hazard.id) || ahead > HAZARD_ANNOUNCE_M || ahead <= 0) continue;
+      if (this.announced.has(hazard.id)) continue;
+      if (this.position < announceAt(hazard) || this.position >= dropAt(hazard)) continue;
       this.announced.add(hazard.id);
-      this.hazards.set(hazard.id, { ...hazard, expiresAt: null });
+      this.hazards.set(hazard.id, {
+        id: hazard.id,
+        at: hazard.at,
+        dropAt: dropAt(hazard),
+        type: hazard.type,
+        speedLimitKph: hazard.speedLimitKph,
+        delaySeconds: hazard.delaySeconds,
+        description: hazard.description,
+        expiresAt: null,
+      });
       changed = true;
     }
     for (const [id, hazard] of this.hazards) {
-      const passed = this.position >= hazard.at;
+      const passed = this.position >= hazard.dropAt;
       const expired = hazard.expiresAt !== null && now >= hazard.expiresAt;
       if (passed || expired) {
         this.hazards.delete(id);
@@ -488,7 +534,7 @@ export class SimPhone implements EventSource {
       type: h.type,
       distanceM: Math.round(Math.max(0, h.at - this.position)),
       speedLimitKph: h.speedLimitKph,
-      delaySeconds: null,
+      delaySeconds: h.delaySeconds,
       description: h.description,
     }));
     if (!force && items.length === 0 && this.lastHazardsSentCount === 0) return;

@@ -5,7 +5,7 @@ import type { Logger, Timers } from '@carheadsup/obd';
 import { WebSocketServer } from 'ws';
 import { bearerToken, isAuthorized, isCrossSiteRequest } from '../http/auth.ts';
 import { UNKNOWN_HOST_MESSAGE, parseRequestUrl } from '../http/server.ts';
-import type { PhoneChannel } from './phone-channel.ts';
+import type { PhoneChannel, PhoneTransport } from './phone-channel.ts';
 import type { RendererChannel } from './renderer-channel.ts';
 import { Heartbeat } from './sockets.ts';
 
@@ -26,6 +26,10 @@ export interface WebSocketRouterOptions {
   phone: PhoneChannel;
   /** Current `server.apiToken`. */
   apiToken: () => string;
+  /** Current `server.allowPlainPhone`: whether `/ws/phone` is served on the plain listener. */
+  allowPlainPhone: () => boolean;
+  /** The port the TLS listener is bound to (named when a plain phone connection is refused). */
+  tlsPort: () => number | null;
   /** Whether a `Host` header names this HUD (DNS-rebinding protection). */
   allowedHost: (host: string | undefined) => boolean;
   timers: Timers;
@@ -56,12 +60,21 @@ function reject(socket: Duplex, status: number, message: string): void {
   );
 }
 
+/** Answer to a phone connecting to the plain listener while it only takes TLS. */
+export function tlsRequiredMessage(tlsPort: number | null): string {
+  return tlsPort === null
+    ? 'The phone link needs TLS, which is not running on this HUD (see server.tlsPort)'
+    : `The phone link needs TLS: connect to wss://<this HUD>:${tlsPort}${PHONE_SOCKET_PATH}`;
+}
+
 /**
- * Routes HTTP upgrade requests to the two WebSocket endpoints (`ws` in noServer mode):
- * `/ws/hud` (same access rule as the REST API; remote clients pass the token as `?token=` or a
- * Bearer header) and `/ws/phone` (authenticated by its `hello`). Unknown paths, upgrades
- * addressed to a host name that is not the HUD's (DNS rebinding) and cross-site browser upgrades
- * are refused. Keeps every socket alive with pings every 10 s.
+ * Routes HTTP upgrade requests of both listeners to the two WebSocket endpoints (`ws` in
+ * noServer mode): `/ws/hud` (same access rule as the REST API; remote clients pass the token as
+ * `?token=` or a Bearer header) and `/ws/phone` (authenticated by its `hello`, and bound to the
+ * TLS certificate). The phone endpoint is served on the TLS listener, and on the plain one only
+ * while `server.allowPlainPhone` is on (403 otherwise). Unknown paths, upgrades addressed to a
+ * host name that is not the HUD's (DNS rebinding) and cross-site browser upgrades are refused.
+ * Keeps every socket alive with pings every 10 s.
  */
 export class WebSocketRouter {
   private readonly options: WebSocketRouterOptions;
@@ -90,8 +103,22 @@ export class WebSocketRouter {
     this.heartbeat.start();
   }
 
-  /** The HTTP server's `upgrade` listener. */
+  /** The plain HTTP server's `upgrade` listener. */
   readonly handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    this.upgrade(req, socket, head, 'plain');
+  };
+
+  /** The HTTPS server's `upgrade` listener. */
+  readonly handleSecureUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    this.upgrade(req, socket, head, 'tls');
+  };
+
+  private upgrade(
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    transport: PhoneTransport,
+  ): void {
     socket.on('error', (err) => this.options.logger.debug(`Upgrade socket error: ${err.message}`));
     if (this.closed) {
       reject(socket, 503, 'The HUD is shutting down');
@@ -139,11 +166,18 @@ export class WebSocketRouter {
       return;
     }
 
+    if (transport === 'plain' && !this.options.allowPlainPhone()) {
+      this.options.logger.debug(
+        `Phone: refused a plain connection from ${remoteAddress ?? '?'} (TLS required)`,
+      );
+      reject(socket, 403, tlsRequiredMessage(this.options.tlsPort()));
+      return;
+    }
     this.phoneServer.handleUpgrade(req, socket, head, (ws) => {
       this.heartbeat.track(ws);
-      this.options.phone.accept(ws, remoteAddress);
+      this.options.phone.accept(ws, remoteAddress, transport);
     });
-  };
+  }
 
   /** Stop accepting upgrades and pinging, and close both channels' clients. */
   async close(): Promise<void> {

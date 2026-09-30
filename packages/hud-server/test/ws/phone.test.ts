@@ -1,18 +1,21 @@
 import { readFile } from 'node:fs/promises';
+import { get } from 'node:http';
 import { join } from 'node:path';
 import { PROTOCOL_VERSION, isAuthId } from '@carheadsup/core';
-import type { TripRecord } from '@carheadsup/core';
+import type { ApiInfo, TripRecord } from '@carheadsup/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { HUD_VERSION } from '../../src/meta.ts';
 import { hudProof } from '../../src/phone/auth.ts';
 import { createSimulation } from '../../src/sim/index.ts';
 import { SIM_PHONE_DEVICE } from '../../src/sim/phone.ts';
 import { PHONE_CLOSE } from '../../src/ws/phone-channel.ts';
+import { tlsRequiredMessage } from '../../src/ws/upgrade.ts';
 import {
   FakeSimulation,
   TestSocket,
   answerChallenge,
   connectTestPhone,
+  helloOn,
   startTestServer,
   testDeviceId,
   waitFor,
@@ -33,8 +36,9 @@ afterEach(async () => {
   current = null;
 });
 
+/** A phone socket to the HUD's TLS listener. */
 function phone(t: TestServer): TestSocket {
-  const socket = new TestSocket(`${t.wsBase}/ws/phone`);
+  const socket = new TestSocket(`${t.phoneBase}/ws/phone`);
   sockets.push(socket);
   return socket;
 }
@@ -43,13 +47,13 @@ function phone(t: TestServer): TestSocket {
 async function sayHello(t: TestServer, identity: TestPhone = {}): Promise<TestSocket> {
   const socket = phone(t);
   await socket.opened;
-  socket.send(answerChallenge(await socket.nextOfType('challenge'), identity));
+  await helloOn(socket, identity);
   return socket;
 }
 
 /** Connect and complete the handshake. */
 async function connected(t: TestServer, identity: TestPhone = {}): Promise<TestSocket> {
-  const { socket } = await connectTestPhone(t.wsBase, identity);
+  const { socket } = await connectTestPhone(t.phoneBase, identity);
   sockets.push(socket);
   return socket;
 }
@@ -82,6 +86,8 @@ describe('/ws/phone handshake', () => {
     });
     const socket = phone(t);
     await socket.opened;
+    // The phone sees the HUD's own certificate, and binds its proof to it.
+    expect(socket.peerFingerprint).toBe(t.fingerprint);
     const challenge = await socket.next();
     const hudId = (await readFile(join(t.dataDir, 'hud-id'), 'utf8')).trim();
     expect(isAuthId(hudId)).toBe(true);
@@ -91,7 +97,7 @@ describe('/ws/phone handshake', () => {
       hudId,
       nonce: expect.stringMatching(/^[\w-]{22}$/),
     });
-    const hello = answerChallenge(challenge);
+    const hello = answerChallenge(challenge, {}, socket.peerFingerprint);
     socket.send(hello);
     expect(await socket.next()).toEqual({
       t: 'welcome',
@@ -105,6 +111,7 @@ describe('/ws/phone handshake', () => {
         hudNonce: String(challenge['nonce']),
         phoneNonce: String(hello['nonce']),
         deviceId: String(hello['deviceId']),
+        certFingerprint: t.fingerprint ?? '',
       }),
     });
     await waitFor(() => t.server.engine.state.phone.connected, 1000, 'phone link');
@@ -119,7 +126,7 @@ describe('/ws/phone handshake', () => {
 
   it('uses the identity kept in its data directory', async () => {
     const t = await start({ files: { 'hud-id': 'AAECAwQFBgcICQoLDA0ODw\n' } });
-    const { socket, welcome } = await connectTestPhone(t.wsBase);
+    const { socket, welcome } = await connectTestPhone(t.phoneBase);
     sockets.push(socket);
     expect(welcome['hudId']).toBe('AAECAwQFBgcICQoLDA0ODw');
   });
@@ -133,6 +140,103 @@ describe('/ws/phone handshake', () => {
 
     const right = await connected(t, { token: 'K7fQ2mZr' });
     expect(right.ws.readyState).toBe(right.ws.OPEN);
+  });
+
+  it('refuses a proof bound to another certificate: a relay cannot complete the handshake', async () => {
+    const t = await start({ config: { phone: { pairingToken: 'K7fQ2mZr' } } });
+    // A relay terminates the phone's TLS with a certificate of its own: the phone's proof names
+    // that certificate, and the HUD, which knows its own, refuses it — right token or not.
+    const relayed = await sayHello(t, { token: 'K7fQ2mZr', certFingerprint: 'e'.repeat(64) });
+    expect(await relayed.nextOfType('error')).toMatchObject({ code: 'bad-token' });
+    expect(await relayed.closed).toBe(PHONE_CLOSE.badToken);
+    // Nor does a proof without any binding pass over TLS.
+    const unbound = await sayHello(t, { token: 'K7fQ2mZr', certFingerprint: '' });
+    expect(await unbound.closed).toBe(PHONE_CLOSE.badToken);
+    expect(t.logger.text('warn')).toContain('relayed through another TLS certificate');
+    expect(t.server.engine.state.phone.connected).toBe(false);
+    // The same phone, bound to the certificate it really sees, gets in.
+    await connected(t, { token: 'K7fQ2mZr' });
+    await waitFor(() => t.server.engine.state.phone.connected, 1000, 'phone link');
+  });
+
+  it('is served over TLS only: a plain ws:// phone is refused by default', async () => {
+    const t = await start();
+    const plain = new TestSocket(`${t.wsBase}/ws/phone`);
+    sockets.push(plain);
+    await expect(plain.opened).rejects.toThrow(/403/);
+    expect(t.server.engine.state.phone.connected).toBe(false);
+    // The display and the pages stay on the plain listener.
+    const hud = new TestSocket(`${t.wsBase}/ws/hud`);
+    sockets.push(hud);
+    await hud.opened;
+    expect((await fetch(`${t.base}/api/info`)).status).toBe(200);
+  });
+
+  it('says where to connect instead', async () => {
+    const t = await start();
+    const answer = await new Promise<string>((resolve, reject) => {
+      const request = get(
+        `${t.base}/ws/phone`,
+        {
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Version': '13',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+          },
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk: Buffer) => (body += chunk.toString()));
+          res.on('end', () => resolve(`${res.statusCode ?? '?'} ${body}`));
+        },
+      );
+      request.on('error', reject);
+    });
+    expect(answer).toBe(`403 ${tlsRequiredMessage(t.tlsPort)}\n`);
+    expect(answer).toContain(`:${t.tlsPort}/ws/phone`);
+  });
+
+  it('takes plain ws:// phones with server.allowPlainPhone, binding nothing, until it is switched off', async () => {
+    const t = await start({ config: { server: { allowPlainPhone: true } } });
+    // A plain session binds no certificate…
+    const { socket: plain, welcome } = await connectTestPhone(t.wsBase, { device: 'Dev phone' });
+    sockets.push(plain);
+    expect(plain.peerFingerprint).toBe('');
+    expect(welcome['t']).toBe('welcome');
+    await waitFor(() => t.server.engine.state.phone.connected, 1000, 'phone link');
+    expect(t.logger.text('info')).toContain('unencrypted');
+    // …and a relay cannot pass a TLS phone's proof off as a plain one's.
+    const relayed = new TestSocket(`${t.wsBase}/ws/phone`);
+    sockets.push(relayed);
+    await relayed.opened;
+    await helloOn(relayed, { device: 'Dev phone', certFingerprint: t.fingerprint ?? '' });
+    expect(await relayed.closed).toBe(PHONE_CLOSE.badToken);
+
+    const res = await fetch(`${t.base}/api/config`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server: { allowPlainPhone: false } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await plain.closed).toBe(PHONE_CLOSE.tlsRequired);
+    await waitFor(() => !t.server.engine.state.phone.connected, 1000, 'phone gone');
+    const again = new TestSocket(`${t.wsBase}/ws/phone`);
+    sockets.push(again);
+    await expect(again.opened).rejects.toThrow(/403/);
+    // TLS phones are not affected.
+    await connected(t, { device: 'Dev phone' });
+  });
+
+  it('runs without a TLS listener when server.tlsPort is null (and a plain phone is allowed)', async () => {
+    const t = await start({ tlsPort: null, config: { server: { allowPlainPhone: true } } });
+    expect(t.tlsPort).toBeNull();
+    expect(t.server.tls).toBeNull();
+    expect(((await (await fetch(`${t.base}/api/info`)).json()) as ApiInfo).tls).toBeNull();
+    const { socket } = await connectTestPhone(t.wsBase);
+    sockets.push(socket);
+    await waitFor(() => t.server.engine.state.phone.connected, 1000, 'phone link');
+    expect(t.logger.text('warn')).toContain('TLS is off');
   });
 
   it('refuses other protocol versions', async () => {

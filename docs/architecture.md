@@ -25,7 +25,7 @@ contract between all of them.
 | --- | --- | --- |
 | `@carheadsup/core` | All domain logic and the shared types. No I/O, no clock, no randomness; runs in Node.js and the browser. | `state/reducer.ts`, `compose/compose.ts`, `alerts/`, `display/` (context, brightness, sun, shift light), `vehicle/` (fuel, gear), `trip/`, `maintenance/`, `obd/` (PIDs, formulas, DTC database), `config/` (defaults, presets, schema), `protocol/validate.ts` |
 | `@carheadsup/obd` | Talks to the car. | `transport.ts` (serial, TCP), `elm327.ts` (driver), `poller.ts` (PID scheduling), `service.ts` (connect / reconnect loop, events), `sim/` (ELM327 emulator and vehicle simulator) |
-| `@carheadsup/hud-server` | The on-car service that wires everything together. | `app.ts` (composition), `engine.ts` (reducer loop, effects, frame timer), `http/` (REST API, static files, auth), `ws/` (phone and renderer sockets), `sensors/` (light, gesture, GPIO buttons, steering-wheel buttons over CAN or an ADC, ADAS UDP), `outputs/backlight.ts`, `store/` (config, state, trips), `discovery/mdns.ts`, `sim/` |
+| `@carheadsup/hud-server` | The on-car service that wires everything together. | `app.ts` (composition), `engine.ts` (reducer loop, effects, frame timer), `http/` (REST API, static files, auth), `ws/` (phone and renderer sockets), `tls/` (the HUD's self-signed certificate: DER encoder, X.509 builder, `tls.pem`), `phone/auth.ts` (the phone proofs), `sensors/` (light, gesture, GPIO buttons, steering-wheel buttons over CAN or an ADC, ADAS UDP), `outputs/backlight.ts`, `store/` (config, state, trips), `discovery/mdns.ts`, `sim/` |
 | `@carheadsup/hud-renderer` | The three web pages. | `hud/` (projected HUD), `settings/` (settings app), `dev/` (developer console), `common/` (WebSocket feed, REST client, staleness) |
 | `companion-android` | The phone app. `:protocol` mirrors the TypeScript contract in Kotlin; `:app` is the Android UI and services. | see [its README](../companion-android/README.md) |
 
@@ -193,8 +193,9 @@ and comes back to a silent ECU leaves the moving layout up until the next drive.
 2. Each widget is shown only when it is relevant and backed by fresh data: coolant and voltage
    only while their alert is up (sharing its hysteresis and persistence time), tyre pressures while moving only when one is low, navigation on the
    highway only within 2 km of the next maneuver (`highwayNavRevealM`), lanes within 800 m
-   (`laneRevealM`), hazards within 1 km (`hazardRevealM`), the speed limit only while the phone
-   is connected, media only while something plays.
+   (`laneRevealM`), hazards within 1 km (`hazardRevealM`; traffic hazards on the highway within
+   3 km, `trafficRevealM`), the speed limit only while the phone is connected, media only while
+   something plays.
 3. The renderer gives each zone limited room; when widgets do not fit, earlier entries in the
    layout win (the array order is priority order).
 
@@ -290,7 +291,9 @@ wheel's call and media buttons, and the HUD follows the phone's call and media s
    resistor-ladder steering-wheel buttons, ADAS UDP — each idles quietly when its hardware is
    absent or disabled), the frame sinks (backlight; the renderer channel tells the page whether
    the backlight follows the brightness, so the page does not dim as well), the phone and
-   renderer channels, and the HTTP server; listen; start everything; advertise over mDNS.
+   renderer channels, and the HTTP server — twice: plainly on `server.port` and over TLS on
+   `server.tlsPort` with the HUD's self-signed certificate (made on the first start); listen;
+   start everything; advertise over mDNS.
 4. On `SIGINT` / `SIGTERM`, write the persisted state (including the trip in progress) first —
    a supercapacitor or UPS HAT may not last long — then stop everything in reverse order (each
    step limited to 5 s), write the state once more if it changed meanwhile and flush the trip
@@ -299,8 +302,9 @@ wheel's call and media buttons, and the HUD follows the phone's call and media s
 A config change through the API is validated, saved atomically and pushed to every component
 without a restart: the engine, the OBD service (reconnects if the link settings changed), the
 sensor sources (only those whose settings changed restart), the renderer (`display` message), the
-phone channel (disconnects a phone whose proof no longer matches the pairing token) and mDNS. Only a new
-`server.port` or `server.host` needs a restart.
+phone channel (disconnects a phone whose proof no longer matches the pairing token, and plain
+phone sessions once `server.allowPlainPhone` is switched off) and mDNS. Only a new `server.port`,
+`server.tlsPort` or `server.host` needs a restart.
 
 Failures stay local: the OBD service reconnects with a back-off that doubles up to 30 s; the
 `gpiomon`, `candump` and `avahi-publish-service` helpers are supervised and restarted; an I²C
@@ -318,6 +322,7 @@ default `~/.local/share/carheadsup`, and its `sim` subdirectory with `--sim`) ho
 | `state.json` | Odometer, learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, and the trip in progress (`PersistedState.activeTrip`, with wall-clock times). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
 | `trips.jsonl` | One completed trip per line, oldest first; at most 5,000 trips (the oldest are dropped). | Appended when a trip ends |
 | `hud-id` | The HUD's identity on the phone link (22 base64url characters), which paired phones pin. A corrupt file is moved to `hud-id.corrupt` and replaced; phones then report a different HUD until paired again. | Once, on the first start |
+| `tls.pem` | The HUD's TLS private key (ECDSA P-256) and self-signed certificate, which paired phones pin; mode `0600` (made so if it was readable by others). Made by the server itself (`hud-server/src/tls`), without the openssl command. A corrupt file (no key, no certificate, or a certificate for another key) is moved to `tls.pem.corrupt` (also `0600`) and replaced; phones then report "HUD certificate changed" until paired again. Not made while `server.tlsPort` is null. | Once, on the first start |
 
 A trip normally ends only after `trip.endAfterEngineOffMs` (5 min) without the engine or the
 OBD link, but a Pi behind an ignition-sensed power controller shuts down seconds after the
@@ -344,17 +349,32 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
   pass it as a Bearer header or `?token=`. With no token, anyone on the car's network can use the
   API — set one unless the Wi-Fi is yours alone. Changing the token disconnects remote clients
   that no longer match.
-- **Mutual phone authentication.** On `/ws/phone` the HUD and the companion prove to each other
-  that they know `phone.pairingToken`, which itself never crosses the Wi-Fi: the HUD sends a
-  `challenge` with its identity (`hudId`, kept in the data directory) and a fresh nonce; the
-  phone answers with an HMAC-SHA256 over it, the HUD with one over the phone's nonce (compared in
-  constant time; [details](protocol.md#authentication)). The companion pins the `hudId` of the
-  first HUD that proves the token and afterwards sends nothing — no data, no proof, no REST call
-  with the API token — to any other HUD, nor to its own HUD before its proof checks out; it
-  ignores call actions until then. Phones are told apart by a random per-install `deviceId`, not
-  their name. Without a pairing token the HUD is *open*: any phone can connect, and the phone
-  cannot verify the HUD, so the companion asks the user to confirm it — the settings app flags
-  this and offers to generate a token.
+- **An encrypted phone link, pinned to the HUD's certificate.** The companion talks to the HUD
+  only over TLS (`wss://` and `https://` on `server.tlsPort`, 8443), so nobody on the Wi-Fi can
+  read the session — location, calls, who messages you, the API token — or alter it. The HUD
+  serves a self-signed ECDSA P-256 certificate it made on its first start (`tls.pem`); the
+  companion pins it at the first pairing, together with the `hudId` (trust on first use; if the
+  mDNS advertisement names a fingerprint, the certificate must match it), and from then on
+  accepts exactly that certificate — any other is a hard stop, "HUD certificate changed —
+  re-pair". Host names and certificate authorities play no part (the HUD is reached by IP
+  address): the pin does. The settings page in the companion's WebView is let through by the
+  same pin. `/ws/phone` is not served on the plain port unless `server.allowPlainPhone` is on
+  (for development and custom clients; `403` otherwise).
+- **Mutual phone authentication, bound to the certificate.** On `/ws/phone` the HUD and the
+  companion prove to each other that they know `phone.pairingToken`, which itself never crosses
+  the Wi-Fi: the HUD sends a `challenge` with its identity (`hudId`, kept in the data directory)
+  and a fresh nonce; the phone answers with an HMAC-SHA256 over it, the HUD with one over the
+  phone's nonce (compared in constant time; [details](protocol.md#authentication)). Both proofs
+  cover the SHA-256 fingerprint of the certificate the phone was shown, which the HUD checks
+  against its own: a relay that terminates the phone's TLS with a certificate of its own cannot
+  complete the handshake with the HUD, nor replay a recorded one. The companion pins the
+  `hudId` and certificate of the first HUD that proves the token and afterwards sends nothing —
+  no data, no proof, no REST call with the API token — to any other HUD, nor to its own HUD
+  before its proof checks out; it ignores call actions until then. Phones are told apart by a
+  random per-install `deviceId`, not their name. Without a pairing token the HUD is *open*: any
+  phone can connect, and the phone cannot verify the HUD, so the companion asks the user to
+  confirm it (showing its certificate's fingerprint to compare with the settings app) — the
+  settings app flags this and offers to generate a token.
 - **Cross-site protection.** State-changing API requests and all WebSocket upgrades are refused
   when a browser says they come from another site (`Origin` / `Sec-Fetch-Site`), so a web page
   visited on the phone cannot drive the HUD's API.
@@ -373,8 +393,9 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
   values); the phone socket is rate limited to 50 messages/s (burst 100) and closed when the
   phone stops reading (1 MiB unsent); the ADAS feed to 50 datagrams/s of at most 4 KiB per
   sender. Details in [protocol.md](protocol.md).
-- **Connection limits.** Other devices get at most 32 TCP connections each and 128 in total
-  (more are closed at once), 10 s to send request headers and 30 s for a whole request; at most
+- **Connection limits.** Other devices get at most 32 TCP connections each and 128 in total,
+  across both listeners (more are closed at once), 10 s to finish the TLS handshake and to send
+  request headers and 30 s for a whole request; at most
   4 renderer sockets each and 16 in total (`503`); at most 2 phone connections each (8 in total)
   waiting for their `hello`, the oldest being closed for a newcomer. The Pi itself is never
   limited, so idle or slow connections cannot starve the HUD of file descriptors or lock the
@@ -395,12 +416,26 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
   hardened systemd unit; the kiosk browser runs as a separate user; config and data are private
   to the service ([install guide](install-raspberry-pi.md)).
 
-Not covered: the HUD speaks plain HTTP and WebSocket. The API token crosses the Wi-Fi in clear
-text, and the phone session, though mutually authenticated, is not encrypted: someone on the
-network can read it, and a man-in-the-middle who relays it can alter it after the handshake.
-Someone who records a phone handshake can test pairing-token guesses offline, so use a long
-random token (*Generate*). Use WPA2 with a strong passphrase on the hotspot. Anyone with
-physical access to the Pi (or its SD card) has everything.
+What remains:
+
+- **The first pairing is trust on first use.** Before a phone has pinned the HUD, someone who
+  controls the car's Wi-Fi at that moment can pose as the HUD with a certificate of their own.
+  They still cannot complete the handshake without the pairing token (the phone refuses their
+  `welcome`, and pins nothing), but they receive the phone's proof and can test guesses of a
+  weak pairing token offline. Use a long random token (*Generate*: about 139 bits), pair where
+  the Wi-Fi is yours, and compare the fingerprint the companion shows with the settings app's
+  Phone section. Recorded traffic is no longer enough: a passive listener sees only TLS. An open
+  HUD (no pairing token) is exactly as trustworthy as that first confirmation.
+- **The browser pages are plain HTTP.** The kiosk, the developer console and the settings app
+  opened in a browser use `http://` on `server.port`, and a browser outside the Pi sends the API
+  token in clear text there. The same pages are served over TLS on `server.tlsPort` (the
+  companion's settings page uses that, pinned), but a browser shows its warning for the
+  self-signed certificate. Keep the hotspot on WPA2 with a strong passphrase.
+- **A plain phone link, if enabled.** With `server.allowPlainPhone` on, a client on the plain
+  port (not the companion, which always uses TLS) has a readable, alterable session with nothing
+  bound to a certificate.
+- **The Pi itself.** Anyone with physical access to the Pi (or its SD card) has everything,
+  `tls.pem` included — with it, a device could pose as the HUD to its paired phones.
 
 ## Performance
 

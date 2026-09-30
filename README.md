@@ -34,6 +34,7 @@ unmirrored. In the car the image is mirrored so that it reads correctly in the r
 | ![Imperial](docs/screenshots/imperial-us-800x480.png) mph and a US-style limit sign | ![Speed camera](docs/screenshots/speed-camera-1280x480.png) Speed camera ahead (OpenStreetMap) | ![Sport](docs/screenshots/sport-shift-1280x480.png) Sport layout: tachometer, shift light, boost |
 | ![Blind spot](docs/screenshots/blind-spot-left-1280x480.png) Blind-spot indicator (ADAS module) | ![Engine hot](docs/screenshots/engine-hot-1280x480.png) Coolant appears only when out of range | ![Parked overview, wide](docs/screenshots/parked-overview-1280x480.png) Dashboard on a bar display |
 | ![Maintenance](docs/screenshots/parked-maintenance-800x480.png) Parked: service reminders | ![Incoming call, wide](docs/screenshots/incoming-call-1280x480.png) Call card on a bar display | ![Highway exit, wide](docs/screenshots/highway-exit-lanes-1280x480.png) Lane guidance on a bar display |
+| ![Traffic jam](docs/screenshots/traffic-jam-1280x480.png) Traffic jam 2.4 km ahead with its delay (TomTom, optional) | | |
 
 <p>
 <img src="docs/screenshots/live-settings-390x844.png" alt="Settings app on a phone" height="420">
@@ -74,9 +75,13 @@ notification and sends it to the HUD.
   with Google Maps there are no lane arrows.
 - **Speed limit from OpenStreetMap** (looked up by the phone), with the speed turning red once you
   are over it (by more than a configurable tolerance). Vienna-convention or US-style sign.
-- **Hazards**: fixed speed, red-light and section-control cameras from OpenStreetMap. Traffic
-  slowdowns are supported by the HUD but only appear if a source provides them; the companion has
-  none (Google Maps does not expose its traffic data).
+- **Hazards**: fixed speed, red-light and section-control cameras from OpenStreetMap, and —
+  with your own free [TomTom API key](companion-android/README.md#traffic-tomtom), switched on in
+  the companion — **traffic ahead**: jams and slowdowns with the expected delay ("+8 min"),
+  accidents, road and lane closures, road works, weather and broken-down vehicles up to about
+  10 km ahead in the direction of travel, on your side of the road. On the highway the HUD shows
+  traffic from 3 km, cameras and other hazards from 1 km. Google Maps does not expose its traffic
+  data, and OpenStreetMap has none, hence TomTom.
 - **Android Auto caveat**: while the phone projects to the car's screen with Android Auto, Maps
   runs guidance in the projected session and the phone-side notification is typically missing or
   reduced, so the HUD gets little or no guidance. Run Maps on the phone instead.
@@ -123,13 +128,23 @@ notification and sends it to the HUD.
 - Google Maps' notification is not an API. Its wording can change with any Maps update; the
   parser understands English and German instructions.
 - Speed limits and cameras are only as good as OpenStreetMap where you drive, and need the phone.
-- The API is plain HTTP on the car's network; protect it with WPA2 on the Wi-Fi and the API and
-  pairing tokens (see [docs/architecture.md](docs/architecture.md#security-model)).
-- Phone and HUD authenticate each other with the pairing token (which never crosses the Wi-Fi),
-  and the phone remembers its HUD and sends nothing to any other one. The session itself is not
-  encrypted, so someone on the Wi-Fi can still read it. Without a pairing token nothing is
-  proven: the phone asks you to confirm the HUD, and any phone can connect — set one
+- Traffic needs a TomTom API key, mobile data, and sends TomTom the area around and ahead of the
+  car. The phone does not know the route, so it reports what lies ahead in the direction of
+  travel — including on a road the route is about to leave — and the free plan's 2,500 requests
+  a day (the app uses at most 2,000) mean updates every couple of minutes, not live.
+- The phone link is encrypted: the companion talks to the HUD over TLS (port 8443) and pins the
+  HUD's self-signed certificate at the first pairing, and phone and HUD prove the pairing token
+  to each other (it never crosses the Wi-Fi) bound to that certificate, so nobody in between can
+  read or relay the session. The phone remembers its HUD and sends nothing to any other one; a
+  changed certificate stops it until you pair again. The first pairing trusts the certificate it
+  sees: someone controlling the car's Wi-Fi at that moment cannot get in without the token, but
+  could test guesses of a weak one — use the generated code and compare the fingerprint the app
+  shows with the settings app. Without a pairing token nothing is proven: the phone asks you to
+  confirm the HUD, and any phone can connect — set one
   ([details](docs/protocol.md#authentication)).
+- The web pages in a browser (settings app, developer console) use plain HTTP on the car's
+  network; protect it with WPA2 on the Wi-Fi and the API token (see
+  [docs/architecture.md](docs/architecture.md#security-model)).
 - A flat reflection puts the image about a metre ahead of your eyes, not several metres down the
   road like a factory HUD with focusing optics.
 - The ADAS feed is plain UDP: only the addresses in `sensors.adasAllowedSenders` are heard, but
@@ -157,8 +172,11 @@ share test vectors with the server). What has **not** been verified:
   tests with fakes and by script linting, not on a Pi or in a car.
 - **The Android app (`:app`).** It could not be compiled here (no Android SDK); only its
   `:protocol` module is built and tested, and the app code was type-checked against stubs. The
-  notification parsing, media, calls, discovery, pairing screens and file export have not run on
-  a phone.
+  notification parsing, media, calls, discovery, pairing screens, file export and the TLS pinning
+  in OkHttp and the settings WebView have not run on a phone (the pinning trust manager itself is
+  tested in `:protocol` with real TLS handshakes against certificates made by the HUD).
+- **TomTom's live service.** The traffic client is tested against sample answers modelled on
+  TomTom's documented Incident Details format, not against the real API.
 - **An ADAS module.** The UDP feed is tested with synthetic datagrams only.
 
 ## Quick start (no car needed)
@@ -174,9 +192,10 @@ npm run sim
 
 `npm run sim` builds the web pages on first use and starts the server with a simulated car
 (an emulated ELM327 adapter running a scripted drive), a simulated phone (navigation, a call,
-music, a message, speed limits and a camera) and simulated sensors. The demo drive loops about
-every 5 minutes: warm-up at a standstill, city driving with guidance, a red light with an
-incoming call, an on-ramp, highway with a speed camera, the exit, arriving (a message comes in),
+music, a message, speed limits, a camera and a traffic jam) and simulated sensors. The demo drive
+loops about every 5 minutes: warm-up at a standstill, city driving with guidance, a red light with
+an incoming call, an on-ramp, highway with a speed camera and then a traffic jam reported beyond
+the exit, the exit, arriving (a message comes in),
 and finally standing with the engine off, where the simulated phone's remote opens the
 diagnostics dashboard (the HUD alone waits 3 minutes with the engine off, so that start-stop at
 a red light never opens it); it closes as the car drives off on the next loop. Then open:
@@ -184,8 +203,8 @@ a red light never opens it); it closes as the car drives off on the next loop. T
 - <http://localhost:8080/> — the HUD itself. It is **mirrored** for the windshield; add
   [`?preview=1`](http://localhost:8080/?preview=1) to see it the right way round.
 - <http://localhost:8080/dev> — the developer console: live HUD preview, simulator controls
-  (throttle, brake, faults, phone events, ADAS, light level), input buttons and a gallery of
-  sample frames.
+  (throttle, brake, faults, phone events such as a call or a traffic jam, ADAS, light level),
+  input buttons and a gallery of sample frames.
 - <http://localhost:8080/settings> — the settings app, as the phone shows it.
 
 Simulated drives use their own data directory (`$XDG_DATA_HOME/carheadsup/sim`, by default
@@ -213,7 +232,7 @@ flowchart LR
     ecu["ECUs / OBD-II port"] --> elm["ELM327 adapter<br/>Bluetooth, USB or Wi-Fi"]
   end
   subgraph phone["Android phone"]
-    app["carheadsup companion<br/>Maps notification, media, calls,<br/>GPS, OpenStreetMap"]
+    app["carheadsup companion<br/>Maps notification, media, calls,<br/>GPS, OpenStreetMap, TomTom traffic"]
   end
   subgraph pi["Raspberry Pi: hud-server (Node.js)"]
     obd["@carheadsup/obd<br/>ELM327 driver + PID poller"]

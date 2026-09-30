@@ -39,6 +39,7 @@ import dev.carheadsup.companion.ui.PermissionGroup
 import dev.carheadsup.companion.ui.Permissions
 import dev.carheadsup.companion.ui.theme.StatusColors
 import dev.carheadsup.protocol.HudErrorCode
+import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.TrustProblem
 
 /** Connection status, service control and the permission checklist. */
@@ -211,14 +212,34 @@ private fun ConnectionSummary(status: LinkStatus, serviceRunning: Boolean) {
                         ) to StatusColors.error
 
                     is TrustProblem.UnconfirmedOpenHud ->
-                        stringResource(R.string.status_untrusted_open_hud, at, shortHudId(problem.hudId)) to
-                            StatusColors.warning
+                        stringResource(
+                            R.string.status_untrusted_open_hud,
+                            at,
+                            shortHudId(problem.hudId),
+                            CertFingerprint.short(problem.certFingerprint),
+                        ) to StatusColors.warning
 
                     TrustProblem.BadProof -> stringResource(R.string.status_untrusted_bad_proof, at) to
                         StatusColors.error
 
                     is TrustProblem.ProtocolViolation ->
                         stringResource(R.string.status_untrusted_protocol, at, problem.detail) to StatusColors.error
+
+                    is TrustProblem.CertificateChanged ->
+                        stringResource(
+                            R.string.status_certificate_changed,
+                            at,
+                            CertFingerprint.short(problem.presented),
+                            CertFingerprint.short(problem.pinned),
+                        ) to StatusColors.error
+
+                    is TrustProblem.CertificateMismatch ->
+                        stringResource(
+                            R.string.status_certificate_mismatch,
+                            at,
+                            CertFingerprint.short(problem.presented),
+                            CertFingerprint.short(problem.advertised),
+                        ) to StatusColors.error
                 }
             }
         }
@@ -229,6 +250,7 @@ private fun ConnectionSummary(status: LinkStatus, serviceRunning: Boolean) {
                 add(status.endpoint.display())
                 if (status.hudVersion.isNotBlank()) add("v${status.hudVersion}")
                 status.rttMs?.let { add(stringResource(R.string.status_rtt, it)) }
+                add(stringResource(R.string.status_certificate, CertFingerprint.short(status.certFingerprint)))
             }.joinToString(" · ")
         Text(details, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(
@@ -243,13 +265,15 @@ private fun ConnectionSummary(status: LinkStatus, serviceRunning: Boolean) {
 
 /** What the user can do about a HUD the app does not trust. */
 @Composable
-private fun TrustActions(status: LinkStatus, onConfirm: (String) -> Unit, onForget: () -> Unit) {
+private fun TrustActions(status: LinkStatus, onConfirm: (String, String) -> Unit, onForget: () -> Unit) {
     val problem = (status as? LinkStatus.Untrusted)?.problem ?: return
     when (problem) {
         is TrustProblem.UnconfirmedOpenHud ->
-            Button(onClick = { onConfirm(problem.hudId) }) { Text(stringResource(R.string.action_confirm_open_hud)) }
+            Button(onClick = { onConfirm(problem.hudId, problem.certFingerprint) }) {
+                Text(stringResource(R.string.action_confirm_open_hud))
+            }
 
-        is TrustProblem.DifferentHud -> {
+        is TrustProblem.DifferentHud, is TrustProblem.CertificateChanged -> {
             Text(
                 stringResource(R.string.status_forget_hint),
                 style = MaterialTheme.typography.bodySmall,
@@ -258,7 +282,7 @@ private fun TrustActions(status: LinkStatus, onConfirm: (String) -> Unit, onForg
             OutlinedButton(onClick = onForget) { Text(stringResource(R.string.action_forget_paired_hud)) }
         }
 
-        TrustProblem.BadProof, is TrustProblem.ProtocolViolation -> Unit
+        TrustProblem.BadProof, is TrustProblem.ProtocolViolation, is TrustProblem.CertificateMismatch -> Unit
     }
 }
 

@@ -1,11 +1,12 @@
 import type { HazardWidget } from '@carheadsup/core';
+import { formatDelay } from '../../common/format.ts';
 import { Glyph, HAZARD_GLYPHS } from '../icons/index.ts';
 import { cx, lookup, splitDistance } from '../util.ts';
 import { Num, SpeedSign, Unit, WidgetRoot } from './parts.tsx';
 
 /**
  * Road hazard ahead: icon, distance, short label, and the camera limit (in the frame's sign
- * style) or the traffic delay.
+ * style) or the traffic delay ("+8 min", "+2 h").
  */
 export function Hazard({ w }: { w: HazardWidget }) {
   const distance = w.distance ? splitDistance(w.distance) : null;
@@ -33,7 +34,7 @@ export function Hazard({ w }: { w: HazardWidget }) {
             class="hud-hazard__limit"
           />
         )}
-        {hasDelay && <div class="hud-hazard__delay">+{Math.round(w.delayMinutes ?? 0)} min</div>}
+        {hasDelay && <div class="hud-hazard__delay">{formatDelay(w.delayMinutes ?? 0)}</div>}
       </div>
     </WidgetRoot>
   );

@@ -49,6 +49,13 @@ export interface SimulatedHud {
   port: number;
   /** `http://127.0.0.1:<port>` */
   base: string;
+  /**
+   * `https://127.0.0.1:<TLS port>`: the same pages and API over TLS with the HUD's self-signed
+   * certificate, as the companion app's settings page loads them.
+   */
+  httpsBase: string;
+  /** SHA-256 of the HUD's certificate (what the companion app pins). */
+  fingerprint: string;
   dataDir: string;
   /** POST /api/sim. */
   sim(control: SimControl): Promise<SimStatus>;
@@ -88,15 +95,23 @@ export async function startSimulatedHud(options: StartOptions = {}): Promise<Sim
     rendererDir,
     sim: true,
     port: options.port ?? 0,
+    tlsPort: 0,
     host: '127.0.0.1',
     backlight: false,
   });
   let port: number;
+  let tlsPort: number | null;
   try {
-    ({ port } = await server.start());
+    ({ port, tlsPort } = await server.start());
   } catch (err) {
     await rm(dataDir, { recursive: true, force: true });
     throw err;
+  }
+  const fingerprint = server.tls?.fingerprint;
+  if (tlsPort === null || fingerprint === undefined) {
+    await server.stop();
+    await rm(dataDir, { recursive: true, force: true });
+    throw new Error('The HUD started without its TLS listener');
   }
   const base = `http://127.0.0.1:${port}`;
   const json = async <T>(method: string, path: string, body: unknown): Promise<T> => {
@@ -113,6 +128,8 @@ export async function startSimulatedHud(options: StartOptions = {}): Promise<Sim
     server,
     port,
     base,
+    httpsBase: `https://127.0.0.1:${tlsPort}`,
+    fingerprint,
     dataDir,
     sim: (control) => json<SimStatus>('POST', '/api/sim', control),
     patchConfig: async (patch) => {

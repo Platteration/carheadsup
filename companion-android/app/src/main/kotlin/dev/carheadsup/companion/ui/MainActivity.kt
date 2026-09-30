@@ -39,7 +39,9 @@ class MainActivity : ComponentActivity() {
             CompanionTheme {
                 CompanionScreen(
                     viewModel = viewModel,
-                    onOpenHudSettings = { url -> startActivity(HudSettingsActivity.intent(this, url)) },
+                    onOpenHudSettings = { page ->
+                        startActivity(HudSettingsActivity.intent(this, page.url, page.certFingerprint))
+                    },
                 )
             }
         }
@@ -60,7 +62,7 @@ private enum class Tab(@param:StringRes val label: Int, val glyph: String) {
 }
 
 @Composable
-private fun CompanionScreen(viewModel: MainViewModel, onOpenHudSettings: (String) -> Unit) {
+private fun CompanionScreen(viewModel: MainViewModel, onOpenHudSettings: (HudPage) -> Unit) {
     var tab by rememberSaveable { mutableStateOf(Tab.STATUS) }
     Scaffold(
         bottomBar = {

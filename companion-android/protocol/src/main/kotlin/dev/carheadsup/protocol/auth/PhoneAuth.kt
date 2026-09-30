@@ -8,10 +8,11 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * The phone link's mutual authentication (protocol v2), byte for byte the same as the HUD's
+ * The phone link's mutual authentication (protocol v3), byte for byte the same as the HUD's
  * (packages/core/src/protocol/phone-auth.ts for the messages, packages/hud-server/src/phone/auth.ts
  * for the HMAC; shared test vectors keep them in step):
  *
+ *     phone ⇄ HUD   TLS: the HUD presents its self-signed certificate (see [dev.carheadsup.protocol.tls])
  *     HUD → phone   challenge { hudId, nonce: hudNonce }
  *     phone → HUD   hello     { deviceId, nonce: phoneNonce, proof: MAC(phoneProofMessage) }
  *     HUD → phone   welcome   { hudId, proof: MAC(hudProofMessage) }
@@ -19,10 +20,14 @@ import javax.crypto.spec.SecretKeySpec
  * MAC is HMAC-SHA256 keyed with the UTF-8 bytes of the pairing token, base64url without padding.
  * The token never travels. With an empty token the proofs are computed with an empty key and
  * prove nothing.
+ *
+ * Both proofs cover the SHA-256 fingerprint of the certificate the phone was shown
+ * ([CertFingerprint]): the HUD checks against its own, so a relay that shows the phone another
+ * certificate can neither pass the phone's proof on nor produce the HUD's.
  */
 public object PhoneAuth {
-    public const val PHONE_CONTEXT: String = "carheadsup-phone-v2"
-    public const val HUD_CONTEXT: String = "carheadsup-hud-v2"
+    public const val PHONE_CONTEXT: String = "carheadsup-phone-v3"
+    public const val HUD_CONTEXT: String = "carheadsup-hud-v3"
 
     /** Length of a HUD id, device id or nonce: 16 random bytes in base64url. */
     public const val ID_CHARS: Int = 22
@@ -56,13 +61,27 @@ public object PhoneAuth {
         return base64url.encodeToString(bytes)
     }
 
-    /** `carheadsup-phone-v2|hudId|hudNonce|phoneNonce|deviceId`: what `hello.proof` covers. */
-    public fun phoneProofMessage(hudId: String, hudNonce: String, phoneNonce: String, deviceId: String): String =
-        listOf(PHONE_CONTEXT, hudId, hudNonce, phoneNonce, deviceId).joinToString("|")
+    /**
+     * `carheadsup-phone-v3|hudId|hudNonce|phoneNonce|deviceId|certFingerprint`: what
+     * `hello.proof` covers. [certFingerprint] is the certificate this connection presented
+     * ([CertFingerprint.of]).
+     */
+    public fun phoneProofMessage(
+        hudId: String,
+        hudNonce: String,
+        phoneNonce: String,
+        deviceId: String,
+        certFingerprint: String,
+    ): String = listOf(PHONE_CONTEXT, hudId, hudNonce, phoneNonce, deviceId, certFingerprint).joinToString("|")
 
-    /** `carheadsup-hud-v2|hudId|phoneNonce|hudNonce|deviceId`: what `welcome.proof` covers. */
-    public fun hudProofMessage(hudId: String, hudNonce: String, phoneNonce: String, deviceId: String): String =
-        listOf(HUD_CONTEXT, hudId, phoneNonce, hudNonce, deviceId).joinToString("|")
+    /** `carheadsup-hud-v3|hudId|phoneNonce|hudNonce|deviceId|certFingerprint`: what `welcome.proof` covers. */
+    public fun hudProofMessage(
+        hudId: String,
+        hudNonce: String,
+        phoneNonce: String,
+        deviceId: String,
+        certFingerprint: String,
+    ): String = listOf(HUD_CONTEXT, hudId, phoneNonce, hudNonce, deviceId, certFingerprint).joinToString("|")
 
     /** The proof this phone puts in its `hello`. */
     public fun phoneProof(
@@ -71,11 +90,18 @@ public object PhoneAuth {
         hudNonce: String,
         phoneNonce: String,
         deviceId: String,
-    ): String = mac(token, phoneProofMessage(hudId, hudNonce, phoneNonce, deviceId))
+        certFingerprint: String,
+    ): String = mac(token, phoneProofMessage(hudId, hudNonce, phoneNonce, deviceId, certFingerprint))
 
     /** The proof a HUD that knows [token] puts in its `welcome`. */
-    public fun hudProof(token: String, hudId: String, hudNonce: String, phoneNonce: String, deviceId: String): String =
-        mac(token, hudProofMessage(hudId, hudNonce, phoneNonce, deviceId))
+    public fun hudProof(
+        token: String,
+        hudId: String,
+        hudNonce: String,
+        phoneNonce: String,
+        deviceId: String,
+        certFingerprint: String,
+    ): String = mac(token, hudProofMessage(hudId, hudNonce, phoneNonce, deviceId, certFingerprint))
 
     /** Constant-time comparison (false when the lengths differ). */
     public fun proofsEqual(expected: String, received: String): Boolean =

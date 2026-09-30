@@ -5,6 +5,9 @@
  *   city 0–659 m · red light at ~698 m · on-ramp to ~1116 m · highway to ~3976 m ·
  *   exit to ~4342 m · arriving, stopping at ~4511 m.
  *
+ * On the highway there is a fixed speed camera, and — as a traffic service would report it once
+ * the car is on the A7 — a jam on the A7 beyond exit 14, which the route leaves before reaching.
+ *
  * Positions are metres along the route. Everything here is pure data and pure functions; the
  * phone simulation tracks the position from the simulated odometer.
  */
@@ -31,10 +34,17 @@ export interface RoadSegment {
 
 export interface ScriptedHazard {
   id: string;
+  /** Route position of the hazard (where traffic reaches it). */
   at: number;
   type: Hazard['type'];
   speedLimitKph: number | null;
+  /** Expected delay (traffic), seconds. */
+  delaySeconds: number | null;
   description: string;
+  /** Reported from this route position on; default {@link HAZARD_ANNOUNCE_M} before `at`. */
+  announceAt?: number;
+  /** Withdrawn at this route position; default `at` (once passed). */
+  dropAt?: number;
 }
 
 const lane = (
@@ -75,7 +85,7 @@ export const ROUTE_MANEUVERS: readonly RouteManeuver[] = [
     lanes: null,
   },
   {
-    at: 3990,
+    at: 3990, // EXIT_14_AT
     maneuver: { type: 'exit-right', instruction: 'Take exit 14 toward Harborside' },
     street: 'Exit 14 Harborside',
     lanes: [
@@ -121,17 +131,35 @@ export const ROAD_SEGMENTS: readonly RoadSegment[] = [
   { from: 4400, name: 'Harbor Road', speedLimitKph: 30, roadClass: 'residential', bearingDeg: 95 },
 ];
 
+/** Route position of exit 14, where the route leaves the A7. */
+export const EXIT_14_AT = 3990;
+
 export const SCRIPTED_HAZARDS: readonly ScriptedHazard[] = [
   {
     id: 'sim-camera-a7',
     at: 2750,
     type: 'speed-camera',
     speedLimitKph: 100,
+    delaySeconds: null,
     description: 'Fixed speed camera',
+  },
+  {
+    // Stationary traffic on the A7 about 800 m past exit 14, as a traffic service reports it
+    // (TomTom: up to ~10 km ahead) from the merge onto the A7. The HUD shows it from 3 km on the
+    // highway (`display.trafficRevealM`) — here once the camera is passed — and it goes when
+    // the route takes the exit.
+    id: 'sim-jam-a7',
+    at: 4800,
+    type: 'traffic-jam',
+    speedLimitKph: null,
+    delaySeconds: 480,
+    description: 'Stationary traffic',
+    announceAt: 1100,
+    dropAt: EXIT_14_AT,
   },
 ];
 
-/** Hazards are reported once they are this close ahead. */
+/** Hazards are reported once they are this close ahead (unless they say otherwise)… */
 export const HAZARD_ANNOUNCE_M = 1500;
 /** …and dropped once this far behind. */
 export const HAZARD_DROP_BEHIND_M = 60;
@@ -140,6 +168,16 @@ export const THEN_WITHIN_M = 300;
 
 /** Route start (for location updates), somewhere plausible for an "A7". */
 export const ROUTE_ORIGIN = { lat: 53.5511, lon: 9.9937 } as const;
+
+/** Route position from which a scripted hazard is reported. */
+export function announceAt(hazard: ScriptedHazard): number {
+  return hazard.announceAt ?? hazard.at - HAZARD_ANNOUNCE_M;
+}
+
+/** Route position at which a scripted hazard is withdrawn. */
+export function dropAt(hazard: ScriptedHazard): number {
+  return hazard.dropAt ?? hazard.at;
+}
 
 /** Road segment at a route position (the first one before the route, the last one after it). */
 export function roadAt(position: number): RoadSegment {

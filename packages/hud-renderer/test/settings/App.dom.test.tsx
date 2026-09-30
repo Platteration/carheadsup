@@ -108,6 +108,21 @@ describe('settings app', () => {
     );
   });
 
+  it('edits how far ahead highway traffic appears', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    const traffic = field(section(root, 'display'), 'Traffic on the highway');
+    expect(text(traffic)).toContain('never later than other hazards');
+    const input = traffic.querySelector('input')!;
+    expect(input.value).toBe('3000');
+    await type(input, '5000');
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => text(saveBar(root)) === 'Saved');
+    expect(patches(hud)).toEqual([{ display: { trafficRevealM: 5000 } }]);
+    expect(hud.config.display.trafficRevealM).toBe(5000);
+  });
+
   it('converts display units back to canonical ones when saving', async () => {
     const hud = new MockHud();
     hud.config.units = { ...hud.config.units, system: 'imperial', temperature: 'F' };
@@ -564,6 +579,58 @@ describe('settings app', () => {
     expect(phone().querySelector('.notice')).toBeNull();
     await click(button(saveBar(root)!, 'Save'));
     await waitFor(() => hud.config.phone.pairingToken === input.value);
+  });
+
+  it('shows the certificate the phone pins, to compare when pairing', async () => {
+    const root = start(new MockHud());
+    await ready(root);
+    const phone = section(root, 'phone');
+    await waitFor(() => text(phone).includes('FDC1 53EE DCA2 B536 4DD7'));
+    expect(text(phone)).toContain('Certificate fingerprint');
+    expect(text(phone)).toMatch(/TLS port\s*8443/);
+    const value = byText(phone, '.mono', 'FDC1 53EE DCA2 B536 4DD7');
+    expect(value?.getAttribute('title')).toBe(
+      'SHA-256 fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531',
+    );
+    expect(text(phone)).toContain('another device is posing as the HUD');
+  });
+
+  it('says so when the phone cannot connect because TLS is not running', async () => {
+    const hud = new MockHud();
+    hud.tls = null;
+    const root = start(hud);
+    await ready(root);
+    const phone = section(root, 'phone');
+    const notice = await waitFor(() => phone.querySelector('.notice--warning'));
+    expect(text(notice)).toContain('The phone cannot connect');
+    expect(text(notice)).toContain('TLS port under Server');
+    expect(text(phone)).not.toContain('Certificate fingerprint');
+  });
+
+  it('edits the phone port and warns about unencrypted phone connections', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    const server = () => section(root, 'server');
+    const tlsPort = field(server(), 'Phone port (TLS)').querySelector('input')!;
+    expect(tlsPort.value).toBe('8443');
+    const plain = field(server(), 'unencrypted phone connections').querySelector<HTMLInputElement>(
+      'input[type=checkbox]',
+    )!;
+    expect(plain.checked).toBe(false);
+    expect(server().querySelector('.notice--warning')).toBeNull();
+    await check(plain, true);
+    expect(text(server().querySelector('.notice--warning'))).toContain(
+      'anyone on the car’s Wi-Fi can read the phone’s session',
+    );
+    await type(tlsPort, '');
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => text(saveBar(root)) === 'Saved');
+    expect(patches(hud)).toEqual([{ server: { tlsPort: null, allowPlainPhone: true } }]);
+    expect(hud.config.server).toMatchObject({ tlsPort: null, allowPlainPhone: true });
+    // The same port for both is refused, like the HUD does.
+    await type(tlsPort, String(hud.config.server.port));
+    await waitFor(() => text(field(server(), 'Phone port (TLS)')).includes('must differ'));
   });
 
   it('keeps a live change reverted while its PATCH was in flight', async () => {

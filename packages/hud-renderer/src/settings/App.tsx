@@ -1,5 +1,5 @@
 import { DEFAULT_CONFIG } from '@carheadsup/core';
-import type { HudConfig } from '@carheadsup/core';
+import type { ApiTlsInfo, HudConfig } from '@carheadsup/core';
 import type { ComponentChildren } from 'preact';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { describeError } from '../common/api.ts';
@@ -150,7 +150,12 @@ export function SettingsApp({ api, editorOptions }: SettingsAppProps) {
           ) : (
             idsNeeding('data').map((id) => <Waiting key={id} id={id} connection={connection} />)
           )}
-          <ConfigSections editor={editor} root={root} connection={connection} />
+          <ConfigSections
+            editor={editor}
+            root={root}
+            connection={connection}
+            tls={info.data === null ? undefined : (info.data.tls ?? null)}
+          />
         </main>
         <SaveBar editor={editor} />
       </div>
@@ -162,10 +167,13 @@ function ConfigSections({
   editor,
   root,
   connection,
+  tls,
 }: {
   editor: ConfigEditor;
   root: Scope<HudConfig> | null;
   connection: Connection;
+  /** The phone link's TLS listener from `/api/info`; `undefined` until the HUD answered. */
+  tls: ApiTlsInfo | null | undefined;
 }) {
   const ids = idsNeeding('config');
   if (root === null) {
@@ -192,7 +200,7 @@ function ConfigSections({
       <AlertsSection root={root} />
       <UnitsSection root={root} />
       <VehicleSection root={root} />
-      <PhoneSection root={root} />
+      <PhoneSection root={root} tls={tls} />
       <ObdSection root={root} />
       <SensorsSection root={root} />
       <ServerSection root={root} />

@@ -26,7 +26,23 @@ export function ServerSection({ root }: { root: Scope<HudConfig> }) {
             monospace
             hint="0.0.0.0 lets the phone connect over Wi-Fi; 127.0.0.1 keeps the HUD private."
           />
-          <NumberField scope={server} k="port" label="Port" unit={PLAIN} integer />
+          <NumberField
+            scope={server}
+            k="port"
+            label="Port"
+            unit={PLAIN}
+            integer
+            hint="This app, the display and the developer console (http)."
+          />
+          <NumberField
+            scope={server}
+            k="tlsPort"
+            label="Phone port (TLS)"
+            unit={PLAIN}
+            integer
+            nullable
+            hint="The companion app connects here, encrypted. Empty: the phone cannot connect."
+          />
           <NumberField
             scope={server}
             k="frameRate"
@@ -35,12 +51,25 @@ export function ServerSection({ root }: { root: Scope<HudConfig> }) {
             integer
           />
         </FieldGrid>
+        <p class="field__hint">Port changes take effect after a restart of the HUD.</p>
         <ToggleField
           scope={server}
           k="mdns"
           label="Announce on the network (mDNS)"
           hint="Lets the companion app find the HUD without typing its address."
         />
+        <ToggleField
+          scope={server}
+          k="allowPlainPhone"
+          label="Also accept unencrypted phone connections"
+          hint="For development and custom clients only. The companion app always uses TLS."
+        />
+        {server.value.allowPlainPhone && (
+          <Notice tone="warning">
+            On the plain port, anyone on the car’s Wi-Fi can read the phone’s session — location,
+            calls, who messages you — and alter it. Leave this off unless you need it.
+          </Notice>
+        )}
         <TextField
           scope={server}
           k="apiToken"

@@ -7,6 +7,9 @@ everything the car itself cannot know:
   Maps arrow icon as a fallback), parsed from Maps' ongoing guidance notification.
 - **Speed limit, road name/class and speed cameras** from OpenStreetMap (Overpass API), matched
   to the phone's GPS position and heading.
+- **Traffic ahead** (optional, with your own free TomTom API key): jams and slowdowns with the
+  expected delay, accidents, closures, road works, weather and broken-down vehicles up to about
+  10 km ahead in the direction of travel ([details](#traffic-tomtom)).
 - **Media**: song, artist, album and play state of whatever is playing.
 - **Calls**: incoming/active/ended with caller name; accept or decline from the HUD's buttons.
 - **Messages**: the *sender* only. The message text never leaves the phone; the phone reads it
@@ -19,14 +22,16 @@ everything the car itself cannot know:
 ## Architecture
 
 ```
-┌────────────────────────── phone ──────────────────────────┐        ┌──────── HUD ────────┐
+┌────────────────────────── phone ───────────────────────────┐        ┌──────── HUD ────────┐
 │ NavNotificationListener ──┐                                │        │                     │
-│  (Maps nav, messages,     │                                │  ws:// │ /ws/phone           │
+│  (Maps nav, messages,     │                                │ wss:// │ /ws/phone           │
 │   caller name)            ├─► PhoneHub ─► HudLink ─────────┼────────┼─► phone link        │
 │ MediaMonitor ─────────────┤   (latest    (handshake,       │  JSON  │   (validated,       │
 │ CallMonitor ──────────────┤    state)     replay, rates,   │ frames │    rate-checked)    │
-│ LocationFeed ─► RoadInfo ─┘               heartbeat,       │◄───────┼── welcome, call-    │
-│                 Provider (Overpass)       backoff)         │        │   action, trips …   │
+│ LocationFeed ─► RoadInfo ─┤               heartbeat,       │◄───────┼── welcome, call-    │
+│    │  Provider (Overpass) │               backoff)         │        │   action, trips …   │
+│    └─► TrafficProvider ───┘ cameras and traffic go out     │        │                     │
+│        (TomTom)             as one list (HazardAggregator) │        │                     │
 │ MainActivity (Compose) ── HudApi (REST /api/*) ────────────┼────────┼─► REST API          │
 │ HudSettingsActivity ── WebView ────────────────────────────┼────────┼─► /settings         │
 └────────────────────────────────────────────────────────────┘        └─────────────────────┘
@@ -36,7 +41,7 @@ The Gradle build has two modules:
 
 | Module | What | Builds where |
 | --- | --- | --- |
-| `:protocol` | Pure Kotlin/JVM: the wire protocol (mirrors `packages/core/src/types/protocol.ts`), its JSON configuration and size limits, the mutual authentication (`auth`: proofs, HUD pinning, the handshake state machine), the Google Maps notification parser, OSM speed-limit parsing, Overpass queries and road matching, message-notification extraction, trip/maintenance models and formatting, reconnect backoff, rate limiting, heartbeat and replay state. Everything testable lives here. | Any JDK 17+ machine |
+| `:protocol` | Pure Kotlin/JVM: the wire protocol (mirrors `packages/core/src/types/protocol.ts`), its JSON configuration and size limits, the mutual authentication (`auth`: proofs bound to the certificate, certificate fingerprints, HUD pinning, the handshake state machine), the trust in the HUD's TLS certificate (`tls`: the pinning decisions and the `X509TrustManager` / host name check that enforce them, tested with real TLS handshakes), the mDNS advertisement (`link.HudAdvertisement`), the Google Maps notification parser, OSM speed-limit parsing, Overpass queries and road matching, traffic incidents (`traffic`: the TomTom request and response, the corridor ahead, the selection of incidents ahead, the mapping onto HUD hazards, the request policy and daily budget) and the merging of hazard sources (`hazards`), message-notification extraction, trip/maintenance models and formatting, reconnect backoff, rate limiting, heartbeat and replay state. Everything testable lives here. | Any JDK 17+ machine |
 | `:app` | The Android application (Kotlin, Jetpack Compose + Material 3, OkHttp, no Google Play services). Adapts Android APIs to `:protocol`. | Only with an Android SDK |
 
 `settings.gradle.kts` includes `:app` only when an Android SDK is found (`sdk.dir` in
@@ -49,17 +54,19 @@ put on the build classpath in that case, so `./gradlew :protocol:test` works on 
 | Component | Role |
 | --- | --- |
 | `HudConnectionService` | Foreground service (types `connectedDevice` + `location`) that owns the link, GPS, media, call and road monitoring while driving. Sticky; "Stop" in its notification. |
-| `HudLink` | WebSocket client for `ws://<hud>:8080/ws/phone`. Finds the HUD by mDNS (`_carheadsup._tcp`, `HudDiscovery`; once paired, only the paired HUD's advertisement) or uses the manual `host:port`; answers the HUD's `challenge` through `HudHandshake` (see [Privacy](#privacy)) and reports *Connected* only once the `welcome` proof checks out, pinning the first verified HUD; after that replays the latest nav/road/hazards/media/call state and forwards new messages rate-limited per type (nav ≤ 4 Hz, location 1 Hz, media/road/hazards ≤ 2 Hz); pings every 5 s and reconnects when the HUD is silent for 15 s; exponential backoff (1 s → 30 s, jittered); a refused or untrusted pairing (`bad-token`, a different or unconfirmed HUD, a wrong HUD proof) or a session the same phone replaced (close 4000) waits the maximum; while another phone holds the HUD it is refused with close 1013 and backs off as usual. Restarts mDNS discovery when it finds nothing for 30 s or on *Retry now*. |
+| `HudLink` | WebSocket client for `wss://<hud>:8443/ws/phone`. Finds the HUD by mDNS (`_carheadsup._tcp`, `HudDiscovery`: the TLS port and certificate fingerprint from the TXT records `tls` and `fp`; once paired, only the paired HUD's advertisement) or uses the manual `host:port` (the TLS port, 8443 by default; an address saved by an earlier app on the old default port 8080 is moved to 8443 once); connects through a `HudTrustManager` of its own per attempt — exactly the pinned certificate, or on a first pairing the presented (or advertised) one — and records the certificate the handshake binds; answers the HUD's `challenge` through `HudHandshake` (see [Privacy](#privacy)) and reports *Connected* only once the `welcome` proof checks out, pinning the first verified HUD with its certificate; after that replays the latest nav/road/hazards/media/call state and forwards new messages rate-limited per type (nav ≤ 4 Hz, location 1 Hz, media/road/hazards ≤ 2 Hz); pings every 5 s and reconnects when the HUD is silent for 15 s; exponential backoff (1 s → 30 s, jittered); a refused or untrusted pairing (`bad-token`, a different or unconfirmed HUD, a wrong HUD proof) or a session the same phone replaced (close 4000) waits the maximum; another certificate for the paired HUD ("HUD certificate changed — re-pair") stops it until the HUD is forgotten or *Retry now*; while another phone holds the HUD it is refused with close 1013 and backs off as usual. Restarts mDNS discovery when it finds nothing for 30 s or on *Retry now*. |
 | `LocalNetwork` | Binds HUD sockets to the Wi-Fi network. The HUD usually runs an access point without internet, which Android does not use as the default network; unbound sockets would go out over mobile data and never reach it. |
 | `NavNotificationListener` | Notification access: parses Google Maps' guidance (`GoogleMapsNotificationParser`), encodes the maneuver icon as a ≤ 32 KiB PNG, ends guidance 10 s after the notification disappears (at once when the listener is unbound); extracts message senders (`MessagingNotificationExtractor`) and caller names from call notifications that describe the tracked call. |
 | `MessageRelay` / `MessageReader` | Sends `message` (sender, app, `readingAloud`) while connected; reads the text aloud with TextToSpeech under transient, ducking audio focus (`SpeechQueue`). Pauses for navigation prompts and resumes afterwards; never talks over a call — messages wait for it to end (up to 3 min). `readingAloud` is only set for messages that will be read. |
 | `MediaMonitor` | `MediaSessionManager.getActiveSessions` (allowed for the notification listener) → `media`. |
 | `CallMonitor` | `TelephonyCallback` (Android 12+) / `PhoneStateListener` + the `PHONE_STATE` broadcast for the number, contact lookup, `TelecomManager.acceptRingingCall()` / `endCall()` for the HUD's `call-action`. Android does not say whether a waiting call was answered or declined, so the call that goes on is shown without a caller (unless the HUD did it), until the dialer's ongoing-call notification names it. |
 | `LocationFeed` | Platform `LocationManager` GPS at 1 Hz → `location`. |
-| `RoadInfoProvider` | Overpass tiles (≈2 km) around the car, one polite request at a time, cached in memory and on disk (fresh for 7 days, used up to 90 days offline) → `road` and `hazards`. Unknown rather than stale when there is no data or no usable GPS fix for 5 s; while stopped, cameras are looked for in the last direction of travel. |
-| `TripStore` / `HudApi` | Trip log merged from `trip-completed`, `trips` and `GET /api/trips`; maintenance from `GET /api/maintenance`; units from `GET /api/config`; `POST /api/input` for the remote when the socket is down. REST calls (they carry the API token) only go to the address where the HUD last proved itself (`HudLink.trustedEndpoint`). |
-| `MainActivity` | Compose UI: **Status** (connection, "a different HUD is answering" with *Forget paired HUD*, the confirmation of a HUD without pairing code, permission checklist, battery optimisation), **Remote** (primary / secondary / pages / blank / brightness), **Trips** (log + maintenance), **Setup** (address, pairing code and the paired HUD, API token, feature switches, HUD settings). |
-| `HudSettingsActivity` | The HUD's `/settings` page in a WebView (the process is bound to the HUD's Wi-Fi while it is open), only for a HUD that has proven itself. The API token is handed to the page as `?token=` (`HudEndpoint.withApiToken`): the page keeps it in its storage, removes it from the address and sends it with its own API calls, which a WebView cannot add a header to. A WebView drops the page's `blob:` downloads, so files the page generates (the trips CSV) go through `FileExportBridge` (`window.CarheadsupAndroid.saveFile`): into *Downloads* on Android 10+ (MediaStore, no permission), through the share sheet (a `FileProvider` cache file) on Android 8–9; name and type are sanitised (`ExportFile`). |
+| `RoadInfoProvider` | Overpass tiles (≈2 km) around the car, one polite request at a time, cached in memory and on disk (fresh for 7 days, used up to 90 days offline) → `road`, and cameras ahead → `HazardAggregator`. Unknown rather than stale when there is no data or no usable GPS fix for 5 s; while stopped, cameras are looked for in the last direction of travel. |
+| `TrafficProvider` | Optional: TomTom incidents in a corridor about 10 km ahead (over the internet, never the HUD's Wi-Fi), polled per `TrafficPolicy` within a daily budget (`TrafficBudgetStore`); on each fix the incidents ahead → `HazardAggregator`. Status (last update, incidents ahead, errors, requests today) on the Setup screen. See [Traffic](#traffic-tomtom). |
+| `HazardAggregator` | (`:protocol`) Merges cameras and traffic into the one `hazards` list the HUD takes (it replaces its whole list with each message): ids unique, nearest first, at most 50; sent at once when anything but the distances changes, otherwise every 5 s. Each provider reports through its own feed (`HazardFeed`), which it closes when it stops, so a fix still being processed then cannot bring its hazards back. |
+| `TripStore` / `HudApi` | Trip log merged from `trip-completed`, `trips` and `GET /api/trips`; maintenance from `GET /api/maintenance`; units from `GET /api/config`; `POST /api/input` for the remote when the socket is down. REST calls (they carry the API token) only go over HTTPS to the HUD that last proved itself (`HudLink.trusted`), through a client that accepts exactly the certificate it proved itself with. |
+| `MainActivity` | Compose UI: **Status** (connection and the HUD's certificate fingerprint, "a different HUD is answering" and "HUD certificate changed — re-pair" with *Forget paired HUD*, the confirmation of a HUD without pairing code with its certificate, permission checklist, battery optimisation), **Remote** (primary / secondary / pages / blank / brightness), **Trips** (log + maintenance), **Setup** (address, pairing code and the paired HUD with its certificate, API token, feature switches, traffic with the TomTom key and its status, HUD settings). |
+| `HudSettingsActivity` | The HUD's `/settings` page over HTTPS in a WebView (the process is bound to the HUD's Wi-Fi while it is open), only for a HUD that has proven itself. The WebView does not know the HUD's self-signed certificate: `onReceivedSslError` proceeds only when the certificate is the pinned one on the HUD's address, and otherwise cancels and says why. The API token is handed to the page as `?token=` (`HudEndpoint.withApiToken`): the page keeps it in its storage, removes it from the address and sends it with its own API calls, which a WebView cannot add a header to. A WebView drops the page's `blob:` downloads, so files the page generates (the trips CSV) go through `FileExportBridge` (`window.CarheadsupAndroid.saveFile`): into *Downloads* on Android 10+ (MediaStore, no permission), through the share sheet (a `FileProvider` cache file) on Android 8–9; name and type are sanitised (`ExportFile`). |
 
 ### Protocol conformance
 
@@ -85,17 +92,17 @@ authentication constants drift; `PhoneAuthTest` asserts the shared authenticatio
 | `READ_CALL_LOG` | The incoming caller's number (Android only delivers it with this permission). |
 | `ANSWER_PHONE_CALLS` | Accept / decline from the HUD (`TelecomManager`). Declining needs Android 9+. |
 | `READ_CONTACTS` | Caller name for the number. |
-| `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` | GPS for the HUD, speed-limit matching and cameras ahead. Only while the foreground service runs (no background location). |
+| `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` | GPS for the HUD, speed-limit matching, cameras and traffic ahead. Only while the foreground service runs (no background location). |
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `FOREGROUND_SERVICE_LOCATION` | The foreground service that keeps the link and GPS alive with the screen off. |
 | `POST_NOTIFICATIONS` (Android 13+) | The service notification, "trip logged" and maintenance reminders. |
 | `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Lets the user exempt the app from Doze so the link survives a locked phone. |
-| `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | The HUD link (plain HTTP/WebSocket on the car's LAN), Overpass (HTTPS), binding to the HUD's Wi-Fi. |
+| `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | The HUD link (`wss://` and `https://` on the car's LAN, pinned to the HUD's certificate), Overpass and TomTom (HTTPS), binding to the HUD's Wi-Fi. |
 | `CHANGE_WIFI_MULTICAST_STATE`, `CHANGE_NETWORK_STATE` | mDNS discovery; also the prerequisites Android 14 requires for the `connectedDevice` service type. |
 
 `<queries>` declares the TTS service and launcher apps, so the app can use TextToSpeech and show
-app names ("WhatsApp", "Spotify"). Cleartext traffic is allowed because the HUD's LAN address is
-only known at runtime; everything on the internet uses HTTPS. Backups are disabled (the tokens are
-stored in app-private preferences).
+app names ("WhatsApp", "Spotify"). Cleartext traffic is not allowed (`network_security_config.xml`):
+the HUD is reached over TLS with its pinned certificate, everything on the internet over HTTPS.
+Backups are disabled (the tokens and the TomTom key are stored in app-private preferences).
 
 On Android 13+ a sideloaded app must be allowed "restricted settings" before notification access
 can be granted: *App info → ⋮ → Allow restricted settings*. The Status screen links there.
@@ -147,7 +154,8 @@ Limits:
   projected session and the phone-side notification is typically absent or reduced, so the HUD may
   get little or no guidance. Third-party apps cannot read Android Auto's navigation state. Use
   Maps on the phone (with the HUD) rather than Android Auto projection.
-- Hazards and traffic from Google Maps are not exposed; hazards come from OpenStreetMap.
+- Hazards and traffic from Google Maps are not exposed; cameras come from OpenStreetMap and
+  traffic, if you want it, from TomTom ([below](#traffic-tomtom)).
 
 ## Speed limits and cameras (OpenStreetMap)
 
@@ -163,6 +171,70 @@ Data quality is only as good as the local map. Overpass is a free community serv
 sends at most one request at a time and a few per minute, backs off on errors and `Retry-After`,
 and caches tiles for a week. **Speed-camera warnings are illegal while driving in some countries**
 (e.g. Germany, Switzerland), so they are off until the driver turns them on in *Setup*.
+
+## Traffic (TomTom)
+
+Traffic is the one thing neither Google Maps' notification nor OpenStreetMap provides, so the
+app can ask [TomTom's Traffic API](https://developer.tomtom.com/traffic-api/documentation/tomtom-maps/traffic-incidents/incident-details)
+for it. It is **off by default** and needs your own key.
+
+**Setup.** Create a free account at [developer.tomtom.com](https://developer.tomtom.com/), copy
+the API key it makes for you (the Traffic API is included), and in *Setup → Traffic ahead* paste
+it, tap *Save* and turn on *Traffic from TomTom*. The status line below tells you what it does:
+the time of the last update and how many incidents lie ahead, or why not (no GPS or no direction
+of travel yet, paused while standing, TomTom unreachable, the key refused, today's budget used
+up), and the requests made today.
+
+**What the HUD shows.** Incidents ahead of the car, on its side of the road, nearest first:
+
+| TomTom incident | On the HUD |
+| --- | --- |
+| Jam: queuing or stationary traffic | *Traffic jam* with the delay, e.g. "+8 min" |
+| Jam: slow traffic | *Slowdown* with the delay |
+| Accident · Road works | *Accident* · *Road works*, with the delay if there is one |
+| Fog, rain, ice, wind, flooding | *Weather* |
+| Broken-down vehicle | *Object on road* |
+| Road or lane closed, dangerous conditions | *Hazard* while moving; "Road closed", "Lane closed" … when stopped |
+
+On the highway the HUD shows traffic from 3 km (`display.trafficRevealM`), other hazards from
+1 km, and the distance counts down with the car's own odometer.
+
+**How it asks** (`dev.carheadsup.protocol.traffic`, all unit-tested):
+
+- *Where*: one `GET /traffic/services/5/incidentDetails` for a corridor reaching 10 km ahead along
+  the direction of travel and 3 km to either side (`TrafficCorridor`, about 60 km²) — not a big
+  square around the car — with a `fields=` projection of only what is used, `language=en-GB` and
+  `timeValidityFilter=present`.
+- *Which incidents are ahead* (`TrafficIncidentFinder`): the point where traffic reaches the
+  incident (the first point of its geometry, the tail of a jam) lies in the same ±35° cone around
+  the heading as speed cameras and within the corridor, and the incident runs the car's way
+  (within 75°), so a jam on the opposite carriageway or a crossing road does not count. Straight
+  distance to that point, so a warning comes early rather than late. While the car is too slow for
+  a GPS bearing (a queue, a red light), the last direction of travel is used, as for cameras.
+- *When* (`TrafficPolicy`): every 2 minutes while driving, and at once after 3 km or a turn of 60°,
+  but at most once a minute; at red lights and in queues it keeps asking (delays change), after
+  5 minutes standing still it stops until the car moves; failures back off from 30 s to 15 min
+  (and honour `Retry-After`); a refused key (HTTP 401/403) stops all requests until you save
+  another key (or switch traffic off and on, or restart the app). Incidents older than 10 minutes are not shown, and without a usable GPS fix for 5 s
+  they are withdrawn.
+- *How much*: TomTom's free plan allows 2,500 requests a day; the app counts its requests per UTC
+  day (kept across restarts) and stops at 2,000, leaving room for other uses of the key. Two
+  hours of driving take about 60–90 requests.
+
+**Privacy.** While traffic is on and you drive, the phone sends TomTom a box around and ahead of
+the car (about 10 × 6 km, every couple of minutes) with your API key, over HTTPS — enough for
+TomTom to follow where you drive. Turn it off and nothing goes to TomTom. The key is stored like
+the pairing code (app-private, excluded from backups) and never logged.
+
+**Limits.** The phone does not know your route: it reports what lies ahead in the direction of
+travel — including a jam on the motorway you are about to leave — and can miss incidents round
+a sharp bend or a turn until the next request. Updates every couple of minutes are not live
+traffic. It needs mobile data.
+
+**Another provider.** TomTom sits behind `TrafficIncidentService` (build the request for an area,
+parse the answer into `TrafficIncident`s, classify HTTP statuses); the corridor, the selection,
+the mapping onto HUD hazards, the policy and the budget are shared. A HERE implementation, say,
+would add its request and parser and a switch to choose it.
 
 ## Building
 
@@ -203,14 +275,18 @@ together.
 
 1. Put the HUD in phone mode (`server.host = 0.0.0.0`, `server.mdns = true`) and join the phone to
    the car's Wi-Fi.
-2. *Setup*: leave "Find the HUD automatically" on (or enter `host:port`), enter the HUD's pairing
+2. *Setup*: leave "Find the HUD automatically" on (or enter the HUD's address with its TLS port,
+   e.g. `10.42.0.1:8443`), enter the HUD's pairing
    code (`phone.pairingToken`; generate one in the HUD's settings under *Phone* if it has none)
    and the API token if the REST API is protected (`server.apiToken`).
 3. *Status*: grant the permissions, exempt the app from battery optimisation, tap *Connect to HUD*.
-   The first HUD that proves the pairing code is remembered as yours ("Paired with HUD …" in
-   *Setup*). A HUD without pairing code cannot prove anything: the app shows it as unverified
-   and connects only after you tap *This is my HUD — connect*.
+   The first HUD that proves the pairing code is remembered as yours, with its certificate
+   ("Paired with HUD … · certificate …" in *Setup*); compare that fingerprint with the HUD's
+   settings (*Phone → Encrypted link*). A HUD without pairing code cannot prove anything: the app
+   shows it as unverified, with its certificate, and connects only after you tap *This is my
+   HUD — connect*.
 4. Start navigation in Google Maps on the phone.
+5. Optionally, for traffic ahead, enter a TomTom API key in *Setup* ([Traffic](#traffic-tomtom)).
 
 The app reconnects on its own when the car's Wi-Fi comes and goes; the service survives the
 screen being off. Some manufacturers (Xiaomi, Huawei, Samsung "sleeping apps") kill background
@@ -221,26 +297,38 @@ services aggressively — allow auto-start / exclude the app there as well.
 - Message content is only read aloud on the phone; the `message` frame has no content field (the
   HUD rejects frames that try) and message ids are keyed hashes (HMAC with a random key that
   never leaves the phone), so they cannot be matched against guessed texts.
-- **Phone and HUD verify each other** (protocol v2, [details](../docs/protocol.md#authentication)).
+- **Encrypted, and pinned to the HUD's certificate** ([details](../docs/protocol.md#tls-and-the-huds-certificate)).
+  Everything goes to the HUD over TLS — the WebSocket (`wss://`), REST calls and the settings
+  page (`https://`); the app does not allow cleartext at all (`network_security_config.xml`). The
+  HUD has a self-signed certificate, which the app pins at the first pairing: from then on it
+  accepts exactly that certificate, and a different one — someone posing as the HUD, or a HUD
+  that was reset — is a hard stop, "HUD certificate changed — re-pair", until you *Forget paired
+  HUD*. Certificate authorities and host names play no part (the HUD is reached by IP address).
+- **Phone and HUD verify each other** (protocol v3, [details](../docs/protocol.md#authentication)).
   The pairing code never leaves the phone: the HUD sends a `challenge`, the phone answers with an
-  HMAC proof over it, and the HUD proves the code in return. The app pins the id of the first HUD
-  that proves it (per pairing code) and from then on:
+  HMAC proof over it, and the HUD proves the code in return — both proofs bound to the
+  certificate the phone was shown, so a relay with a certificate of its own cannot get through.
+  The app pins the id and certificate of the first HUD that proves the code (per pairing code;
+  when the mDNS advertisement names a certificate, it must be that one) and from then on:
   - sends nothing — no position, navigation, media, calls, messages, no REST call with the API
-    token, not even its proof — to a HUD with another id ("A different HUD is answering"; if you
-    replaced or reset your HUD, *Forget paired HUD* and it pairs again);
+    token, not even its proof — to a HUD with another id or certificate ("A different HUD is
+    answering" / "HUD certificate changed"; if you replaced or reset your HUD, *Forget paired
+    HUD* and it pairs again);
   - sends nothing and ignores everything (call actions included) from its own HUD until the HUD's
     proof checks out;
   - with automatic discovery, only uses the paired HUD's mDNS advertisement (or one without an id).
+- **The first pairing trusts the certificate it sees.** Someone who controls the car's Wi-Fi at
+  that moment cannot get in without the pairing code, but receives the phone's proof and could
+  test guesses of a weak code offline: use a long random one (the HUD's *Generate*), and compare
+  the certificate the app shows with the HUD's settings. After that, and for anyone who only
+  listens, there is nothing to read or guess from.
 - **A HUD without pairing code is not verified.** Anyone can make the proofs then. The app shows
-  such a HUD as unverified, connects only after you confirm it, and pins it — but a HUD that
-  copies its id is not detected. Set a pairing code on the HUD.
-- **Not encrypted.** The session is plain WebSocket: someone on the Wi-Fi can read it, and a
-  man-in-the-middle who relays it can alter it after the handshake. Someone who records the
-  handshake can try to guess the pairing code offline, so use a long random one (the HUD's
-  *Generate*). Use the car's own password-protected Wi-Fi and stop the service (notification →
-  *Stop*) when not driving.
+  such a HUD as unverified with its certificate's fingerprint, connects only after you confirm
+  it, and pins both. Set a pairing code on the HUD. Use the car's own password-protected Wi-Fi
+  and stop the service (notification → *Stop*) when not driving.
 - Each install has a random device id (`hello.deviceId`) that tells phones apart on the HUD, so
   two phones of the same model and name are two phones.
 - Nothing is sent anywhere but the HUD, except Overpass requests with the area around the car
-  (tile bounding boxes, not the exact position).
-- Tokens live in app-private storage; backups are disabled.
+  (tile bounding boxes, not the exact position) and, only if you turn traffic on, TomTom
+  requests with a box around and ahead of the car and your API key ([Traffic](#traffic-tomtom)).
+- Tokens and the TomTom key live in app-private storage; backups are disabled.

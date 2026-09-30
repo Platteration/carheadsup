@@ -147,6 +147,29 @@ describe('parseCli', () => {
   it('accepts port 0 (any free port)', () => {
     expect(run(['--port', '0']).port).toBe(0);
   });
+
+  it('overrides the TLS port of the phone link, or switches it off', () => {
+    expect(run([]).tlsPort).toBeUndefined();
+    expect(run(['--tls-port', '9443']).tlsPort).toBe(9443);
+    expect(run(['--tls-port=0']).tlsPort).toBe(0);
+    for (const word of ['off', 'OFF', 'none', 'false', 'no']) {
+      expect(run(['--tls-port', word]).tlsPort).toBeNull();
+    }
+    expect(run([], { CARHEADSUP_TLS_PORT: '8444' }).tlsPort).toBe(8444);
+    expect(run([], { CARHEADSUP_TLS_PORT: 'off' }).tlsPort).toBeNull();
+    expect(run([], { CARHEADSUP_TLS_PORT: '' }).tlsPort).toBeUndefined();
+    expect(run(['--tls-port', '9443'], { CARHEADSUP_TLS_PORT: 'off' }).tlsPort).toBe(9443);
+    expect(parseCli(['--tls-port', 'https'], {}, HOME)).toEqual({
+      kind: 'error',
+      message: '--tls-port: expected a port number 0–65535, got "https" or "off"',
+    });
+    expect(parseCli([], { CARHEADSUP_TLS_PORT: '70000' }, HOME)).toMatchObject({
+      kind: 'error',
+      message: expect.stringContaining('CARHEADSUP_TLS_PORT') as unknown,
+    });
+    expect(USAGE).toContain('--tls-port');
+    expect(USAGE).toContain('CARHEADSUP_TLS_PORT');
+  });
 });
 
 describe('serverUrls', () => {
@@ -161,6 +184,13 @@ describe('serverUrls', () => {
   it('uses a specific host as given, bracketing IPv6', () => {
     expect(serverUrls('127.0.0.1', 9000, ['10.0.0.2'])).toEqual(['http://127.0.0.1:9000']);
     expect(serverUrls('fd00::10', 9000, [])).toEqual(['http://[fd00::10]:9000']);
+  });
+
+  it('takes another scheme (the phone link over TLS)', () => {
+    expect(serverUrls('0.0.0.0', 8443, ['10.42.0.1'], 'wss')).toEqual([
+      'wss://localhost:8443',
+      'wss://10.42.0.1:8443',
+    ]);
   });
 });
 

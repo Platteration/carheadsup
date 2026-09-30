@@ -15,7 +15,8 @@ import dev.carheadsup.protocol.api.MaintenanceItemStatus
 import dev.carheadsup.protocol.api.TripFormatter
 import dev.carheadsup.protocol.api.TripRecord
 import dev.carheadsup.protocol.auth.HudPin
-import dev.carheadsup.protocol.link.HudEndpoint
+import dev.carheadsup.protocol.link.HudAdvertisement
+import dev.carheadsup.protocol.traffic.TrafficStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +24,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/** The HUD's settings page for the WebView: its address and the certificate it must present. */
+data class HudPage(val url: String, val certFingerprint: String)
 
 /** Loading state of data fetched from the HUD's REST API. */
 sealed interface Remote<out T> {
@@ -44,7 +48,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val serviceRunning: StateFlow<Boolean> = HudConnectionService.isRunning
     val trips: StateFlow<List<TripRecord>> = graph.trips.trips
     val units: StateFlow<DisplayUnits> = graph.units
-    val discovered: StateFlow<HudEndpoint?> = graph.discovery.endpoint
+    val discovered: StateFlow<HudAdvertisement?> = graph.discovery.advertisement
+    val trafficStatus: StateFlow<TrafficStatus> = graph.trafficStatus
 
     /** Trip and maintenance formatting in the current units. */
     val formatter: StateFlow<TripFormatter> =
@@ -85,17 +90,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun reconnect() = graph.link.reconnectNow()
 
     /**
-     * The user confirms that the HUD without pairing token that answered ([hudId]) is theirs:
-     * pin it and connect. Ignored once a pairing token is set (the HUD must then prove itself).
+     * The user confirms that the HUD without pairing token that answered ([hudId], presenting the
+     * certificate [certFingerprint]) is theirs: pin both and connect. Ignored once a pairing token
+     * is set (the HUD must then prove itself).
      */
-    fun confirmOpenHud(hudId: String) {
-        graph.settingsStore.update { if (it.pairingToken.isEmpty()) it.copy(hudPin = HudPin.of(hudId, "")) else it }
+    fun confirmOpenHud(hudId: String, certFingerprint: String) {
+        graph.settingsStore.update {
+            if (it.pairingToken.isEmpty()) it.copy(hudPin = HudPin.of(hudId, "", certFingerprint)) else it
+        }
         graph.link.reconnectNow()
     }
 
     /**
-     * Forget the paired HUD (e.g. it was replaced or reset): the next HUD that proves the pairing
-     * token — or, without one, that the user confirms — becomes the paired one.
+     * Forget the paired HUD and its certificate (e.g. it was replaced or reset, or its certificate
+     * changed): the next HUD that proves the pairing token — or, without one, that the user
+     * confirms — becomes the paired one.
      */
     fun forgetPairedHud() {
         graph.settingsStore.update { it.copy(hudPin = null) }
@@ -151,11 +160,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * The HUD's settings page, or null until a HUD has proven itself (it receives the API token).
-     * The trusted address only changes along with the link status.
+     * The HUD's settings page and the certificate it must present, or null until a HUD has proven
+     * itself (it receives the API token). The trusted HUD only changes along with the link status.
      */
-    val settingsUrl: StateFlow<String?> =
+    val hudSettings: StateFlow<HudPage?> =
         linkStatus
-            .map { graph.currentEndpoint()?.settingsUrl }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, graph.currentEndpoint()?.settingsUrl)
+            .map { currentHudPage() }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, currentHudPage())
+
+    private fun currentHudPage(): HudPage? =
+        graph.currentHud()?.let { HudPage(it.endpoint.settingsUrl, it.certFingerprint) }
 }

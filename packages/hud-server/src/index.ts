@@ -26,6 +26,16 @@ export { writeFileAtomic } from './store/atomic.ts';
 export { isAuthorized, isCrossSiteRequest, isLoopbackAddress, secretsEqual } from './http/auth.ts';
 export { CONTENT_SECURITY_POLICY } from './http/security.ts';
 export { PHONE_CLOSE } from './ws/phone-channel.ts';
+export type { PhoneTransport } from './ws/phone-channel.ts';
+export {
+  NO_EXPIRY,
+  buildSelfSignedCertificate,
+  certificateFingerprint,
+  createHudCertificate,
+} from './tls/certificate.ts';
+export type { CertificateBundle, CertificateOptions } from './tls/certificate.ts';
+export { TLS_FILE, loadTlsIdentity } from './tls/identity.ts';
+export type { MdnsAdvert } from './discovery/mdns.ts';
 export { HUD_SOCKET_PATH, PHONE_SOCKET_PATH } from './ws/upgrade.ts';
 export { createLogger, isLogLevel, LOG_LEVELS } from './logger.ts';
 export type { LogLevel, LoggerOptions } from './logger.ts';

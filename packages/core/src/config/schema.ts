@@ -388,6 +388,7 @@ const displaySchema = z.object({
   highwayNavRevealM: num(0, 50_000),
   laneRevealM: num(0, 10_000),
   hazardRevealM: num(0, 50_000),
+  trafficRevealM: num(0, 50_000),
   maxAlerts: int(1, 5),
 });
 
@@ -681,13 +682,24 @@ const sensorsSchema = z.object({
   adasAllowedSenders: adasAllowedSendersSchema,
 });
 
-const serverSchema = z.object({
-  port: int(1, 65_535),
-  host: hostSchema,
-  apiToken: apiTokenSchema,
-  mdns: bool,
-  frameRate: int(1, 60),
-});
+const serverSchema = withRules(
+  z.object({
+    port: int(1, 65_535),
+    tlsPort: int(1, 65_535).nullable(),
+    allowPlainPhone: bool,
+    host: hostSchema,
+    apiToken: apiTokenSchema,
+    mdns: bool,
+    frameRate: int(1, 60),
+  }),
+  [
+    {
+      fields: ['tlsPort', 'port'],
+      message: (v) => `the TLS port must differ from the HTTP port (${v.port})`,
+      holds: (v) => v.tlsPort !== v.port,
+    },
+  ],
+);
 
 /** Strict schema for a complete `HudConfig`, including cross-field rules. */
 export const hudConfigSchema = z.object({

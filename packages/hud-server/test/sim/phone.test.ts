@@ -5,7 +5,11 @@ import {
   ARRIVED_END_MS,
   CALL_AUTO_ANSWER_MS,
   CALL_DURATION_MS,
+  HAZARD_REFRESH_MS,
   MANUAL_CAMERA_AHEAD_M,
+  MANUAL_JAM_AHEAD_M,
+  MANUAL_JAM_DELAY_S,
+  MANUAL_JAM_TTL_MS,
   NAV_UPDATE_MS,
   ROAD_REFRESH_MS,
   SCENARIO_CALLER,
@@ -14,7 +18,7 @@ import {
   SimPhone,
   TRACK_CHANGE_MS,
 } from '../../src/sim/phone.ts';
-import { ROUTE_MANEUVERS } from '../../src/sim/route.ts';
+import { EXIT_14_AT, ROUTE_MANEUVERS, SCRIPTED_HAZARDS } from '../../src/sim/route.ts';
 import type { PhoneMessageTranslator } from '../../src/sources/types.ts';
 import { FakeClock, recordingContext } from '../sensors/fakes.ts';
 
@@ -212,21 +216,59 @@ describe('SimPhone over one demo loop', () => {
   });
 
   it('reports the speed camera on the highway and clears it once passed', () => {
-    const hazards = h.of('hazards');
-    const announced = hazards.find((s) => s.message.items.length > 0);
+    const withCamera = h
+      .of('hazards')
+      .filter((s) => s.message.items.some((item) => item.id === 'sim-camera-a7'));
+    const camera = (s: (typeof withCamera)[number]) =>
+      s.message.items.find((item) => item.id === 'sim-camera-a7')!;
+    const announced = withCamera[0];
     expect(announced?.step).toBe('highway');
-    expect(announced!.message.items[0]).toMatchObject({ type: 'speed-camera', speedLimitKph: 100 });
-    expect(announced!.message.items[0]!.distanceM).toBeLessThanOrEqual(1500);
-    const cleared = hazards.find((s) => s.at > announced!.at && s.message.items.length === 0);
-    expect(cleared?.step).toBe('highway');
-    // Refreshed every 10 s in between, distance shrinking.
-    const refreshes = hazards.filter((s) => s.at < cleared!.at && s.message.items.length > 0);
-    expect(refreshes.length).toBeGreaterThanOrEqual(2);
-    for (let i = 1; i < refreshes.length; i++) {
-      expect(refreshes[i]!.message.items[0]!.distanceM!).toBeLessThan(
-        refreshes[i - 1]!.message.items[0]!.distanceM!,
+    expect(camera(announced!)).toMatchObject({
+      type: 'speed-camera',
+      speedLimitKph: 100,
+      delaySeconds: null,
+    });
+    expect(camera(announced!).distanceM).toBeLessThanOrEqual(1500);
+    const cleared = h
+      .of('hazards')
+      .find(
+        (s) =>
+          s.at > withCamera.at(-1)!.at && !s.message.items.some((i) => i.id === 'sim-camera-a7'),
       );
+    expect(cleared?.step).toBe('highway');
+    expect(cleared!.position).toBeGreaterThanOrEqual(SCRIPTED_HAZARDS[0]!.at);
+    // Refreshed every 10 s in between, distance shrinking.
+    expect(withCamera.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < withCamera.length; i++) {
+      expect(withCamera[i]!.at - withCamera[i - 1]!.at).toBeLessThanOrEqual(HAZARD_REFRESH_MS);
+      expect(camera(withCamera[i]!).distanceM!).toBeLessThan(camera(withCamera[i - 1]!).distanceM!);
     }
+  });
+
+  it('reports the traffic jam beyond the exit from the merge onto the A7 until the exit', () => {
+    const jamOf = (s: { message: Of<'hazards'> }) =>
+      s.message.items.find((item) => item.id === 'sim-jam-a7');
+    const withJam = h.of('hazards').filter((s) => jamOf(s) !== undefined);
+    expect(withJam.length).toBeGreaterThanOrEqual(8); // ~95 s on the A7, refreshed every 10 s
+    const first = withJam[0]!;
+    expect(first.position).toBeGreaterThanOrEqual(1100);
+    expect(['on-ramp', 'highway']).toContain(first.step);
+    expect(jamOf(first)).toEqual({
+      id: 'sim-jam-a7',
+      type: 'traffic-jam',
+      distanceM: Math.round(4800 - first.position),
+      speedLimitKph: null,
+      delaySeconds: 480,
+      description: 'Stationary traffic',
+    });
+    // Both hazards are in the list while both are ahead (the HUD shows the nearest).
+    expect(withJam.some((s) => s.message.items.some((i) => i.id === 'sim-camera-a7'))).toBe(true);
+    for (const s of withJam) expect(jamOf(s)!.distanceM).toBe(Math.round(4800 - s.position));
+    // Withdrawn as the route takes exit 14, before the car could reach it.
+    const gone = h.of('hazards').find((s) => s.at > withJam.at(-1)!.at && jamOf(s) === undefined);
+    expect(gone!.position).toBeGreaterThanOrEqual(EXIT_14_AT);
+    expect(gone!.message.items).toEqual([]);
+    expect(withJam.every((s) => s.position < EXIT_14_AT)).toBe(true);
   });
 
   it('rings at the red light, auto-answers after 6 s and hangs up 20 s later', () => {
@@ -359,6 +401,23 @@ describe('SimPhone controls', () => {
     ]);
     // Parked: the camera is never reached and expires after two minutes.
     await h.clock.advance(125_000);
+    expect(h.of('hazards').at(-1)!.message.items).toEqual([]);
+
+    h.phone.trigger({ kind: 'traffic-jam' });
+    expect(h.of('hazards').at(-1)!.message.items).toEqual([
+      {
+        id: 'sim-jam-1',
+        type: 'traffic-jam',
+        distanceM: MANUAL_JAM_AHEAD_M,
+        speedLimitKph: null,
+        delaySeconds: MANUAL_JAM_DELAY_S,
+        description: 'Stationary traffic',
+      },
+    ]);
+    // Still reported (and refreshed) after the camera's two minutes; gone after five.
+    await h.clock.advance(125_000);
+    expect(h.of('hazards').at(-1)!.message.items).toHaveLength(1);
+    await h.clock.advance(MANUAL_JAM_TTL_MS - 120_000);
     expect(h.of('hazards').at(-1)!.message.items).toEqual([]);
     await h.phone.stop();
   });

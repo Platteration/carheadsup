@@ -201,6 +201,13 @@ export function DisplaySection({ root }: { root: Scope<HudConfig> }) {
               label="Hazards and cameras"
               unit={driverUnits.shortDistance}
             />
+            <NumberField
+              scope={display}
+              k="trafficRevealM"
+              label="Traffic on the highway"
+              unit={driverUnits.shortDistance}
+              hint="Jams, slowdowns, accidents and road works appear this far ahead on the highway (never later than other hazards)."
+            />
           </FieldGrid>
         </FieldGroup>
       </Card>

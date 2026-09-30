@@ -131,27 +131,45 @@ public class WayMatcher(
 }
 
 /**
- * Finds enforcement points ahead: within [maxDistanceM] and inside a cone of ±[coneDeg] around
- * the bearing (cameras within [nearbyM] count regardless, so one is not lost while passing it).
- * Distances are straight-line — a good approximation over the short ranges involved; the HUD
- * dead-reckons them between updates. Camera orientation tags are deliberately not used to
+ * What counts as "ahead" of a vehicle, for speed cameras and traffic incidents alike: inside a
+ * cone of ±[coneDeg] around its heading, or within [nearbyM] whatever the direction (so a camera,
+ * or the start of a jam, is not lost while the car passes it and GPS puts it slightly aside).
+ */
+public class HeadingCone(public val coneDeg: Double = 35.0, public val nearbyM: Double = 40.0) {
+    /**
+     * Whether [target] is ahead of a vehicle at [from] heading [headingDeg]; with the heading
+     * unknown (null) everything counts. [distanceM] may be passed when already computed.
+     */
+    public fun contains(
+        from: LatLon,
+        headingDeg: Double?,
+        target: LatLon,
+        distanceM: Double = Geo.distanceM(from, target),
+    ): Boolean = headingDeg == null ||
+        distanceM <= nearbyM ||
+        Geo.angleDiffDeg(Geo.bearingDeg(from, target), headingDeg) <= coneDeg
+}
+
+/**
+ * Finds enforcement points ahead: within [maxDistanceM] and inside the [HeadingCone] of ±coneDeg
+ * around the bearing (cameras within nearbyM count regardless, so one is not lost while passing
+ * it). Distances are straight-line — a good approximation over the short ranges involved; the
+ * HUD dead-reckons them between updates. Camera orientation tags are deliberately not used to
  * filter: their semantics vary between mappers, and a spurious warning is safer than a missing one.
  */
 public class SpeedCameraFinder(
     private val maxDistanceM: Double = 1_500.0,
-    private val coneDeg: Double = 35.0,
-    private val nearbyM: Double = 40.0,
+    coneDeg: Double = 35.0,
+    nearbyM: Double = 40.0,
     private val maxResults: Int = 10,
 ) {
+    private val cone = HeadingCone(coneDeg, nearbyM)
+
     public fun ahead(cameras: List<OsmCamera>, position: LatLon, bearingDeg: Double?): List<HazardItem> = cameras
         .asSequence()
         .map { it to Geo.distanceM(position, it.position) }
         .filter { (_, distance) -> distance <= maxDistanceM }
-        .filter { (camera, distance) ->
-            bearingDeg == null ||
-                distance <= nearbyM ||
-                Geo.angleDiffDeg(Geo.bearingDeg(position, camera.position), bearingDeg) <= coneDeg
-        }
+        .filter { (camera, distance) -> cone.contains(position, bearingDeg, camera.position, distance) }
         .sortedBy { it.second }
         .take(maxResults)
         .map { (camera, distance) ->

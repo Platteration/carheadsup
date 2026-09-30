@@ -262,7 +262,8 @@ sudo nmcli connection add type wifi ifname wlan0 con-name carheadsup-hotspot \
 ```
 
 On the phone, join `CarHUD` and tell Android to stay connected although the network has no
-internet. The HUD is `http://10.42.0.1:8080`.
+internet. The HUD is `http://10.42.0.1:8080` for browsers; the companion app connects to its TLS
+port, `10.42.0.1:8443`.
 
 The Pi itself has no internet on its own network — no network time (see
 [hardware.md](hardware.md#clock)) and no updates. To update at home:
@@ -281,7 +282,11 @@ the HUD's address can change. Discovery by mDNS on the phone's own hotspot does 
 phone; if the companion does not find the HUD, enter its address (from the phone's list of
 connected devices) in the companion's *Setup*.
 
-In both cases the server must listen on the network: `server.host` is `0.0.0.0` by default.
+In both cases the server must listen on the network: `server.host` is `0.0.0.0` by default. It
+listens on two ports: **8080** (`server.port`, plain HTTP: browsers and the kiosk) and **8443**
+(`server.tlsPort`, HTTPS: the companion app, whose link is encrypted and pinned to the HUD's
+certificate). A firewall on the Pi, if you add one, must let the phone reach 8443 (and 8080 for
+browsers on other devices); UDP 5353 for mDNS.
 
 ## 9. Boot configuration
 
@@ -338,8 +343,11 @@ Open the settings app from the phone — the companion's *Setup → HUD settings
 through it. Changes apply immediately. At least:
 
 1. **Security**: *Phone → Pairing code* and *Server → API token* (both have a generate button),
-   then enter the same values in the companion's *Setup*. From the Pi itself (loopback needs no
-   token) the same is:
+   then enter the same values in the companion's *Setup*. When the companion connects the first
+   time, it shows the HUD certificate's fingerprint (*Status*); it should be the one under
+   *Phone → Encrypted link* in the settings app (or in `journalctl -u carheadsup | grep 'Phone
+   link'`). The companion remembers the certificate from then on. From the Pi itself (loopback
+   needs no token) the same is:
 
    ```sh
    API_TOKEN=$(openssl rand -hex 16)
@@ -362,10 +370,11 @@ through it. Changes apply immediately. At least:
 6. **Sensors and buttons**, **Layout**, **Alerts**, **Maintenance** (enter the date and odometer
    of each item's last service).
 
-Leave *Server → Port* and *Listen address* alone unless you need them: they take effect at the
-next restart, and the kiosk only follows a new port once `CARHEADSUP_KIOSK_URL` says so (it stays
-black until then; see [the units](#the-units)). Ports below 1024 do not work, since the service
-has no privileges.
+Leave *Server → Port*, *Phone port (TLS)* and *Listen address* alone unless you need them: they
+take effect at the next restart, and the kiosk only follows a new port once
+`CARHEADSUP_KIOSK_URL` says so (it stays black until then; see [the units](#the-units)). Ports
+below 1024 do not work, since the service has no privileges. Leave *Also accept unencrypted
+phone connections* off: the companion does not need it.
 
 Every option is described in [configuration.md](configuration.md). To edit the file by hand, stop
 the service first, since it rewrites the file on changes from the settings app, and check the
@@ -406,7 +415,7 @@ needs a file system of its own outside the overlay.
    # e.g. a USB stick (this erases it): sudo mkfs.ext4 -L hud-data /dev/sda1
    sudo systemctl stop carheadsup
    sudo mkdir -p /mnt/hud-data && sudo mount LABEL=hud-data /mnt/hud-data
-   sudo cp -a /var/lib/carheadsup/. /mnt/hud-data/          # state.json, trips.jsonl
+   sudo cp -a /var/lib/carheadsup/. /mnt/hud-data/          # state.json, trips.jsonl, hud-id, tls.pem
    sudo install -o carheadsup -g carheadsup -m 0600 /etc/carheadsup/config.json /mnt/hud-data/config.json
    sudo chown carheadsup:carheadsup /mnt/hud-data && sudo chmod 0700 /mnt/hud-data
    sudo umount /mnt/hud-data
@@ -512,8 +521,10 @@ renderer clients pass their token) or message content.
 | Text reads backwards / upside down on the glass | *Projection*: `mirrorX`, `mirrorY`, *Panel rotation*. |
 | OBD never connects | `journalctl -u carheadsup` shows the reason. Ignition on? `/dev/rfcomm0` present (`systemctl status obd-rfcomm@<MAC>`)? Adapter paired *and* trusted? Another device (a phone app) connected to it? For USB: right `obd.serialPath` and `obd.baudRate`? Try `obd.protocol` = `"6"` (CAN 11-bit 500 kbit/s) instead of automatic on a modern car. |
 | "OBD LINK LOST" after switching off | Expected: the ECU stops answering; the HUD parks and keeps probing slowly. |
-| Phone does not find the HUD | Same Wi-Fi? `avahi-browse -rt _carheadsup._tcp` on the Pi lists the advertisement (install `avahi-utils`). Enter `10.42.0.1:8080` manually in the companion's *Setup*. |
-| Phone connects and is dropped at once | Pairing code mismatch: the log says "sent a wrong pairing token". The companion shows "wrong pairing code". |
+| Phone does not find the HUD | Same Wi-Fi? `avahi-browse -rt _carheadsup._tcp` on the Pi lists the advertisement (install `avahi-utils`) with `tls=8443`. Enter `10.42.0.1:8443` (the TLS port, not 8080) manually in the companion's *Setup* (an address saved by an earlier app version with `:8080` is moved to `:8443` by itself; one with another port must be changed to the HUD's `server.tlsPort`). |
+| Phone cannot connect at all; `/api/info` shows `"tls": null` | The TLS listener is not running: `server.tlsPort` is null, or the port is taken (`journalctl -u carheadsup -b \| grep TLS` says so). Free the port or pick another one (`server.tlsPort`, or `CARHEADSUP_TLS_PORT` in `/etc/default/carheadsup`), restart, and re-run the installer if it uses the static Avahi file. |
+| Phone connects and is dropped at once | Pairing code mismatch: the log says "sent a wrong proof". The companion shows "wrong pairing code". If the code is right, something between phone and HUD is relaying the connection with a certificate of its own. |
+| Companion says "HUD certificate changed — re-pair" | The HUD at the paired address presented another TLS certificate than the paired one, and the app stopped. Expected after `/var/lib/carheadsup/tls.pem` was deleted or replaced, or the Pi's card was set up anew: then *Forget paired HUD* and pair again, comparing the new fingerprint with the settings app. Otherwise another device is posing as the HUD — do not forget the HUD; check who is on the car's Wi-Fi. |
 | Companion says "A different HUD is answering" | It is paired with another HUD id than this one's (`/var/lib/carheadsup/hud-id`): the Pi was replaced or its data directory reset. If this is your HUD, *Forget paired HUD* in the companion; it pairs again with the next HUD that proves the code. |
 | Companion asks "This is my HUD — connect" | The HUD has no pairing code, so the phone cannot verify it. Confirm only if it is yours; better, set a pairing code. |
 | Settings app asks for a token | `server.apiToken` is set: enter it (it is stored in that browser). |
@@ -524,7 +535,7 @@ renderer clients pass their token) or message content.
 | Backlight never dims | `ls /sys/class/backlight` — HDMI panels usually have no backlight device (the page is dimmed instead). For DSI panels: `ls -l /sys/class/backlight/*/brightness` should show group `video` writable (udev rule; reboot after installing). `journalctl -u carheadsup -b \| grep Backlight`: "no backlight device found" or "no usable device" at start-up is fine if a later line says "controlling …" — the HUD looks again every 10 s, so a display driver or udev rule that comes up after the server is picked up by itself. If "controlling" never follows, fix the permissions (`sudo udevadm trigger --subsystem-match=backlight --action=add` applies the rule without a reboot). |
 | Wrong clock / dates | See [hardware.md](hardware.md#clock): network time or an RTC. |
 | Hotspot not visible | Wi-Fi country set (`--country`)? `nmcli device status`, `rfkill list`. |
-| Port 8080 taken | Set `server.port` (or `CARHEADSUP_PORT` in `/etc/default/carheadsup`) to a free port of 1024 or above, restart, point the kiosk at it (`CARHEADSUP_KIOSK_URL`; it stays black until then) and re-run the installer if it uses the static Avahi file (it picks up either setting). |
+| Port 8080 taken | Set `server.port` (or `CARHEADSUP_PORT` in `/etc/default/carheadsup`) to a free port of 1024 or above, restart, point the kiosk at it (`CARHEADSUP_KIOSK_URL`; it stays black until then) and re-run the installer if it uses the static Avahi file (it picks up either setting). Port 8443 (the phone's) likewise: `server.tlsPort` or `CARHEADSUP_TLS_PORT`. |
 
 ## Uninstalling
 
@@ -541,7 +552,7 @@ sudo nmcli connection delete carheadsup-hotspot  # if you created the hotspot
 | --- | --- | --- |
 | `/opt/carheadsup` | root, read-only to others | Code, production dependencies, built pages, `deploy/`, `docs/` |
 | `/etc/carheadsup/config.json` | `carheadsup`, 0600 | Configuration (contains the tokens); `config.json.bak` after a correction |
-| `/var/lib/carheadsup` | `carheadsup`, 0700 | `state.json` (odometer, learned gears, service records), `trips.jsonl` |
+| `/var/lib/carheadsup` | `carheadsup`, 0700 | `state.json` (odometer, learned gears, service records), `trips.jsonl`, `hud-id` and `tls.pem` (the HUD's identity and TLS key and certificate, which paired phones pin — keep them when moving to a new card, or pair the phone again) |
 | `/var/lib/carheadsup-kiosk` | `carheadsup-kiosk`, 0700 | Home of the kiosk user |
 | `/etc/default/carheadsup` | root, 0644 | `CARHEADSUP_*` environment for the server |
 | `/etc/systemd/system/carheadsup.service` | root | The server |

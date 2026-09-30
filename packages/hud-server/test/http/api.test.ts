@@ -23,7 +23,7 @@ import {
   FakeSource,
   MemoryLogger,
   TestSocket,
-  answerChallenge,
+  helloOn,
   makeTempDir,
   sleep,
   startTestServer,
@@ -117,7 +117,9 @@ describe('REST API basics', () => {
       simulated: false,
       phoneConnected: false,
       obd: { state: 'disconnected' },
+      tls: { port: t.tlsPort, fingerprint: t.fingerprint },
     });
+    expect(info.tls?.fingerprint).toMatch(/^[0-9a-f]{64}$/);
     expect(info.uptimeS).toBeGreaterThanOrEqual(0);
     expect(res.headers.get('content-type')).toBe('application/json; charset=utf-8');
     expect(res.headers.get('cache-control')).toBe('no-store');
@@ -554,10 +556,10 @@ describe('trips API', () => {
 
   it('stores trips completed while running and pushes them to the phone', async () => {
     const t = await start({ config: { trip: { endAfterEngineOffMs: 0, minDistanceKm: 0 } } });
-    const phone = new TestSocket(`${t.wsBase}/ws/phone`);
+    const phone = new TestSocket(`${t.phoneBase}/ws/phone`);
     try {
       await phone.opened;
-      phone.send(answerChallenge(await phone.nextOfType('challenge'), { device: 'P' }));
+      await helloOn(phone, { device: 'P' });
       await phone.nextOfType('welcome');
       t.obd.emit({ type: 'obd/link', state: 'connected', at: 0 });
       for (let i = 0; i < 5; i += 1) {
@@ -792,6 +794,7 @@ describe('server lifecycle', () => {
     const second = createHudServer({
       dataDir: temp.dir,
       port: t.port,
+      tlsPort: 0,
       host: '127.0.0.1',
       logger,
       createObdService: (config, deps) => (obd = new FakeObdService(config, deps)),

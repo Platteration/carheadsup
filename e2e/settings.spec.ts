@@ -1,3 +1,4 @@
+import { shortFingerprint } from '@carheadsup/core';
 import type { HudConfig } from '@carheadsup/core';
 import { expect, test } from '@playwright/test';
 import { findChromium, startSimulatedHud } from './support.ts';
@@ -42,4 +43,38 @@ test('switching to imperial units makes the HUD show mph', async ({ browser }) =
   // …and applied to the live HUD without a reload.
   await expect(speed).toHaveAttribute('aria-label', /^Speed \d+ mph$/);
   expect(errors).toEqual([]);
+});
+
+test('the Phone section shows the certificate the phone pins', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const errors: string[] = [];
+  page.on('pageerror', (err) => errors.push(err.message));
+  await page.goto(`${hud.base}/settings`);
+  const phone = page.locator('section#phone');
+  await phone.scrollIntoViewIfNeeded();
+  await expect(phone).toContainText(shortFingerprint(hud.fingerprint));
+  await expect(phone).toContainText('TLS port');
+  expect(errors).toEqual([]);
+});
+
+test('the settings app works over TLS, as the companion app opens it', async ({ browser }) => {
+  // The phone's WebView accepts the HUD's self-signed certificate only by its pinned
+  // fingerprint; a browser context that ignores certificate errors stands in for that.
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  const errors: string[] = [];
+  page.on('pageerror', (err) => errors.push(err.message));
+  const response = await page.goto(`${hud.httpsBase}/settings`);
+  expect(response?.status()).toBe(200);
+  expect(await response?.securityDetails()).toMatchObject({
+    protocol: expect.stringMatching(/TLS/),
+  });
+  // The page reaches the API over the same encrypted origin.
+  await expect(page.locator('.pill')).toHaveText('Simulator');
+  await expect(page.locator('section#phone')).toContainText(shortFingerprint(hud.fingerprint));
+  expect(errors).toEqual([]);
+  await context.close();
 });

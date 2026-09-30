@@ -10,7 +10,7 @@ import {
   navRemainingM,
   wallNow,
 } from '../state/selectors.ts';
-import type { DrivingContext, HudConfig, WidgetId, Zone } from '../types/config.ts';
+import type { DisplayConfig, DrivingContext, HudConfig, WidgetId, Zone } from '../types/config.ts';
 import type {
   BoostWidget,
   ClockWidget,
@@ -333,12 +333,52 @@ export function hazardLabel(hazard: Hazard, moving = false): string {
   return HAZARD_LABELS[hazard.type] ?? HAZARD_LABELS.other;
 }
 
+/** Hazard types that slow traffic down: on the highway they appear from `trafficRevealM`. */
+export const TRAFFIC_HAZARD_TYPES: readonly HazardType[] = [
+  'traffic-jam',
+  'slowdown',
+  'accident',
+  'road-works',
+];
+
+/** A traffic hazard: a jam, slowdown, accident or road works, or anything with a delay. */
+export function isTrafficHazard(hazard: Hazard): boolean {
+  if (TRAFFIC_HAZARD_TYPES.includes(hazard.type)) return true;
+  const delay = hazard.delaySeconds;
+  return delay !== null && Number.isFinite(delay) && delay > 0;
+}
+
+/**
+ * How close `hazard` must be to appear: `hazardRevealM`, or on the highway for a traffic hazard
+ * the longer `trafficRevealM` — at 130 km/h, 1 km is under 30 s to the end of a jam.
+ */
+export function hazardRevealDistanceM(
+  hazard: Hazard,
+  context: DrivingContext,
+  display: DisplayConfig,
+): number {
+  const base = display.hazardRevealM;
+  if (context !== 'highway' || !isTrafficHazard(hazard)) return base;
+  return Math.max(base, display.trafficRevealM);
+}
+
+/** A traffic delay in whole minutes; null when unknown or under half a minute. */
+export function delayMinutes(delaySeconds: number | null): number | null {
+  if (delaySeconds === null || !Number.isFinite(delaySeconds)) return null;
+  const minutes = Math.round(delaySeconds / 60);
+  return minutes >= 1 ? minutes : null;
+}
+
 /** The nearest hazard ahead within reveal range (dead-reckoned; passed hazards are skipped). */
-function hazardWidget({ state, config, moving }: WidgetEnv, zone: Zone): HazardWidget | null {
+function hazardWidget(
+  { state, config, context, moving }: WidgetEnv,
+  zone: Zone,
+): HazardWidget | null {
   let nearest: { hazard: Hazard; distanceM: number } | null = null;
   for (const tracked of state.hazards) {
     const d = hazardDistanceM(state, tracked);
-    if (d === null || d < 0 || d > config.display.hazardRevealM) continue;
+    if (d === null || d < 0) continue;
+    if (d > hazardRevealDistanceM(tracked.hazard, context, config.display)) continue;
     if (nearest === null || d < nearest.distanceM)
       nearest = { hazard: tracked.hazard, distanceM: d };
   }
@@ -346,7 +386,6 @@ function hazardWidget({ state, config, moving }: WidgetEnv, zone: Zone): HazardW
   const { hazard, distanceM } = nearest;
   const { system } = config.units;
   const limit = hazard.speedLimitKph;
-  const delay = hazard.delaySeconds;
   return {
     id: 'hazard',
     zone,
@@ -355,8 +394,7 @@ function hazardWidget({ state, config, moving }: WidgetEnv, zone: Zone): HazardW
     speedLimit:
       limit !== null && Number.isFinite(limit) && limit > 0 ? displaySpeed(limit, system) : null,
     limitStyle: config.display.speedLimitSign,
-    delayMinutes:
-      delay !== null && Number.isFinite(delay) && delay > 0 ? Math.ceil(delay / 60) : null,
+    delayMinutes: delayMinutes(hazard.delaySeconds),
     label: hazardLabel(hazard, moving),
   };
 }

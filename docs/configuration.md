@@ -208,6 +208,7 @@ shown while moving. When `parked` it shows anyway.
 | `display.highwayNavRevealM` | `2000` | 0–50000 | On the highway, navigation appears only this close to the next maneuver. |
 | `display.laneRevealM` | `800` | 0–10000 | Lane guidance appears this close to the maneuver. |
 | `display.hazardRevealM` | `1000` | 0–50000 | Hazards appear this close. |
+| `display.trafficRevealM` | `3000` | 0–50000 | On the highway, traffic hazards — jams, slowdowns, accidents, road works and anything the phone gives a delay — appear this close instead (never later than `hazardRevealM`): at 130 km/h, 1 km is under 30 s to the end of a jam. Traffic comes from the companion's optional TomTom look-up ([companion README](../companion-android/README.md#traffic-tomtom)). |
 | `display.maxAlerts` | `2` | 1–5 | Most alert banners on screen at once. Critical alerts are always shown, however many there are; the others fill the room left. |
 
 ### shiftLight
@@ -362,7 +363,9 @@ call and media state ([more](hardware.md#steering-wheel-buttons)).
 
 | Option | Default | Range | Notes |
 | --- | --- | --- | --- |
-| `server.port` | `8080` | 1–65535 | HTTP and WebSocket port. Takes effect after a restart. On the Pi, move the kiosk with it (`CARHEADSUP_KIOSK_URL`, [install guide](install-raspberry-pi.md#the-units)) — the kiosk stays black until then — and use 1024 or above: the service has no privilege to listen below that, so it would fail to start. |
+| `server.port` | `8080` | 1–65535 | Plain HTTP and WebSocket port: the kiosk, the settings app in a browser, the developer console. Takes effect after a restart. On the Pi, move the kiosk with it (`CARHEADSUP_KIOSK_URL`, [install guide](install-raspberry-pi.md#the-units)) — the kiosk stays black until then — and use 1024 or above: the service has no privilege to listen below that, so it would fail to start. |
+| `server.tlsPort` | `8443` | 1–65535, not `server.port`, or `null` | HTTPS and secure WebSocket port with the HUD's self-signed certificate (`<data dir>/tls.pem`, made on the first start): the companion app's link, encrypted and pinned to that certificate ([details](protocol.md#tls-and-the-huds-certificate)); it serves the same pages and API as `server.port`. `null` switches TLS off — and with it the phone link, unless `server.allowPlainPhone` is on. Takes effect after a restart; 1024 or above on the Pi. A TLS port that cannot be opened (taken by another service) is logged and left out; the HUD keeps running without the phone. A config file from before this setting whose `server.port` is 8443 keeps that port and gets 8444 here. |
+| `server.allowPlainPhone` | `false` | | Also serve the phone link (`/ws/phone`) on `server.port`, unencrypted, with nothing bound to a certificate — for development and custom clients only; the companion app always uses TLS. Off: a plain phone connection is refused (`403`); switching it off closes plain sessions at once. |
 | `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. An address the kiosk cannot reach leaves it black. |
 | `server.apiToken` | `""` | ≤ 256 printable ASCII chars | Bearer token required from every client except the Pi itself. Empty = open to the car's network. Letters, digits, symbols and spaces only (not spaces alone): it travels in HTTP headers and `?token=` addresses, which carry nothing else. |
 | `server.mdns` | `true` | | Advertise `_carheadsup._tcp` so the companion finds the HUD. |
@@ -386,7 +389,7 @@ Widgets:
 | `nav` | Turn arrow, distance, street, "then" | guidance is active (on the highway: within `highwayNavRevealM`) |
 | `lanes` | Lane arrows | the source sends lanes, within `laneRevealM` |
 | `eta` | Arrival time, remaining time and distance | guidance is active |
-| `hazard` | Nearest hazard and its distance | a hazard is within `hazardRevealM` |
+| `hazard` | Nearest hazard, its distance, a camera's limit or the traffic delay ("+8 min") | a hazard is within `hazardRevealM` (traffic on the highway: `trafficRevealM`) |
 | `fuel` | Instant and average economy, range, level | any of them is known |
 | `coolant` | Coolant temperature | at or above `alerts.coolantHighC` |
 | `voltage` | Supply voltage | outside the alert thresholds |
@@ -534,8 +537,9 @@ polled less and less often (back-off up to a minute).
 | --- | --- | --- | --- |
 | `--sim` | `CARHEADSUP_SIM=1` | off | Run against the built-in vehicle, phone, light-sensor and ADAS simulator. Forces `obd.transport = simulator`, adds the simulated tyre-pressure PIDs and `hasTpms`, without saving that to the config. |
 | `--config <file>` | `CARHEADSUP_CONFIG` | `<data dir>/config.json` | Config file (created with defaults if missing). |
-| `--data-dir <dir>` | `CARHEADSUP_DATA_DIR` | `$XDG_DATA_HOME/carheadsup` or `~/.local/share/carheadsup`; with `--sim` its `sim` subdirectory | State, trips and (by default) the config. |
+| `--data-dir <dir>` | `CARHEADSUP_DATA_DIR` | `$XDG_DATA_HOME/carheadsup` or `~/.local/share/carheadsup`; with `--sim` its `sim` subdirectory | State, trips, the HUD's identity and TLS certificate, and (by default) the config. |
 | `--port <n>` | `CARHEADSUP_PORT` | `server.port` | Override the port (`0` = any free port). Not saved. |
+| `--tls-port <n\|off>` | `CARHEADSUP_TLS_PORT` | `server.tlsPort` | Override the TLS port of the phone link (`0` = any free port, `off` = no TLS listener). Not saved. |
 | `--host <addr>` | `CARHEADSUP_HOST` | `server.host` | Override the bind address. Not saved. |
 | `--renderer-dir <dir>` | `CARHEADSUP_RENDERER_DIR` | `packages/hud-renderer/dist` | Built web pages to serve. |
 | `--backlight <dir\|auto\|off>` | `CARHEADSUP_BACKLIGHT` | `auto` | Backlight device (e.g. `/sys/class/backlight/rpi_backlight`), `auto` = the first writable device, `off` = never touch it (the page is dimmed instead). A device that is missing or not writable at start-up is looked for again every 10 s. |

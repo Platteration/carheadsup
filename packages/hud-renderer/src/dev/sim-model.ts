@@ -118,6 +118,7 @@ export const PHONE_ACTIONS: ReadonlyArray<{ label: string; event: PhoneEvent }> 
   { label: 'Next track', event: { kind: 'next-track' } },
   { label: 'Message', event: { kind: 'message', sender: 'Alex Chen' } },
   { label: 'Speed camera', event: { kind: 'speed-camera' } },
+  { label: 'Traffic jam', event: { kind: 'traffic-jam' } },
   { label: 'Phone connects', event: { kind: 'connect' } },
   { label: 'Phone disconnects', event: { kind: 'disconnect' } },
 ];

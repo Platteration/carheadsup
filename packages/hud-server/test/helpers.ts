@@ -2,7 +2,13 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_CONFIG, PROTOCOL_VERSION, parseConfig } from '@carheadsup/core';
+import { TLSSocket } from 'node:tls';
+import {
+  DEFAULT_CONFIG,
+  NO_CHANNEL_BINDING,
+  PROTOCOL_VERSION,
+  parseConfig,
+} from '@carheadsup/core';
 import type {
   DeepPartial,
   HudConfig,
@@ -21,6 +27,7 @@ import { createHudServer } from '../src/app.ts';
 import type { HudServer, HudServerOptions } from '../src/app.ts';
 import type { ObdServiceLike } from '../src/obd/obd-link.ts';
 import { phoneProof, randomAuthId } from '../src/phone/auth.ts';
+import { certificateFingerprint } from '../src/tls/certificate.ts';
 import type { EventSource, RuntimeDeps, Simulation, SourceContext } from '../src/sources/types.ts';
 
 /** A fresh temporary directory, removed by the returned cleanup. */
@@ -198,6 +205,14 @@ export interface TestServer {
   port: number;
   base: string;
   wsBase: string;
+  /** The TLS listener's port (null when started with `tlsPort: null`). */
+  tlsPort: number | null;
+  /** `https://127.0.0.1:<tlsPort>` ('' without TLS). */
+  httpsBase: string;
+  /** `wss://127.0.0.1:<tlsPort>`, where phones connect ('' without TLS). */
+  phoneBase: string;
+  /** SHA-256 of the HUD's TLS certificate (null without TLS). */
+  fingerprint: string | null;
   dataDir: string;
   rendererDir: string;
   obd: FakeObdService;
@@ -219,9 +234,9 @@ export interface TestServerOptions extends Partial<HudServerOptions> {
 }
 
 /**
- * Start a real server on 127.0.0.1:0 with a temp data dir, a fake OBD service and fakes for
- * every pluggable module (the concurrently developed sim/sensors/outputs/mDNS modules are never
- * touched).
+ * Start a real server on 127.0.0.1:0 (and its TLS listener on another free port) with a temp
+ * data dir, a fake OBD service and fakes for every pluggable module (the concurrently developed
+ * sim/sensors/outputs/mDNS modules are never touched).
  */
 export async function startTestServer(options: TestServerOptions = {}): Promise<TestServer> {
   const temp = await makeTempDir();
@@ -245,6 +260,7 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     dataDir,
     rendererDir,
     port: 0,
+    tlsPort: 0,
     host: '127.0.0.1',
     logger,
     createObdService: (config, deps) => {
@@ -261,8 +277,9 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     ...options,
   });
   let port: number;
+  let tlsPort: number | null;
   try {
-    ({ port } = await server.start());
+    ({ port, tlsPort } = await server.start());
   } catch (err) {
     await temp.cleanup();
     throw err;
@@ -273,6 +290,10 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     port,
     base: `http://127.0.0.1:${port}`,
     wsBase: `ws://127.0.0.1:${port}`,
+    tlsPort,
+    httpsBase: tlsPort === null ? '' : `https://127.0.0.1:${tlsPort}`,
+    phoneBase: tlsPort === null ? '' : `wss://127.0.0.1:${tlsPort}`,
+    fingerprint: server.tls?.fingerprint ?? null,
     dataDir,
     rendererDir,
     obd,
@@ -285,18 +306,33 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
   };
 }
 
-/** A WebSocket client that buffers parsed JSON messages for `next()`. */
+/**
+ * A WebSocket client that buffers parsed JSON messages for `next()`. A `wss://` client accepts
+ * any certificate (as a phone does before pairing) unless `options` say otherwise, and records
+ * the one it was shown.
+ */
 export class TestSocket {
   readonly ws: WebSocket;
   readonly messages: Array<Record<string, unknown>> = [];
   closeCode: number | null = null;
   closeReason = '';
+  /**
+   * SHA-256 of the certificate the server presented (lowercase hex), `NO_CHANNEL_BINDING` on a
+   * plain connection: what a phone binds its proof to.
+   */
+  peerFingerprint = NO_CHANNEL_BINDING;
   private readonly waiters: Array<() => void> = [];
   readonly opened: Promise<void>;
   readonly closed: Promise<number>;
 
   constructor(url: string, options?: ConstructorParameters<typeof WebSocket>[2]) {
-    this.ws = new WebSocket(url, options);
+    const secure = url.startsWith('wss:');
+    this.ws = new WebSocket(url, secure ? { rejectUnauthorized: false, ...options } : options);
+    this.ws.once('upgrade', (res) => {
+      if (res.socket instanceof TLSSocket) {
+        this.peerFingerprint = certificateFingerprint(res.socket.getPeerCertificate().raw);
+      }
+    });
     this.opened = new Promise((resolve, reject) => {
       this.ws.once('open', () => resolve());
       this.ws.once('error', reject);
@@ -377,6 +413,11 @@ export interface TestPhone {
   deviceId?: string;
   /** The pairing token the phone knows (default ''). */
   token?: string;
+  /**
+   * The certificate fingerprint the phone binds its proof to; default: the one its socket was
+   * shown (a relay's, if one sits in between).
+   */
+  certFingerprint?: string;
   app?: string;
   appVersion?: string;
   v?: number;
@@ -384,11 +425,13 @@ export interface TestPhone {
 
 /**
  * The `hello` a phone that knows `phone.token` sends in answer to `challenge` (a received
- * `challenge` message), with a fresh nonce and a valid proof.
+ * `challenge` message), with a fresh nonce and a valid proof bound to `certFingerprint` (the
+ * certificate the phone was shown; `phone.certFingerprint` overrides it).
  */
 export function answerChallenge(
   challenge: Record<string, unknown>,
   phone: TestPhone = {},
+  certFingerprint: string = NO_CHANNEL_BINDING,
 ): Record<string, unknown> {
   const device = phone.device ?? 'Pixel 9';
   const deviceId = phone.deviceId ?? testDeviceId(device);
@@ -398,6 +441,7 @@ export function answerChallenge(
     hudNonce: String(challenge['nonce']),
     phoneNonce: nonce,
     deviceId,
+    certFingerprint: phone.certFingerprint ?? certFingerprint,
   });
   return {
     t: 'hello',
@@ -411,16 +455,36 @@ export function answerChallenge(
   };
 }
 
-/** Open `/ws/phone`, answer the challenge as `phone` and wait for the `welcome`. */
+/**
+ * Wait for the HUD's `challenge` on `socket` and answer it as `phone`, bound to the certificate
+ * the socket was shown. Resolves with the `hello` sent.
+ */
+export async function helloOn(
+  socket: TestSocket,
+  phone: TestPhone = {},
+): Promise<Record<string, unknown>> {
+  const hello = answerChallenge(
+    await socket.nextOfType('challenge'),
+    phone,
+    socket.peerFingerprint,
+  );
+  socket.send(hello);
+  return hello;
+}
+
+/**
+ * Open `/ws/phone` at `base` (`wss://…` as a phone does, or `ws://…` where plain phones are
+ * allowed), answer the challenge as `phone` and wait for the `welcome`.
+ */
 export async function connectTestPhone(
-  wsBase: string,
+  base: string,
   phone: TestPhone = {},
   options?: ConstructorParameters<typeof WebSocket>[2],
 ): Promise<{ socket: TestSocket; welcome: Record<string, unknown> }> {
-  const socket = new TestSocket(`${wsBase}/ws/phone`, options);
+  const socket = new TestSocket(`${base}/ws/phone`, options);
   try {
     await socket.opened;
-    socket.send(answerChallenge(await socket.nextOfType('challenge'), phone));
+    await helloOn(socket, phone);
     return { socket, welcome: await socket.nextOfType('welcome') };
   } catch (err) {
     socket.close();

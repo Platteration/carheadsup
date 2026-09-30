@@ -1,8 +1,9 @@
-import type { HudConfig } from '@carheadsup/core';
+import { shortFingerprint } from '@carheadsup/core';
+import type { ApiTlsInfo, HudConfig } from '@carheadsup/core';
 import { useState } from 'preact/hooks';
 import type { Scope } from '../model/scope.ts';
 import { tokenProblem, trimToken } from '../model/validation.ts';
-import { Badge, Button, Card, Notice, Section } from '../ui/common.tsx';
+import { Badge, Button, Card, Notice, Section, Stat } from '../ui/common.tsx';
 import { FieldGroup, TextField, ToggleField } from '../ui/fields.tsx';
 import { copyText, generateToken } from '../ui/hooks.ts';
 
@@ -42,7 +43,47 @@ export function SecretActions({
   );
 }
 
-export function PhoneSection({ root }: { root: Scope<HudConfig> }) {
+/**
+ * The encrypted phone link as `/api/info` reports it: the certificate fingerprint the companion
+ * app pins and shows when it pairs, for the driver to compare. `undefined` until the HUD has
+ * answered.
+ */
+function PhoneLink({ tls }: { tls: ApiTlsInfo | null | undefined }) {
+  if (tls === undefined) return <p class="muted">Waiting for the HUD…</p>;
+  if (tls === null) {
+    return (
+      <Notice tone="warning" title="The phone cannot connect">
+        The HUD’s encrypted phone link (TLS) is not running. Set a TLS port under Server and restart
+        the HUD; if one is set, the HUD’s log says why it did not start.
+      </Notice>
+    );
+  }
+  return (
+    <>
+      <dl class="stats stats--compact">
+        <Stat label="Certificate fingerprint">
+          <span class="mono" title={`SHA-256 ${tls.fingerprint}`}>
+            {shortFingerprint(tls.fingerprint)}
+          </span>
+        </Stat>
+        <Stat label="TLS port">{tls.port}</Stat>
+      </dl>
+      <p class="field__hint">
+        The companion app shows the same fingerprint when it pairs and remembers this certificate
+        from then on. If the two differ, another device is posing as the HUD: do not pair.
+      </p>
+    </>
+  );
+}
+
+export function PhoneSection({
+  root,
+  tls,
+}: {
+  root: Scope<HudConfig>;
+  /** The TLS listener from `/api/info`; `undefined` until the HUD has answered. */
+  tls?: ApiTlsInfo | null;
+}) {
   const phone = root.child('phone');
   const paired = phone.value.pairingToken !== '';
   return (
@@ -82,6 +123,9 @@ export function PhoneSection({ root }: { root: Scope<HudConfig> }) {
         </Notice>
       )}
       <Card>
+        <FieldGroup title="Encrypted link">
+          <PhoneLink tls={tls} />
+        </FieldGroup>
         <FieldGroup title="Pairing">
           <TextField
             scope={phone}

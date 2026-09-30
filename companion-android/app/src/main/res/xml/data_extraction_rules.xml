@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Nothing the app stores may leave the phone through a cloud backup or a transfer to a new
-    device: the settings hold the pairing code, the HUD's API token, the pinned HUD identity and
-    this install's phone id. A new phone pairs with the HUD again.
+    device: the settings hold the pairing code, the HUD's API token, the driver's TomTom API key,
+    the pinned HUD identity and this install's phone id. A new phone pairs with the HUD again.
 -->
 <data-extraction-rules>
     <cloud-backup>

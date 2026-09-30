@@ -7,6 +7,7 @@ import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
 import dev.carheadsup.protocol.auth.PhoneAuth
+import dev.carheadsup.protocol.link.HudAdvertisement
 import dev.carheadsup.protocol.link.HudEndpoint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,12 +17,14 @@ import java.net.InetAddress
 import java.util.concurrent.Executors
 
 /**
- * Finds the HUD with DNS-SD: it advertises `_carheadsup._tcp` (see `server.mdns`) with its id in
- * the TXT record `id`. The newest resolved address of a HUD that [accept]s (given that id, or
- * null when the advertisement has none) is published on [endpoint]; it becomes null when the
- * service disappears. Once the phone is paired, [accept] passes only the paired HUD (and HUDs
- * without an id, whose `challenge` is checked instead), so other HUDs are never contacted; an
- * advertisement without an id never replaces one with an accepted id.
+ * Finds the HUD with DNS-SD: it advertises `_carheadsup._tcp` (see `server.mdns`) with its id,
+ * its TLS port and its certificate's fingerprint in the TXT records `id`, `tls` and `fp`. The
+ * newest resolved HUD that [accept]s (given that id, or null when the advertisement has none) is
+ * published on [advertisement] (address and TLS port, id, fingerprint — see
+ * [HudAdvertisement.fromTxt]); it becomes null when the service disappears. Once the phone is
+ * paired, [accept] passes only the paired HUD (and HUDs without an id, whose certificate and
+ * `challenge` are checked instead), so other HUDs are never contacted; an advertisement without
+ * an id never replaces one with an accepted id.
  *
  * Resolution uses `registerServiceInfoCallback` on Android 14+ and `resolveService` before
  * (which allows only one resolution at a time, so services are resolved one after another).
@@ -31,7 +34,7 @@ import java.util.concurrent.Executors
 class HudDiscovery(context: Context, private val accept: (advertisedHudId: String?) -> Boolean = { true }) {
     private val nsd = context.getSystemService(NsdManager::class.java)
     private val executor = Executors.newSingleThreadExecutor()
-    private val state = MutableStateFlow<HudEndpoint?>(null)
+    private val state = MutableStateFlow<HudAdvertisement?>(null)
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var infoCallback: Any? = null
     private var resolving = false
@@ -41,7 +44,7 @@ class HudDiscovery(context: Context, private val accept: (advertisedHudId: Strin
     /** Whether the published service advertises an id (then one without cannot displace it). */
     private var currentHasId = false
 
-    val endpoint: StateFlow<HudEndpoint?> = state.asStateFlow()
+    val advertisement: StateFlow<HudAdvertisement?> = state.asStateFlow()
 
     @Synchronized
     fun start() {
@@ -196,9 +199,8 @@ class HudDiscovery(context: Context, private val accept: (advertisedHudId: Strin
 
     private fun publish(serviceInfo: NsdServiceInfo, addresses: List<InetAddress>) {
         val serviceName = serviceInfo.serviceName
-        val port = serviceInfo.port
-        val advertisedId =
-            serviceInfo.attributes[TXT_ID]?.toString(Charsets.UTF_8)?.takeIf(PhoneAuth::isValidId)
+        val txt = serviceInfo.attributes.mapValues { (_, value) -> value?.toString(Charsets.UTF_8) }
+        val advertisedId = txt[HudAdvertisement.TXT_ID]?.takeIf(PhoneAuth::isValidId)
         if (!accept(advertisedId)) {
             Log.i(TAG, "Ignoring HUD \"$serviceName\" ($advertisedId): not the paired HUD")
             synchronized(this) {
@@ -213,7 +215,8 @@ class HudDiscovery(context: Context, private val accept: (advertisedHudId: Strin
         // Prefer IPv4: link-local IPv6 addresses need a scope id that URLs handle poorly.
         val address = addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull() ?: return
         val host = address.hostAddress ?: return
-        if (port !in 1..65535) return
+        // The phone connects to the TLS port of the TXT record, not to the service's HTTP port.
+        val found = HudAdvertisement.fromTxt(host.substringBefore('%'), txt) ?: return
         synchronized(this) {
             if (advertisedId == null && currentHasId && serviceName != currentServiceName) {
                 Log.i(TAG, "Keeping the HUD with an id over \"$serviceName\" (no id)")
@@ -221,15 +224,12 @@ class HudDiscovery(context: Context, private val accept: (advertisedHudId: Strin
             }
             currentServiceName = serviceName
             currentHasId = advertisedId != null
-            state.value = HudEndpoint(host.substringBefore('%'), port)
+            state.value = found
         }
-        Log.i(TAG, "Found HUD \"$serviceName\" at $host:$port")
+        Log.i(TAG, "Found HUD \"$serviceName\" at ${found.endpoint.display()}")
     }
 
     private companion object {
         const val TAG = "HudDiscovery"
-
-        /** TXT record with the HUD's id (hud-server `discovery/mdns.ts`). */
-        const val TXT_ID = "id"
     }
 }

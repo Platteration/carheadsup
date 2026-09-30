@@ -30,6 +30,9 @@ function setup(script: (child: FakeChild) => void = () => {}, installed = true) 
 beforeEach(() => resetMdnsHintForTests());
 
 const HUD_ID = 'AAECAwQFBgcICQoLDA0ODw';
+const FINGERPRINT = 'fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531';
+/** A HUD with TLS on 8443. */
+const ADVERT = { hudId: HUD_ID, tls: { port: 8443, fingerprint: FINGERPRINT } };
 
 describe('mDNS helpers', () => {
   it('names the service after the vehicle', () => {
@@ -49,8 +52,26 @@ describe('mDNS helpers', () => {
     expect(unicode).not.toContain('�');
   });
 
-  it('builds the avahi-publish-service arguments, with the HUD id for pinned phones', () => {
-    expect(avahiPublishArgs(config({ name: 'Golf', port: 9090 }), HUD_ID)).toEqual([
+  it('builds the avahi-publish-service arguments: HUD id, TLS port and certificate fingerprint', () => {
+    expect(avahiPublishArgs(config({ name: 'Golf', port: 9090 }), ADVERT)).toEqual([
+      '-s',
+      'Golf HUD',
+      MDNS_SERVICE_TYPE,
+      '9090',
+      `v=${PROTOCOL_VERSION}`,
+      'path=/ws/phone',
+      `id=${HUD_ID}`,
+      'tls=8443',
+      `fp=${FINGERPRINT}`,
+    ]);
+    // Each TXT string stays far below DNS-SD's 255-byte limit.
+    for (const arg of avahiPublishArgs(config(), ADVERT).slice(4)) {
+      expect(arg.length).toBeLessThan(100);
+    }
+  });
+
+  it('leaves the TLS records out when the HUD has no TLS listener', () => {
+    expect(avahiPublishArgs(config({ port: 9090 }), { hudId: HUD_ID, tls: null })).toEqual([
       '-s',
       'Golf HUD',
       MDNS_SERVICE_TYPE,
@@ -65,7 +86,7 @@ describe('mDNS helpers', () => {
 describe('advertiseHud', () => {
   it('returns null when disabled', () => {
     const { deps, spawn, which } = setup();
-    expect(advertiseHud(config({ mdns: false }), HUD_ID, deps, { spawn, which })).toBeNull();
+    expect(advertiseHud(config({ mdns: false }), ADVERT, deps, { spawn, which })).toBeNull();
     expect(spawn.children).toEqual([]);
   });
 
@@ -73,7 +94,7 @@ describe('advertiseHud', () => {
     const { clock, deps, spawn, which, logger } = setup((child) =>
       child.print("Established under name 'Golf HUD'"),
     );
-    const service = advertiseHud(config({ port: 8123 }), HUD_ID, deps, { spawn, which });
+    const service = advertiseHud(config({ port: 8123 }), ADVERT, deps, { spawn, which });
     expect(service?.name).toBe('mdns');
     await clock.advance(10);
     expect(spawn.children).toHaveLength(1);
@@ -83,11 +104,14 @@ describe('advertiseHud', () => {
       'Golf HUD',
       '_carheadsup._tcp',
       '8123',
-      'v=2',
+      'v=3',
       'path=/ws/phone',
       `id=${HUD_ID}`,
+      'tls=8443',
+      `fp=${FINGERPRINT}`,
     ]);
     expect(logger.lines('info').join('\n')).toMatch(/Established under name 'Golf HUD'/);
+    expect(logger.lines('info').join('\n')).toMatch(/on port 8123 \(TLS port 8443\)/);
     await service!.stop();
     expect(spawn.children[0]!.signals).toEqual(['SIGTERM']);
     await clock.advance(120_000);
@@ -97,8 +121,8 @@ describe('advertiseHud', () => {
 
   it('logs an install hint once and returns null when avahi-utils is missing', () => {
     const { deps, spawn, which, logger } = setup(() => {}, false);
-    expect(advertiseHud(config(), HUD_ID, deps, { spawn, which })).toBeNull();
-    expect(advertiseHud(config(), HUD_ID, deps, { spawn, which })).toBeNull();
+    expect(advertiseHud(config(), ADVERT, deps, { spawn, which })).toBeNull();
+    expect(advertiseHud(config(), ADVERT, deps, { spawn, which })).toBeNull();
     expect(logger.lines('warn')).toHaveLength(1);
     expect(logger.lines('warn')[0]).toMatch(/avahi-utils.*deploy\//);
     expect(spawn.children).toEqual([]);
@@ -106,7 +130,7 @@ describe('advertiseHud', () => {
 
   it('handles the tool vanishing between the PATH check and the spawn', async () => {
     const { clock, deps, spawn, which, logger } = setup((child) => child.failToStart());
-    const service = advertiseHud(config(), HUD_ID, deps, { spawn, which });
+    const service = advertiseHud(config(), ADVERT, deps, { spawn, which });
     expect(service).not.toBeNull();
     await clock.advance(60_000);
     expect(spawn.children).toHaveLength(1);
@@ -122,7 +146,7 @@ describe('advertiseHud', () => {
         child.exit(1);
       }
     });
-    const service = advertiseHud(config(), HUD_ID, deps, { spawn, which });
+    const service = advertiseHud(config(), ADVERT, deps, { spawn, which });
     await clock.advance(10);
     await clock.advance(1000);
     await clock.advance(2000);

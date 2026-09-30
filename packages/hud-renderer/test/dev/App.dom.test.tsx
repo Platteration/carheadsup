@@ -94,20 +94,22 @@ describe('dev console', () => {
     await click(button(root, 'Manual'));
     await click(byText(root, '.dseg__item', '3')!);
     await click(button(root, 'Incoming call'));
+    await click(button(root, 'Traffic jam'));
     await click(byText(root, 'button.dchip', 'P0420')!);
-    await waitFor(() => simBodies(hud).length === 4);
+    await waitFor(() => simBodies(hud).length === 5);
     expect(simBodies(hud)).toEqual([
       { mode: 'manual' },
       { gear: 3 },
       { phone: { kind: 'incoming-call', name: 'Maria Lopez' } },
+      { phone: { kind: 'traffic-jam' } },
       { dtcs: ['P0420'] },
     ]);
     await waitFor(
       () => byText(root, 'button.dchip', 'P0420')?.getAttribute('aria-pressed') === 'true',
     );
     await click(byText(root, 'button.dchip', 'P0420')!);
-    await waitFor(() => simBodies(hud).length === 5);
-    expect(simBodies(hud)[4]).toEqual({ dtcs: [] });
+    await waitFor(() => simBodies(hud).length === 6);
+    expect(simBodies(hud)[5]).toEqual({ dtcs: [] });
 
     const custom = root.querySelector<HTMLInputElement>('input[aria-label="Custom trouble code"]')!;
     await type(custom, 'x9');
@@ -118,8 +120,8 @@ describe('dev console', () => {
     await act(async () => {
       custom.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });
-    await waitFor(() => simBodies(hud).length === 6);
-    expect(simBodies(hud)[5]).toEqual({ dtcs: ['P0301'] });
+    await waitFor(() => simBodies(hud).length === 7);
+    expect(simBodies(hud)[6]).toEqual({ dtcs: ['P0301'] });
   });
 
   it('sends overrides, ADAS and tyre pressures', async () => {

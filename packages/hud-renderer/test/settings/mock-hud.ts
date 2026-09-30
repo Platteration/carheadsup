@@ -3,6 +3,7 @@ import { lookupDtc } from '@carheadsup/core/dtc';
 import type {
   ApiDiagnostics,
   ApiInfo,
+  ApiTlsInfo,
   DeepPartial,
   HudConfig,
   MaintenanceItemStatus,
@@ -218,6 +219,11 @@ export class MockHud {
   readonly options: MockHudOptions;
   /** When set, every request fails as a network error (fetch rejects). */
   offline = false;
+  /** The phone link's TLS listener as `/api/info` reports it. */
+  tls: ApiTlsInfo | null = {
+    port: 8443,
+    fingerprint: 'fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531',
+  };
 
   constructor(options: MockHudOptions = {}) {
     this.options = options;
@@ -232,6 +238,7 @@ export class MockHud {
       uptimeS: 7 * 3600 + 23 * 60,
       obd: this.diagnostics.link,
       phoneConnected: true,
+      tls: this.tls,
     };
   }
 

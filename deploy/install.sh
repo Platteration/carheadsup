@@ -220,6 +220,22 @@ install_code() {
   rm -rf -- "$old"
 }
 
+# The unit's effective ExecStart line: a drop-in resets ExecStart with an empty
+# assignment and then sets it again, so the last non-empty one wins. Continuation lines are
+# joined first.
+#
+#   exec_start_line <unit files, concatenated>
+exec_start_line() {
+  local unit_text=$1 exec_line="" line
+  unit_text=${unit_text//$'\\\n'/ }
+  while IFS= read -r line; do
+    if [[ $line =~ ^[[:space:]]*ExecStart=(.+)$ ]]; then
+      exec_line=${BASH_REMATCH[1]}
+    fi
+  done <<<"$unit_text"
+  printf '%s' "$exec_line"
+}
+
 # The port the server will listen on, resolved the way the server does it: `--port` on the
 # unit's ExecStart (a drop-in may add it), else CARHEADSUP_PORT from the environment file, else
 # server.port in the config file the unit passes with `--config` (the read-only-root recipe
@@ -228,18 +244,10 @@ install_code() {
 #   effective_port <unit files, concatenated> <environment file> <default config file>
 effective_port() {
   local unit_text=$1 env_file=$2 config=$3
-  local exec_line="" flag_port="" env_port="" line
+  local flag_port="" env_port="" line
 
-  # A drop-in resets ExecStart with an empty assignment and then sets it again: the last
-  # non-empty one wins. Join continuation lines first.
-  unit_text=${unit_text//$'\\\n'/ }
-  while IFS= read -r line; do
-    if [[ $line =~ ^[[:space:]]*ExecStart=(.+)$ ]]; then
-      exec_line=${BASH_REMATCH[1]}
-    fi
-  done <<<"$unit_text"
   local -a words=()
-  read -r -a words <<<"$exec_line"
+  read -r -a words <<<"$(exec_start_line "$unit_text")"
   local i
   for ((i = 0; i < ${#words[@]}; i++)); do
     case ${words[i]} in
@@ -277,11 +285,90 @@ effective_port() {
   ' "$config"
 }
 
+# The TLS port of the phone link, resolved the same way: `--tls-port` on the unit's ExecStart,
+# else CARHEADSUP_TLS_PORT, else server.tlsPort in the config file, else 8443 (8444 for a config
+# from before TLS whose server.port is 8443, as the server's parseConfig does it) — or "off" when
+# the TLS listener is switched off (`--tls-port off`, or "tlsPort": null). Used for the static
+# Avahi advertisement (TXT tls, which the companion app connects to) and the summary.
+#
+#   effective_tls_port <unit files, concatenated> <environment file> <default config file>
+effective_tls_port() {
+  local unit_text=$1 env_file=$2 config=$3
+  local flag_port="" env_port="" line
+
+  local -a words=()
+  read -r -a words <<<"$(exec_start_line "$unit_text")"
+  local i
+  for ((i = 0; i < ${#words[@]}; i++)); do
+    case ${words[i]} in
+      --tls-port) flag_port=${words[i + 1]:-} ;;
+      --tls-port=*) flag_port=${words[i]#*=} ;;
+      --config) config=${words[i + 1]:-$config} ;;
+      --config=*) config=${words[i]#*=} ;;
+    esac
+  done
+
+  if [[ -r $env_file ]]; then
+    while IFS= read -r line; do
+      if [[ $line =~ ^[[:space:]]*CARHEADSUP_TLS_PORT=[\"\']?([A-Za-z0-9]+)[\"\']?[[:space:]]*$ ]]; then
+        env_port=${BASH_REMATCH[1]}
+      fi
+    done <"$env_file"
+  fi
+
+  local candidate
+  for candidate in "$flag_port" "$env_port"; do
+    case ${candidate,,} in
+      off | none | false | no)
+        printf 'off'
+        return
+        ;;
+    esac
+    # 0 means "any free port", which cannot be advertised statically.
+    if [[ $candidate =~ ^[0-9]{1,5}$ ]] && ((10#$candidate >= 1 && 10#$candidate <= 65535)); then
+      printf '%d' "$((10#$candidate))"
+      return
+    fi
+  done
+  "$NODE_BIN" -e '
+    let port = "8443";
+    try {
+      const config = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+      const value = config?.server?.tlsPort;
+      if (value === null) port = "off";
+      else if (Number.isInteger(value) && value > 0 && value < 65536) port = String(value);
+      else if (value === undefined && config?.server?.port === 8443) port = "8444";
+    } catch {}
+    process.stdout.write(port);
+  ' "$config"
+}
+
 # effective_port for the installed unit, its drop-ins and /etc/default/carheadsup.
 config_port() {
   local unit_text
   unit_text=$(cat -- "${UNIT_DIR}/carheadsup.service" "${UNIT_DIR}/carheadsup.service.d/"*.conf 2>/dev/null || true)
   effective_port "$unit_text" "$ENV_FILE" "$CONFIG_FILE"
+}
+
+# effective_tls_port for the installed unit, its drop-ins and /etc/default/carheadsup.
+config_tls_port() {
+  local unit_text
+  unit_text=$(cat -- "${UNIT_DIR}/carheadsup.service" "${UNIT_DIR}/carheadsup.service.d/"*.conf 2>/dev/null || true)
+  effective_tls_port "$unit_text" "$ENV_FILE" "$CONFIG_FILE"
+}
+
+# The static Avahi service file (on stdin) for the given ports: the service's port, and the TXT
+# record tls with the phone link's port — left out when TLS is off.
+#
+#   static_avahi_service <port> <TLS port or "off">
+static_avahi_service() {
+  local port=$1 tls_port=$2
+  if [[ $tls_port == off ]]; then
+    sed -e "s#<port>8080</port>#<port>${port}</port>#" -e '/<txt-record>tls=8443<\/txt-record>/d'
+  else
+    sed -e "s#<port>8080</port>#<port>${port}</port>#" \
+      -e "s#<txt-record>tls=8443</txt-record>#<txt-record>tls=${tls_port}</txt-record>#"
+  fi
 }
 
 install_system_files() {
@@ -309,8 +396,8 @@ install_system_files() {
       log "removed ${AVAHI_SERVICE} (the server advertises itself through avahi-utils)"
     fi
   elif [[ -d $AVAHI_DIR ]]; then
-    sed "s#<port>8080</port>#<port>$(config_port)</port>#" \
-      "${PREFIX}/deploy/avahi/carheadsup.service" >"$tmp"
+    static_avahi_service "$(config_port)" "$(config_tls_port)" \
+      <"${PREFIX}/deploy/avahi/carheadsup.service" >"$tmp"
     install -m 0644 "$tmp" "$AVAHI_SERVICE"
     log "installed the static mDNS advertisement ${AVAHI_SERVICE}"
   else
@@ -381,17 +468,24 @@ report_missing_tools() {
 }
 
 summary() {
-  local host port
+  local host port tls_port phone
   host=$(hostname 2>/dev/null || echo raspberrypi)
   port=$(config_port)
+  tls_port=$(config_tls_port)
+  if [[ $tls_port == off ]]; then
+    phone="off: server.tlsPort is null, so the companion app cannot connect"
+  else
+    phone="TLS port ${tls_port} (open it in any firewall); the certificate's fingerprint is in the settings app under Phone"
+  fi
   cat <<EOF
 
 carheadsup is installed.
   code     ${PREFIX}
   config   ${CONFIG_FILE}   (created with defaults on the first start)
-  data     ${DATA_DIR}
+  data     ${DATA_DIR}   (tls.pem: the HUD's TLS key and certificate, made on the first start)
   logs     journalctl -u carheadsup -f     (kiosk: journalctl -u carheadsup-kiosk -f)
   settings http://${host}.local:${port}/settings   (or http://<HUD address>:${port}/settings)
+  phone    ${phone}
 EOF
   if ((!opt_start)); then
     printf '\nServices are enabled but not started (--no-start): sudo systemctl start carheadsup\n'

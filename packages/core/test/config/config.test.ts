@@ -123,6 +123,7 @@ describe('DEFAULT_CONFIG', () => {
       highwayNavRevealM: 2000,
       laneRevealM: 800,
       hazardRevealM: 1000,
+      trafficRevealM: 3000,
       maxAlerts: 2,
     });
     expect(c.shiftLight).toEqual({
@@ -174,11 +175,77 @@ describe('DEFAULT_CONFIG', () => {
     });
     expect(c.server).toEqual({
       port: 8080,
+      tlsPort: 8443,
+      allowPlainPhone: false,
       host: '0.0.0.0',
       apiToken: '',
       mdns: true,
       frameRate: 15,
     });
+  });
+
+  it('keeps the phone on TLS: its own port, and no plain phone link unless asked for', () => {
+    expect(mergeConfig(DEFAULT_CONFIG, { server: { tlsPort: null } }).config.server.tlsPort).toBe(
+      null,
+    );
+    expect(
+      mergeConfig(DEFAULT_CONFIG, { server: { tlsPort: 9443, allowPlainPhone: true } }),
+    ).toMatchObject({
+      config: { server: { tlsPort: 9443, allowPlainPhone: true } },
+      errors: [],
+    });
+    const same = mergeConfig(DEFAULT_CONFIG, { server: { tlsPort: 8080 } });
+    expect(same.config.server.tlsPort).toBe(8443);
+    expect(same.errors).toEqual([
+      'server.tlsPort: the TLS port must differ from the HTTP port (8080)',
+    ]);
+    for (const bad of [0, 65_536, 443.5, '8443']) {
+      const result = mergeConfig(DEFAULT_CONFIG, { server: { tlsPort: bad as number } });
+      expect(result.config.server.tlsPort).toBe(8443);
+      expect(result.errors).toHaveLength(1);
+    }
+    const flag = mergeConfig(DEFAULT_CONFIG, { server: { allowPlainPhone: 'yes' as never } });
+    expect(flag.config.server.allowPlainPhone).toBe(false);
+    expect(flag.errors).toHaveLength(1);
+  });
+
+  it('keeps the HTTP port of a config from before TLS that used the new TLS port', () => {
+    // Written before server.tlsPort existed: 8443 was the driver's HTTP port.
+    const legacy = { server: { port: 8443, host: '0.0.0.0' } };
+    const upgraded = parseConfig(legacy);
+    expect(upgraded.errors).toEqual([]);
+    expect(upgraded.config.server).toMatchObject({ port: 8443, tlsPort: 8444 });
+    expect(legacy.server).toEqual({ port: 8443, host: '0.0.0.0' });
+    // At the top of the range the TLS port moves down; against a base, from the base's port.
+    expect(
+      parseConfig(
+        { server: { port: 65_535 } },
+        {
+          ...DEFAULT_CONFIG,
+          server: { ...DEFAULT_CONFIG.server, port: 8080, tlsPort: 65_535 },
+        },
+      ).config.server,
+    ).toMatchObject({ port: 65_535, tlsPort: 65_534 });
+    // Any other old config simply takes the default; an explicit clash is still an error.
+    expect(parseConfig({ server: { port: 8090 } }).config.server).toMatchObject({
+      port: 8090,
+      tlsPort: 8443,
+    });
+    const clash = parseConfig({ server: { port: 8443, tlsPort: 8443 } });
+    expect(clash.config.server).toMatchObject({ port: 8080, tlsPort: 8443 });
+    expect(clash.errors).toEqual([
+      'server.port: the TLS port must differ from the HTTP port (8443)',
+    ]);
+    // With TLS off in the base there is nothing to move.
+    expect(
+      parseConfig(
+        { server: { port: 8443 } },
+        {
+          ...DEFAULT_CONFIG,
+          server: { ...DEFAULT_CONFIG.server, tlsPort: null },
+        },
+      ).config.server,
+    ).toMatchObject({ port: 8443, tlsPort: null });
   });
 
   it('ships a maintenance schedule led by oil changes', () => {

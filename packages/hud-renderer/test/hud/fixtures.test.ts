@@ -155,7 +155,7 @@ const EXPECT: Record<string, { text?: string[]; markup?: string[]; absent?: stri
     markup: ['hud-sign--mutcd'],
   },
   'speed-camera': { text: ['800', 'Speed camera', '120'], markup: ['data-hazard="speed-camera"'] },
-  'traffic-jam': { text: ['900', 'Traffic jam', '+7 min'] },
+  'traffic-jam': { text: ['2.4', 'km', 'Traffic jam', '+8 min'] },
   'autobahn-unlimited': {
     text: ['164'],
     markup: ['hud-sign--unlimited', 'aria-label="No speed limit"'],

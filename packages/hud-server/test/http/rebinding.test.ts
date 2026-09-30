@@ -1,7 +1,7 @@
 import { request } from 'node:http';
 import { hostname } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { TestSocket, answerChallenge, startTestServer } from '../helpers.ts';
+import { TestSocket, helloOn, startTestServer } from '../helpers.ts';
 import type { TestServer } from '../helpers.ts';
 
 /** DNS rebinding: a page on http://evil.example:<port> whose name now resolves to the HUD. */
@@ -63,10 +63,19 @@ describe('Host validation (DNS rebinding)', () => {
     expect(t.server.engine.config.vehicle.name).toBe('Golf');
   });
 
-  it('refuses WebSocket upgrades addressed to a foreign host name', async () => {
-    const t = (current = await startTestServer());
-    for (const path of ['/ws/phone', '/ws/hud']) {
-      const socket = new TestSocket(`${t.wsBase}${path}`, { headers: rebound(t) });
+  it('refuses WebSocket upgrades addressed to a foreign host name, over TLS as well', async () => {
+    const t = (current = await startTestServer({ config: { server: { allowPlainPhone: true } } }));
+    const secureRebound = {
+      host: `evil.example:${t.tlsPort}`,
+      origin: `https://evil.example:${t.tlsPort}`,
+    };
+    for (const [url, headers] of [
+      [`${t.wsBase}/ws/phone`, rebound(t)],
+      [`${t.wsBase}/ws/hud`, rebound(t)],
+      [`${t.phoneBase}/ws/phone`, secureRebound],
+      [`${t.phoneBase}/ws/hud`, secureRebound],
+    ] as const) {
+      const socket = new TestSocket(url, { headers });
       sockets.push(socket);
       await expect(socket.opened).rejects.toThrow(/403/);
     }
@@ -92,12 +101,12 @@ describe('Host validation (DNS rebinding)', () => {
       expect({ host, status: reply.status }).toEqual({ host, status: 200 });
     }
     // Upgrades with a matching Origin still work.
-    const phone = new TestSocket(`${t.wsBase}/ws/phone`, {
-      headers: { host: `localhost:${t.port}`, origin: `http://localhost:${t.port}` },
+    const phone = new TestSocket(`${t.phoneBase}/ws/phone`, {
+      headers: { host: `localhost:${t.tlsPort}`, origin: `https://localhost:${t.tlsPort}` },
     });
     sockets.push(phone);
     await phone.opened;
-    phone.send(answerChallenge(await phone.nextOfType('challenge'), { device: 'Pixel' }));
+    await helloOn(phone, { device: 'Pixel' });
     expect(await phone.nextOfType('welcome')).toMatchObject({ t: 'welcome' });
   });
 

@@ -19,7 +19,8 @@ screen black instead of showing the browser's error page.
 **Adaptive clutter.** What is shown depends on the driving context
 ([details](architecture.md#driving-contexts-and-adaptive-clutter)): the highway view shows the
 least; navigation appears on the highway only within 2 km of the next maneuver, lane arrows
-within 800 m, hazards within 1 km; health readouts (coolant, voltage, tyres) appear only when
+within 800 m, hazards within 1 km (traffic jams and other traffic hazards on the highway within
+3 km, where the end of a queue needs the earlier warning); health readouts (coolant, voltage, tyres) appear only when
 something is wrong. The detailed diagnostics dashboard appears only when parked, never while the
 car is known to be moving, and a brief OBD dropout at speed does not bring it up (the moving
 context is held for 30 s).
@@ -58,6 +59,11 @@ the engine off.
   module reports; the HUD detects nothing. Never rely on it instead of mirrors and your own eyes.
 - **Speed limits and cameras may be wrong or missing.** They come from OpenStreetMap via the phone,
   and only while the phone is connected. Road signs always take precedence.
+- **Traffic information may be late, wrong or missing.** Jams, accidents and closures come from
+  TomTom via the phone, only if the driver turned that on with an own API key, and only while the
+  phone has mobile data; the phone asks every couple of minutes, so a fresh accident can be
+  missing. The phone does not know the route: it reports incidents ahead in the direction of
+  travel, including on a road the route is about to leave, and misses those round a sharp turn.
 - **The displayed speed is the car's OBD speed**, which can differ from the speedometer (cars'
   speedometers usually read a little high).
 - **Navigation depends on Google Maps' notification**, which can change without notice.
@@ -97,7 +103,9 @@ that apply to you before installing or using the HUD.
   device can drain the battery ([hardware.md](hardware.md#power)).
 - **Privacy.** Trips, positions derived from them and the configuration stay on the HUD and the
   phone. The phone contacts OpenStreetMap's Overpass service with the area around the car to look
-  up speed limits and cameras; nothing else leaves the car.
+  up speed limits and cameras, and — only if the driver turns traffic on — TomTom with the area
+  around and ahead of the car and the driver's API key, which tells TomTom where the car is
+  driving; nothing else leaves the car.
 
 ## Disclaimer
 

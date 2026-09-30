@@ -212,6 +212,7 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
     highwayNavRevealM: 2000,
     laneRevealM: 800,
     hazardRevealM: 1000,
+    trafficRevealM: 3000,
     maxAlerts: 2,
   },
   shiftLight: {
@@ -268,6 +269,8 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
   },
   server: {
     port: 8080,
+    tlsPort: 8443,
+    allowPlainPhone: false,
     host: '0.0.0.0',
     apiToken: '',
     mdns: true,
@@ -293,6 +296,8 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
  *    `base` value restores the rule is reverted and named in the error (typically the one the
  *    user changed); if no single field suffices, all involved fields revert together.
  *  - If `base` is itself invalid, its bad fields are first repaired from DEFAULT_CONFIG.
+ *  - A config from before `server.tlsPort` whose HTTP port is the TLS port it would get keeps
+ *    its HTTP port; the TLS port moves to the next port (see {@link withLegacyTlsPort}).
  *
  * The returned config is a fresh, mutable object sharing no references with `input` or `base`.
  */
@@ -300,7 +305,24 @@ export function parseConfig(
   input: unknown,
   base?: HudConfig,
 ): { config: HudConfig; errors: string[] } {
-  return parseAgainst(input, validBase(base));
+  const fallback = validBase(base);
+  return parseAgainst(withLegacyTlsPort(input, fallback), fallback);
+}
+
+/**
+ * A config written before `server.tlsPort` existed has no such key and takes the fallback's TLS
+ * port. If its HTTP port is that very port (a legitimate choice back then), the rule that the two
+ * differ would reset the HTTP port the driver chose — and with it the kiosk's and the browsers'
+ * address. Instead the TLS port moves to the next port up (down at 65535). `input` is not changed.
+ */
+function withLegacyTlsPort(input: unknown, fallback: HudConfig): unknown {
+  if (!isPlainObject(input)) return input;
+  const server = input['server'];
+  if (!isPlainObject(server) || Object.hasOwn(server, 'tlsPort')) return input;
+  const tlsPort = fallback.server.tlsPort;
+  if (tlsPort === null || server['port'] !== tlsPort) return input;
+  const moved = tlsPort < 65_535 ? tlsPort + 1 : tlsPort - 1;
+  return { ...input, server: { ...server, tlsPort: moved } };
 }
 
 /**

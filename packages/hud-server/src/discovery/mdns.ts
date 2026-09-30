@@ -2,10 +2,13 @@
  * mDNS / DNS-SD advertisement through Avahi's `avahi-publish-service` (package avahi-utils):
  *
  *   avahi-publish-service -s "<vehicle name> HUD" _carheadsup._tcp <port> v=<protocol> \
- *     path=/ws/phone id=<HUD id>
+ *     path=/ws/phone id=<HUD id> tls=<TLS port> fp=<certificate SHA-256>
  *
  * The `id` lets a phone that has pinned this HUD skip other HUDs without connecting to them (it
- * checks the id again in the `challenge`; the static service file cannot know it).
+ * checks the id again in the `challenge`; the static service file cannot know it). `tls` is the
+ * port the phone connects to (`wss://`); `fp` the fingerprint of the certificate it will see
+ * there, which a phone pairing for the first time requires the TLS handshake to match. Neither
+ * is a proof: the certificate pin and the handshake's proofs decide.
  *
  * The tool keeps the record registered for as long as it runs, so it is supervised and restarted
  * with backoff if it exits (e.g. avahi-daemon restarting). Without avahi-utils the HUD logs a
@@ -49,8 +52,16 @@ export function mdnsInstanceName(vehicleName: string): string {
   return name;
 }
 
+/** What the advertisement says about this HUD besides the config. */
+export interface MdnsAdvert {
+  /** The HUD's identity (TXT `id`). */
+  hudId: string;
+  /** The TLS listener and its certificate fingerprint (TXT `tls`, `fp`); null without TLS. */
+  tls: { port: number; fingerprint: string } | null;
+}
+
 /** Arguments for avahi-publish-service. */
-export function avahiPublishArgs(config: HudConfig, hudId: string): string[] {
+export function avahiPublishArgs(config: HudConfig, advert: MdnsAdvert): string[] {
   return [
     '-s',
     mdnsInstanceName(config.vehicle.name),
@@ -58,7 +69,8 @@ export function avahiPublishArgs(config: HudConfig, hudId: string): string[] {
     String(config.server.port),
     `v=${PROTOCOL_VERSION}`,
     `path=${MDNS_PHONE_PATH}`,
-    `id=${hudId}`,
+    `id=${advert.hudId}`,
+    ...(advert.tls === null ? [] : [`tls=${advert.tls.port}`, `fp=${advert.tls.fingerprint}`]),
   ];
 }
 
@@ -73,12 +85,12 @@ let missingLogged = false;
 
 /**
  * Advertise the HUD as `_carheadsup._tcp` (TXT: v=<protocol version>, path=/ws/phone,
- * id=<HUD id>) so the companion app can find it. Returns null when advertising is disabled or
- * unavailable.
+ * id=<HUD id>, and with TLS tls=<port>, fp=<certificate fingerprint>) so the companion app can
+ * find it. Returns null when advertising is disabled or unavailable.
  */
 export function advertiseHud(
   config: HudConfig,
-  hudId: string,
+  advert: MdnsAdvert,
   deps: RuntimeDeps,
   io: MdnsIo = {},
 ): Service | null {
@@ -94,7 +106,7 @@ export function advertiseHud(
     logMissing();
     return null;
   }
-  const args = avahiPublishArgs(config, hudId);
+  const args = avahiPublishArgs(config, advert);
   const supervisor = new ProcessSupervisor({
     label: 'mDNS',
     command: AVAHI_PUBLISH,
@@ -110,7 +122,10 @@ export function advertiseHud(
     onMissing: logMissing,
   });
   logger.info(
-    `mDNS: advertising "${args[1]}" as ${MDNS_SERVICE_TYPE} on port ${config.server.port}`,
+    `mDNS: advertising "${args[1]}" as ${MDNS_SERVICE_TYPE} on port ${config.server.port}` +
+      (advert.tls === null
+        ? ' (no TLS port: the phone cannot connect)'
+        : ` (TLS port ${advert.tls.port})`),
   );
   supervisor.start();
   return {

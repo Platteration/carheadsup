@@ -662,20 +662,23 @@ export const SAMPLE_FRAMES: Record<string, HudFrame> = {
     ],
   }),
 
-  /** Traffic slowdown ahead with the expected delay. */
+  /**
+   * A traffic jam ahead on the highway (the companion's TomTom look-up) with the expected delay,
+   * shown from 3 km (`display.trafficRevealM`).
+   */
   'traffic-jam': frame({
     context: 'highway',
     widgets: [
-      speed(96),
+      speed(118),
       limit(120),
       {
         id: 'hazard',
         zone: 'top-right',
         type: 'traffic-jam',
-        distance: distance(900, 'm'),
+        distance: distance(2.4, 'km'),
         speedLimit: null,
         limitStyle: 'vienna',
-        delayMinutes: 7,
+        delayMinutes: 8,
         label: 'Traffic jam',
       },
     ],

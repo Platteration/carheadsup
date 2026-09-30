@@ -19,6 +19,8 @@ import dev.carheadsup.companion.hud.LinkStatus
 import dev.carheadsup.companion.location.LocationFeed
 import dev.carheadsup.companion.media.MediaMonitor
 import dev.carheadsup.companion.road.RoadInfoProvider
+import dev.carheadsup.companion.traffic.TrafficProvider
+import dev.carheadsup.protocol.traffic.TomTomTraffic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,8 +34,8 @@ import kotlinx.coroutines.launch
 
 /**
  * Foreground service (types `connectedDevice` + `location`) that keeps the HUD link, GPS, media,
- * call and road monitoring alive while driving. Started from the app; the notification offers
- * "Stop". Sticky, so the system restarts it after killing the process.
+ * call, road and traffic monitoring alive while driving. Started from the app; the notification
+ * offers "Stop". Sticky, so the system restarts it after killing the process.
  */
 class HudConnectionService : Service() {
     private lateinit var graph: AppGraph
@@ -41,6 +43,7 @@ class HudConnectionService : Service() {
     private var media: MediaMonitor? = null
     private var locationFeed: LocationFeed? = null
     private var road: RoadInfoProvider? = null
+    private var traffic: TrafficProvider? = null
     private var hasLocationType = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -70,7 +73,7 @@ class HudConnectionService : Service() {
         }
         scope.launch {
             graph.settings
-                .map { it.shareLocation to it.osmLookups }
+                .map { listOf(it.shareLocation, it.osmLookups, it.trafficEnabled, it.trafficApiKey) }
                 .distinctUntilChanged()
                 .collect { refreshMonitors() }
         }
@@ -99,7 +102,10 @@ class HudConnectionService : Service() {
         media?.stop()
         locationFeed?.stop()
         road?.stop()
+        traffic?.stop()
+        traffic = null
         if (::graph.isInitialized) {
+            graph.trafficStatus.value = graph.idleTrafficStatus()
             graph.calls.stop()
             graph.link.stop()
             graph.releaseMessageReader()
@@ -114,7 +120,9 @@ class HudConnectionService : Service() {
         media?.start()
 
         val settings = graph.settings.value
-        val wantLocation = settings.shareLocation || settings.osmLookups
+        val trafficKey = settings.trafficApiKey.trim()
+        val wantTraffic = settings.trafficEnabled && TomTomTraffic.isPlausibleKey(trafficKey)
+        val wantLocation = settings.shareLocation || settings.osmLookups || wantTraffic
         if (settings.osmLookups && road == null) {
             road =
                 RoadInfoProvider(
@@ -123,12 +131,30 @@ class HudConnectionService : Service() {
                     cacheDir = cacheDir,
                     userAgent = "carheadsup-companion/${BuildConfig.VERSION_NAME}",
                     camerasEnabled = { graph.settings.value.cameraWarnings },
+                    hazards = graph.hazards,
                     publish = { graph.hub.publish(it) },
                 )
         } else if (!settings.osmLookups && road != null) {
             road?.stop()
             road = null
         }
+        // A new key starts afresh (a key the service refused stays refused until it changes).
+        if (wantTraffic && traffic?.apiKey != trafficKey) {
+            traffic?.stop()
+            traffic =
+                TrafficProvider(
+                    scope = graph.scope,
+                    client = graph.internetClient,
+                    apiKey = trafficKey,
+                    budgetStore = graph.trafficBudget,
+                    hazards = graph.hazards,
+                    onStatus = { graph.trafficStatus.value = it },
+                )
+        } else if (!wantTraffic && traffic != null) {
+            traffic?.stop()
+            traffic = null
+        }
+        if (traffic == null) graph.trafficStatus.value = graph.idleTrafficStatus()
         if (wantLocation && locationFeed == null && hasLocationType) {
             val feed = LocationFeed(this, ::onLocation)
             if (feed.start()) locationFeed = feed
@@ -142,6 +168,7 @@ class HudConnectionService : Service() {
         val settings = graph.settings.value
         if (settings.shareLocation) graph.hub.publish(LocationFeed.toPhoneLocation(location))
         if (settings.osmLookups) road?.onLocation(location)
+        traffic?.onLocation(location)
     }
 
     /**

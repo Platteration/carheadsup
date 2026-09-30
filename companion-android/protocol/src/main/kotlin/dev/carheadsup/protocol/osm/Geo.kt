@@ -27,6 +27,18 @@ public data class BoundingBox(val south: Double, val west: Double, val north: Do
     private fun fmt(v: Double): String = String.format(java.util.Locale.ROOT, "%.6f", v)
 }
 
+/** A point seen from a moving vehicle ([Geo.relative]). */
+public data class RelativePosition(
+    /** Straight-line distance, metres. */
+    val distanceM: Double,
+    /** Distance along the heading, metres; negative behind the vehicle. */
+    val alongM: Double,
+    /** Distance across the heading, metres; positive to the right. */
+    val acrossM: Double,
+    /** Angle between the heading and the direction to the point, 0–180°. */
+    val offAxisDeg: Double,
+)
+
 /** Spherical-earth geometry, accurate to well under a metre at the few-kilometre scale used here. */
 public object Geo {
     public const val EARTH_RADIUS_M: Double = 6_371_008.8
@@ -74,6 +86,22 @@ public object Geo {
         val phi2 = asin(sin(phi1) * cos(delta) + cos(phi1) * sin(delta) * cos(theta))
         val lambda2 = lambda1 + atan2(sin(theta) * sin(delta) * cos(phi1), cos(delta) - sin(phi1) * sin(phi2))
         return LatLon(deg(phi2), (deg(lambda2) + 540) % 360 - 180)
+    }
+
+    /**
+     * Where [target] lies seen from a vehicle at [from] heading [headingDeg]: the straight-line
+     * distance, its components along and across the heading, and the angle off the heading.
+     */
+    public fun relative(from: LatLon, headingDeg: Double, target: LatLon): RelativePosition {
+        val distance = distanceM(from, target)
+        val bearing = bearingDeg(from, target)
+        val theta = rad(bearing - headingDeg)
+        return RelativePosition(
+            distanceM = distance,
+            alongM = distance * cos(theta),
+            acrossM = distance * sin(theta),
+            offAxisDeg = angleDiffDeg(bearing, headingDeg),
+        )
     }
 
     /** A box around [center] extending [radiusM] in every direction. */

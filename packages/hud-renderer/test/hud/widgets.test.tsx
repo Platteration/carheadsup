@@ -307,6 +307,17 @@ describe('hazard', () => {
       label: 'Traffic jam',
     });
     expect(textOf(jam)).toBe('300 m Traffic jam +12 min');
+    const closure = render({
+      ...camera,
+      type: 'traffic-jam',
+      speedLimit: null,
+      delayMinutes: 95,
+      label: 'Traffic jam',
+    });
+    expect(textOf(closure)).toBe('300 m Traffic jam +95 min');
+    expect(
+      textOf(render({ ...camera, type: 'slowdown', delayMinutes: 180, label: 'Slowdown' })),
+    ).toContain('+3 h');
     const plain = render({ ...camera, type: 'accident', speedLimit: null, label: 'Accident' });
     expect(plain).not.toContain('hud-sign');
     expect(plain).toContain('data-glyph="accident"');

@@ -13,6 +13,8 @@ export interface CliOptions {
   port: number | undefined;
   /** Overrides `server.host` when set. */
   host: string | undefined;
+  /** Overrides `server.tlsPort` when set (null: no TLS listener). */
+  tlsPort: number | null | undefined;
   rendererDir: string | undefined;
   /** Backlight device directory; null = auto-detect; false = off. */
   backlight: string | null | false;
@@ -41,6 +43,8 @@ Options:
                          (default: $XDG_DATA_HOME/carheadsup or ~/.local/share/carheadsup;
                          with --sim: <that>/sim, so simulated drives never touch real records)
   --port <n>             HTTP/WebSocket port, overriding server.port (0 = any free port)
+  --tls-port <n|off>     HTTPS port of the phone link, overriding server.tlsPort
+                         (0 = any free port, off = no TLS listener)
   --host <addr>          Bind address, overriding server.host
   --renderer-dir <dir>   Built renderer to serve (default: packages/hud-renderer/dist)
   --backlight <dir|off>  Backlight device (e.g. /sys/class/backlight/rpi_backlight),
@@ -54,13 +58,15 @@ Options:
   -v, --version          Show the version
 
 Every option can also be set in the environment: CARHEADSUP_SIM=1, CARHEADSUP_CONFIG,
-CARHEADSUP_DATA_DIR, CARHEADSUP_PORT, CARHEADSUP_HOST, CARHEADSUP_RENDERER_DIR,
-CARHEADSUP_BACKLIGHT, CARHEADSUP_ALLOWED_HOSTS, CARHEADSUP_LOG_LEVEL. Command-line flags take
-precedence.
+CARHEADSUP_DATA_DIR, CARHEADSUP_PORT, CARHEADSUP_TLS_PORT, CARHEADSUP_HOST,
+CARHEADSUP_RENDERER_DIR, CARHEADSUP_BACKLIGHT, CARHEADSUP_ALLOWED_HOSTS, CARHEADSUP_LOG_LEVEL.
+Command-line flags take precedence.
 `;
 
 const TRUE_WORDS = new Set(['1', 'true', 'yes', 'on']);
 const FALSE_WORDS = new Set(['', '0', 'false', 'no', 'off']);
+/** `--tls-port` values that switch the TLS listener off (0 is "any free port"). */
+const TLS_OFF_WORDS = new Set(['off', 'none', 'false', 'no']);
 
 /** Default data directory (XDG base directory spec), with a separate subdirectory for --sim. */
 export function defaultDataDir(env: Env, home: string, sim: boolean): string {
@@ -116,6 +122,7 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
         config: { type: 'string' },
         'data-dir': { type: 'string' },
         port: { type: 'string' },
+        'tls-port': { type: 'string' },
         host: { type: 'string' },
         'renderer-dir': { type: 'string' },
         backlight: { type: 'string' },
@@ -154,6 +161,19 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
     port = parsed;
   }
 
+  let tlsPort: number | null | undefined;
+  const rawTlsPort = values['tls-port'] ?? nonEmpty(env['CARHEADSUP_TLS_PORT']);
+  if (rawTlsPort !== undefined) {
+    const source = values['tls-port'] !== undefined ? '--tls-port' : 'CARHEADSUP_TLS_PORT';
+    if (TLS_OFF_WORDS.has(rawTlsPort.trim().toLowerCase())) {
+      tlsPort = null;
+    } else {
+      const parsed = parsePort(rawTlsPort, source);
+      if (typeof parsed === 'string') return { kind: 'error', message: `${parsed} or "off"` };
+      tlsPort = parsed;
+    }
+  }
+
   const rawLevel = values['log-level'] ?? nonEmpty(env['CARHEADSUP_LOG_LEVEL']) ?? 'info';
   const level = rawLevel.trim().toLowerCase();
   if (!isLogLevel(level)) {
@@ -186,6 +206,7 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
       configPath: nonEmpty(values.config) ?? nonEmpty(env['CARHEADSUP_CONFIG']),
       dataDir,
       port,
+      tlsPort,
       host: host?.trim(),
       rendererDir: nonEmpty(values['renderer-dir']) ?? nonEmpty(env['CARHEADSUP_RENDERER_DIR']),
       backlight: rawBacklight === undefined ? null : parseBacklight(rawBacklight),
@@ -195,10 +216,15 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
   };
 }
 
-/** Browser URLs for a server bound to `host:port` (all interfaces → localhost plus LAN IPs). */
-export function serverUrls(host: string, port: number, lanAddresses: readonly string[]): string[] {
+/** URLs of a server bound to `host:port` (all interfaces → localhost plus LAN IPs). */
+export function serverUrls(
+  host: string,
+  port: number,
+  lanAddresses: readonly string[],
+  scheme = 'http',
+): string[] {
   const format = (address: string) =>
-    `http://${address.includes(':') ? `[${address}]` : address}:${port}`;
+    `${scheme}://${address.includes(':') ? `[${address}]` : address}:${port}`;
   if (host === '0.0.0.0' || host === '::' || host === '') {
     return [format('localhost'), ...lanAddresses.map(format)];
   }

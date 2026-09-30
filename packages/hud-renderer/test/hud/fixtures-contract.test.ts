@@ -518,6 +518,50 @@ describe('sample frames vs frames composed from the same readings', () => {
     expect(composed.widgets).toContainEqual(widget(fixture('speed-camera'), 'hazard'));
   });
 
+  it('traffic-jam: a jam 2.4 km ahead on the highway, with its delay, as composed', () => {
+    const config = testConfig();
+    const t0 = FIXTURE_TIME - 13_000;
+    let state = createInitialState(config, EMPTY_PERSISTED_STATE, t0);
+    state = reduce(state, { type: 'obd/link', state: 'connected', at: t0 }, config);
+    state = reduce(state, { type: 'phone/link', connected: true, at: t0 }, config);
+    for (let at = t0 + 500; at <= FIXTURE_TIME; at += 500) {
+      state = reduce(
+        state,
+        {
+          type: 'obd/samples',
+          samples: [
+            { signal: 'speed', value: 118 },
+            { signal: 'rpm', value: 2600 },
+          ],
+          at,
+        },
+        config,
+      );
+    }
+    state = reduce(
+      state,
+      {
+        type: 'hazards/update',
+        hazards: [
+          {
+            id: 'tomtom-4819f7d0a15db3d9b0c3cd9203be7ba5',
+            type: 'traffic-jam',
+            distanceM: 2400,
+            speedLimitKph: null,
+            delaySeconds: 470,
+            description: 'Stationary traffic',
+            updatedAt: FIXTURE_TIME,
+          },
+        ],
+        at: FIXTURE_TIME,
+      },
+      config,
+    );
+    const composed = composeFrame(state, config);
+    expect(composed.context).toBe('highway');
+    expect(composed.widgets).toContainEqual(widget(fixture('traffic-jam'), 'hazard'));
+  });
+
   it('engine-hot: coolant 121 °C while driving', () => {
     const config = testConfig();
     const state = drive(

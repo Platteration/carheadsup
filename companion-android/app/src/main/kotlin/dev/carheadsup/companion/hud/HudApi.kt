@@ -10,7 +10,6 @@ import dev.carheadsup.protocol.api.DisplayUnits
 import dev.carheadsup.protocol.api.MaintenanceItemStatus
 import dev.carheadsup.protocol.api.TripLog
 import dev.carheadsup.protocol.api.TripRecord
-import dev.carheadsup.protocol.link.HudEndpoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -33,13 +32,15 @@ import kotlin.coroutines.resumeWithException
 class HudApiException(message: String, val status: Int? = null, cause: Throwable? = null) : IOException(message, cause)
 
 /**
- * Client for the HUD's REST API (packages/core/src/types/api.ts). Requests go to the current
- * endpoint over the HUD's Wi-Fi and carry `Authorization: Bearer <apiToken>` when one is set;
- * [endpoint] only yields a HUD that has proven itself on the phone link.
+ * Client for the HUD's REST API (packages/core/src/types/api.ts). Requests go over HTTPS to the
+ * HUD that proved itself on the phone link ([trusted]), over its Wi-Fi, through a [client] that
+ * accepts exactly that HUD's certificate; they carry `Authorization: Bearer <apiToken>` when one
+ * is set.
  */
 class HudApi(
-    private val client: () -> OkHttpClient,
-    private val endpoint: () -> HudEndpoint?,
+    /** An HTTP client that trusts exactly the certificate with this fingerprint. */
+    private val client: (certFingerprint: String) -> OkHttpClient,
+    private val trusted: () -> TrustedHud?,
     private val apiToken: () -> String,
 ) {
     /** `GET /api/trips?limit=…` — newest first. Malformed entries are skipped. */
@@ -61,33 +62,35 @@ class HudApi(
             ApiInputRequest.serializer(),
             ApiInputRequest(action),
         ).toRequestBody(JSON)
-        execute(request("/api/input").post(body).build())
+        execute("/api/input") { it.post(body) }
     }
 
     /** `DELETE /api/trips/:id`. */
     suspend fun deleteTrip(id: String) {
-        execute(request("/api/trips/" + URLEncoder.encode(id, "UTF-8")).delete().build())
+        execute("/api/trips/" + URLEncoder.encode(id, "UTF-8")) { it.delete() }
     }
 
-    private suspend fun get(path: String): String = execute(request(path).get().build())
+    private suspend fun get(path: String): String = execute(path) { it.get() }
 
-    private fun request(path: String): Request.Builder {
-        val target = endpoint() ?: throw HudApiException("Not connected to your HUD yet (it must prove itself first)")
-        val builder = Request.Builder().url(target.apiUrl(path)).header("Accept", "application/json")
+    /**
+     * Sends [path] (with the method [method] sets) to the trusted HUD and reads the body on the
+     * IO dispatcher (safe to call from the main thread).
+     */
+    private suspend fun execute(path: String, method: (Request.Builder) -> Request.Builder): String {
+        val target = trusted() ?: throw HudApiException("Not connected to your HUD yet (it must prove itself first)")
+        val builder = Request.Builder().url(target.endpoint.apiUrl(path)).header("Accept", "application/json")
         val token = apiToken().trim()
         if (token.isNotEmpty()) builder.header("Authorization", "Bearer $token")
-        return builder
-    }
-
-    /** Runs [request] and reads the body on the IO dispatcher (safe to call from the main thread). */
-    private suspend fun execute(request: Request): String = withContext(Dispatchers.IO) {
-        val response =
-            try {
-                client().newCall(request).await()
-            } catch (e: IOException) {
-                throw HudApiException(e.message ?: "HUD unreachable", cause = e)
-            }
-        readBody(response)
+        val request = method(builder).build()
+        return withContext(Dispatchers.IO) {
+            val response =
+                try {
+                    client(target.certFingerprint).newCall(request).await()
+                } catch (e: IOException) {
+                    throw HudApiException(e.message ?: "HUD unreachable", cause = e)
+                }
+            readBody(response)
+        }
     }
 
     private fun readBody(response: Response): String = response.use {

@@ -11,5 +11,9 @@ export {
   BOOST_GAUGE_MIN_KPA,
   NAV_APPROACH_M,
   NAV_IMMINENT_M,
+  TRAFFIC_HAZARD_TYPES,
+  delayMinutes,
   hazardLabel,
+  hazardRevealDistanceM,
+  isTrafficHazard,
 } from './widgets.ts';

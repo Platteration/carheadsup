@@ -128,6 +128,10 @@ describe('parseSimControl', () => {
       ok: true,
       value: { tirePressuresKpa: null, phone: { kind: 'nav-start' } },
     });
+    expect(parseSimControl({ phone: { kind: 'traffic-jam' } })).toEqual({
+      ok: true,
+      value: { phone: { kind: 'traffic-jam' } },
+    });
   });
 
   it.each([

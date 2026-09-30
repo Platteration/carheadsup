@@ -3,6 +3,7 @@ package dev.carheadsup.companion.data
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.HudPin
 import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.link.HudEndpoint
@@ -35,11 +36,19 @@ data class CompanionSettings(
      * warnings while driving is illegal in some countries (e.g. Germany, Switzerland).
      */
     val cameraWarnings: Boolean = false,
+    /**
+     * Traffic incidents ahead from TomTom. Off unless the driver turns it on: it sends the car's
+     * whereabouts to TomTom and needs the driver's own API key ([trafficApiKey]).
+     */
+    val trafficEnabled: Boolean = false,
+    /** The driver's TomTom API key (a secret like the tokens: app-private, never backed up). */
+    val trafficApiKey: String = "",
     /** The user wants the HUD connection service running (restored after app restarts). */
     val serviceEnabled: Boolean = false,
     /**
-     * The HUD this phone is paired with: pinned at the first verified connection with a pairing
-     * token (or confirmed by the user for a HUD without one). Only applies with that token.
+     * The HUD this phone is paired with — its id and TLS certificate: pinned at the first
+     * verified connection with a pairing token (or confirmed by the user for a HUD without one).
+     * Only applies with that token.
      */
     val hudPin: HudPin? = null,
 ) {
@@ -53,11 +62,17 @@ data class CompanionSettings(
 }
 
 /**
- * Settings persisted in private SharedPreferences and exposed as a [StateFlow]. Tokens are
- * stored in app-private storage (not backed up: `allowBackup` is off).
+ * Settings persisted in private SharedPreferences and exposed as a [StateFlow]. Tokens and the
+ * TomTom API key are stored in app-private storage (not backed up: `allowBackup` is off and the
+ * backup rules exclude everything).
  */
 class SettingsStore(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    init {
+        upgradeFromPlainLink()
+    }
+
     private val state = MutableStateFlow(read())
 
     val settings: StateFlow<CompanionSettings> = state.asStateFlow()
@@ -87,15 +102,34 @@ class SettingsStore(context: Context) {
             shareLocation = prefs.getBoolean(KEY_LOCATION, defaults.shareLocation),
             osmLookups = prefs.getBoolean(KEY_OSM, defaults.osmLookups),
             cameraWarnings = prefs.getBoolean(KEY_CAMERAS, defaults.cameraWarnings),
+            trafficEnabled = prefs.getBoolean(KEY_TRAFFIC, defaults.trafficEnabled),
+            trafficApiKey = prefs.getString(KEY_TRAFFIC_KEY, defaults.trafficApiKey).orEmpty(),
             serviceEnabled = prefs.getBoolean(KEY_SERVICE, defaults.serviceEnabled),
             hudPin = readPin(),
         )
     }
 
+    /**
+     * Settings saved by an app from before the TLS link (no [KEY_LINK_VERSION] yet): a manual
+     * address on the HUD's default plain port now names its TLS port
+     * ([HudEndpoint.upgradeLegacyAddress]). Runs once.
+     */
+    private fun upgradeFromPlainLink() {
+        if (prefs.getInt(KEY_LINK_VERSION, 0) >= LINK_VERSION_TLS) return
+        val address = prefs.getString(KEY_ADDRESS, null)
+        val upgraded = address?.let(HudEndpoint::upgradeLegacyAddress)
+        prefs.edit {
+            if (upgraded != null && upgraded != address) putString(KEY_ADDRESS, upgraded)
+            putInt(KEY_LINK_VERSION, LINK_VERSION_TLS)
+        }
+    }
+
     private fun readPin(): HudPin? {
         val hudId = prefs.getString(KEY_PIN_HUD_ID, null)?.takeIf(PhoneAuth::isValidId) ?: return null
         val fingerprint = prefs.getString(KEY_PIN_TOKEN, null)?.takeIf { it.isNotEmpty() } ?: return null
-        return HudPin(hudId, fingerprint)
+        // Pins made before TLS have no certificate: the next verified connection adds it.
+        val certificate = prefs.getString(KEY_PIN_CERTIFICATE, null)?.takeIf(CertFingerprint::isValid)
+        return HudPin(hudId, fingerprint, certificate)
     }
 
     private fun write(settings: CompanionSettings) {
@@ -108,9 +142,12 @@ class SettingsStore(context: Context) {
             putBoolean(KEY_LOCATION, settings.shareLocation)
             putBoolean(KEY_OSM, settings.osmLookups)
             putBoolean(KEY_CAMERAS, settings.cameraWarnings)
+            putBoolean(KEY_TRAFFIC, settings.trafficEnabled)
+            putString(KEY_TRAFFIC_KEY, settings.trafficApiKey)
             putBoolean(KEY_SERVICE, settings.serviceEnabled)
             putString(KEY_PIN_HUD_ID, settings.hudPin?.hudId)
             putString(KEY_PIN_TOKEN, settings.hudPin?.tokenFingerprint)
+            putString(KEY_PIN_CERTIFICATE, settings.hudPin?.certFingerprint)
         }
     }
 
@@ -124,9 +161,16 @@ class SettingsStore(context: Context) {
         const val KEY_LOCATION = "share_location"
         const val KEY_OSM = "osm_lookups"
         const val KEY_CAMERAS = "camera_warnings"
+        const val KEY_TRAFFIC = "traffic_enabled"
+        const val KEY_TRAFFIC_KEY = "tomtom_api_key"
         const val KEY_SERVICE = "service_enabled"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_PIN_HUD_ID = "paired_hud_id"
         const val KEY_PIN_TOKEN = "paired_token_fingerprint"
+        const val KEY_PIN_CERTIFICATE = "paired_certificate_fingerprint"
+
+        /** The phone-link generation the saved settings are for (absent: before TLS). */
+        const val KEY_LINK_VERSION = "link_version"
+        const val LINK_VERSION_TLS = 3
     }
 }

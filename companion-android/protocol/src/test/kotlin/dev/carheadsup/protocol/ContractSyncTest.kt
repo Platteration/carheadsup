@@ -1,8 +1,13 @@
 package dev.carheadsup.protocol
 
 import dev.carheadsup.protocol.auth.AuthVector
+import dev.carheadsup.protocol.auth.CertFingerprint
+import dev.carheadsup.protocol.auth.CertificateVector
 import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.auth.SHARED_AUTH_VECTORS
+import dev.carheadsup.protocol.auth.SHARED_CERTIFICATE_VECTORS
+import dev.carheadsup.protocol.link.HudAdvertisement
+import dev.carheadsup.protocol.link.HudEndpoint
 import dev.carheadsup.protocol.link.PhoneCloseCode
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.descriptors.elementNames
@@ -10,6 +15,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import java.io.File
@@ -155,6 +161,8 @@ class ContractSyncTest {
         assertEquals(constant("hudContext"), PhoneAuth.HUD_CONTEXT)
         assertEquals(constant("idChars").toInt(), PhoneAuth.ID_CHARS)
         assertEquals(constant("proofChars").toInt(), PhoneAuth.PROOF_CHARS)
+        assertEquals(constant("fingerprintChars").toInt(), CertFingerprint.CHARS)
+        assertEquals(constant("shortFingerprintChars").toInt(), CertFingerprint.SHORT_CHARS)
         val schema = source("packages/core/src/config/schema.ts")
         val maxToken = Regex("pairingToken: text\\(0, (\\d+)\\)").find(schema)!!.groupValues[1].toInt()
         assertEquals(maxToken, PhoneAuth.MAX_TOKEN_CHARS)
@@ -174,6 +182,7 @@ class ContractSyncTest {
                     hudNonce = field("hudNonce"),
                     phoneNonce = field("phoneNonce"),
                     deviceId = field("deviceId"),
+                    certFingerprint = field("certFingerprint"),
                     phoneMessage = field("phoneMessage"),
                     hudMessage = field("hudMessage"),
                     phoneProof = field("phoneProof"),
@@ -181,5 +190,30 @@ class ContractSyncTest {
                 )
             }
         assertEquals(vectors, SHARED_AUTH_VECTORS)
+        val certificates =
+            file.jsonObject.getValue("certificates").jsonArray.map { element ->
+                val c = element.jsonObject
+                fun field(name: String): String = c.getValue(name).jsonPrimitive.content
+                CertificateVector(field("name"), field("der"), field("fingerprint"), field("short"))
+            }
+        assertEquals(certificates, SHARED_CERTIFICATE_VECTORS)
+    }
+
+    @Test
+    fun `mDNS records and the TLS port match the HUD's advertisement and config`() {
+        val mdns = source("packages/hud-server/src/discovery/mdns.ts")
+        for (record in listOf(
+            HudAdvertisement.TXT_ID,
+            HudAdvertisement.TXT_TLS_PORT,
+            HudAdvertisement.TXT_FINGERPRINT,
+        )) {
+            assertTrue(mdns.contains("`$record=\${"), "mdns.ts advertises $record=")
+        }
+        assertTrue(mdns.contains("'${HudEndpoint.SERVICE_TYPE}'"))
+        val defaults = source("packages/core/src/config/config.ts")
+        val tlsPort = Regex("\\btlsPort: (\\d+),").find(defaults)!!.groupValues[1].toInt()
+        assertEquals(tlsPort, HudEndpoint.DEFAULT_PORT)
+        val plainPort = Regex("\\bport: (\\d+),").find(defaults)!!.groupValues[1].toInt()
+        assertEquals(plainPort, HudEndpoint.LEGACY_PLAIN_PORT)
     }
 }

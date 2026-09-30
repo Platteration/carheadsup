@@ -1,18 +1,26 @@
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { mergeConfig } from '@carheadsup/core';
-import type { ApiConfigResult, HudConfig, HudFrame, HudToPhone } from '@carheadsup/core';
+import { mergeConfig, shortFingerprint } from '@carheadsup/core';
+import type {
+  ApiConfigResult,
+  ApiTlsInfo,
+  HudConfig,
+  HudFrame,
+  HudToPhone,
+} from '@carheadsup/core';
 import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
 import { advertiseHud as defaultAdvertiseHud } from './discovery/mdns.ts';
+import type { MdnsAdvert } from './discovery/mdns.ts';
 import { HudEngine, maintenanceDueMessage } from './engine.ts';
 import { createApiRouter } from './http/api.ts';
 import type { ConfigChange } from './http/api.ts';
 import { hudHostNames, isAllowedHost, isAuthorized } from './http/auth.ts';
-import { limitConnections } from './http/connections.ts';
+import { HEADERS_TIMEOUT_MS, limitConnections } from './http/connections.ts';
 import { HttpError } from './http/respond.ts';
 import { createRequestHandler } from './http/server.ts';
 import { createStaticServer } from './http/static.ts';
@@ -38,6 +46,8 @@ import { ConfigStore, ConfigUnavailableError, serializeConfig } from './store/co
 import { HUD_ID_FILE, loadHudId } from './store/hud-id.ts';
 import { PersistStore } from './store/persist-store.ts';
 import { TripStore } from './store/trip-store.ts';
+import type { CertificateBundle } from './tls/certificate.ts';
+import { TLS_FILE, loadTlsIdentity } from './tls/identity.ts';
 import { PhoneChannel } from './ws/phone-channel.ts';
 import { RendererChannel } from './ws/renderer-channel.ts';
 import { WebSocketRouter } from './ws/upgrade.ts';
@@ -68,8 +78,8 @@ export interface HudServerTuning {
 
 export interface HudServerOptions {
   /**
-   * Directory for config.json (by default), state.json, trips.jsonl and hud-id (the HUD's
-   * identity for the phone link). Created if missing.
+   * Directory for config.json (by default), state.json, trips.jsonl, hud-id (the HUD's
+   * identity for the phone link) and tls.pem (its TLS key and certificate). Created if missing.
    */
   dataDir: string;
   /** Config file; default `<dataDir>/config.json`. */
@@ -80,6 +90,11 @@ export interface HudServerOptions {
   port?: number;
   /** Override `server.host`. Never written to the config file. */
   host?: string;
+  /**
+   * Override `server.tlsPort` (0 = any free port, null = no TLS listener). Never written to the
+   * config file.
+   */
+  tlsPort?: number | null;
   /** Built renderer directory; default `packages/hud-renderer/dist`. */
   rendererDir?: string;
   /** Backlight device directory; null = auto-detect, false = disabled. Default null. */
@@ -103,20 +118,25 @@ export interface HudServerOptions {
   createSimulation?: (config: HudConfig, deps: RuntimeDeps) => Simulation;
   createSensorSources?: (config: HudConfig) => EventSource[];
   createFrameSinks?: (options: FrameSinkOptions, deps: RuntimeDeps) => FrameSink[];
-  advertiseHud?: (config: HudConfig, hudId: string, deps: RuntimeDeps) => Service | null;
+  advertiseHud?: (config: HudConfig, advert: MdnsAdvert, deps: RuntimeDeps) => Service | null;
   createObdService?: ObdServiceFactory;
   tuning?: HudServerTuning;
 }
 
 export interface HudServer {
-  /** Load state, start every component and listen. Resolves with the bound port. */
-  start(): Promise<{ port: number }>;
+  /**
+   * Load state, start every component and listen. Resolves with the bound ports (`tlsPort`
+   * null when the TLS listener is off or could not start).
+   */
+  start(): Promise<{ port: number; tlsPort: number | null }>;
   /** Graceful shutdown in reverse start order, flushing persistence. Idempotent. */
   stop(): Promise<void>;
   /** The engine (available once `start()` has begun loading; throws before). */
   readonly engine: HudEngine;
   /** The bound port once listening, else null. */
   readonly port: number | null;
+  /** The TLS listener's bound port and certificate fingerprint once listening, else null. */
+  readonly tls: ApiTlsInfo | null;
   /** The simulation when running with `sim`, else null. */
   readonly simulation: Simulation | null;
 }
@@ -129,7 +149,10 @@ function describe(err: unknown): string {
  * Compose the on-car service: config/state/trip stores in the data directory, the engine, the
  * OBD link (to the simulator with `sim`), simulated and hardware event sources, frame sinks,
  * mDNS advertisement, and the HTTP server with the REST API, the renderer files and the two
- * WebSockets.
+ * WebSockets — served twice: plainly on `server.port` (the kiosk, browsers) and over TLS with the
+ * HUD's self-signed certificate on `server.tlsPort` (the phone; `/ws/phone` is served on the
+ * plain port only with `server.allowPlainPhone`). A TLS listener that cannot start is logged and
+ * left out; the HUD itself keeps running.
  *
  * Config changes through the API are validated, saved, and applied to every component: the
  * engine, the OBD service, the sources, the renderer (`display`), the phone (pairing token) and
@@ -146,6 +169,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
     sim: simulated,
     ...(options.port !== undefined ? { port: options.port } : {}),
     ...(options.host !== undefined ? { host: options.host } : {}),
+    ...(options.tlsPort !== undefined ? { tlsPort: options.tlsPort } : {}),
   };
   const dataDir = resolve(options.dataDir);
   const configPath = resolve(options.configPath ?? join(dataDir, CONFIG_FILE));
@@ -172,6 +196,10 @@ export function createHudServer(options: HudServerOptions): HudServer {
   let wsRouter: WebSocketRouter | null = null;
   let httpServer: Server | null = null;
   let boundPort: number | null = null;
+  /** The HTTPS listener (the phone link), its port and its key and certificate. */
+  let httpsServer: Server | null = null;
+  let boundTlsPort: number | null = null;
+  let tlsIdentity: CertificateBundle | null = null;
   let mdns: Service | null = null;
   /** The HUD's identity on the phone link (challenge, welcome, mDNS TXT `id`). */
   let hudId: string | null = null;
@@ -183,8 +211,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
   let unsubscribeSinks: (() => void) | null = null;
   const unsubscribeBrightness: Array<() => void> = [];
   /** The raw start attempt (awaited by shutdown) and its public, cleanup-on-failure wrapper. */
-  let startAttempt: Promise<{ port: number }> | null = null;
-  let starting: Promise<{ port: number }> | null = null;
+  let startAttempt: Promise<{ port: number; tlsPort: number | null }> | null = null;
+  let starting: Promise<{ port: number; tlsPort: number | null }> | null = null;
   let stopping: Promise<void> | null = null;
 
   const requireEngine = (): HudEngine => {
@@ -209,12 +237,22 @@ export function createHudServer(options: HudServerOptions): HudServer {
     }
   }
 
+  /** The running TLS listener and its certificate, as `/api/info` and mDNS report them. */
+  function tlsInfo(): ApiTlsInfo | null {
+    if (boundTlsPort === null || tlsIdentity === null) return null;
+    return { port: boundTlsPort, fingerprint: tlsIdentity.fingerprint };
+  }
+
   function advertise(config: HudConfig): void {
     if (stopping !== null || hudId === null) return;
     const advertiseHud = options.advertiseHud ?? defaultAdvertiseHud;
     try {
       const port = boundPort ?? config.server.port;
-      mdns = advertiseHud({ ...config, server: { ...config.server, port } }, hudId, deps);
+      mdns = advertiseHud(
+        { ...config, server: { ...config.server, port } },
+        { hudId, tls: tlsInfo() },
+        deps,
+      );
     } catch (err) {
       mdns = null;
       logger.warn(`mDNS: advertising failed: ${describe(err)}`);
@@ -274,7 +312,11 @@ export function createHudServer(options: HudServerOptions): HudServer {
     phone?.updateConfig(next);
     for (const source of startedSources) updateSource(source, next);
     if (previous === null) return;
-    if (previous.server.port !== next.server.port || previous.server.host !== next.server.host) {
+    if (
+      previous.server.port !== next.server.port ||
+      previous.server.host !== next.server.host ||
+      previous.server.tlsPort !== next.server.tlsPort
+    ) {
       logger.warn('Config: the new server address takes effect after a restart');
     }
     if (previous.server.mdns !== next.server.mdns || previous.vehicle.name !== next.vehicle.name) {
@@ -330,15 +372,12 @@ export function createHudServer(options: HudServerOptions): HudServer {
     });
   }
 
-  async function listen(server: Server, config: HudConfig): Promise<number> {
+  async function listen(server: Server, host: string, port: number, what: string): Promise<number> {
     await new Promise<void>((resolveListen, rejectListen) => {
       const onError = (err: Error): void => {
         server.off('listening', onListening);
         rejectListen(
-          new Error(
-            `Cannot listen on ${config.server.host}:${config.server.port}: ${describe(err)}`,
-            { cause: err },
-          ),
+          new Error(`Cannot listen on ${host}:${port}: ${describe(err)}`, { cause: err }),
         );
       };
       const onListening = (): void => {
@@ -347,10 +386,27 @@ export function createHudServer(options: HudServerOptions): HudServer {
       };
       server.once('error', onError);
       server.once('listening', onListening);
-      server.listen(config.server.port, config.server.host);
+      server.listen(port, host);
     });
-    server.on('error', (err) => logger.error(`HTTP: server error: ${describe(err)}`));
+    server.on('error', (err) => logger.error(`${what}: server error: ${describe(err)}`));
     return (server.address() as AddressInfo).port;
+  }
+
+  /**
+   * The HUD's TLS key and certificate from the data directory (made on first start), or null
+   * when TLS is off — or, which should never happen, when no identity could be made at all.
+   */
+  async function loadIdentity(config: HudConfig): Promise<CertificateBundle | null> {
+    if (config.server.tlsPort === null) return null;
+    try {
+      return await loadTlsIdentity(join(dataDir, TLS_FILE), logger, {
+        hostName: hostname(),
+        now,
+      });
+    } catch (err) {
+      logger.error(`TLS: no certificate (${describe(err)}); the phone cannot connect`);
+      return null;
+    }
   }
 
   async function closeHttp(server: Server): Promise<void> {
@@ -365,7 +421,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
     });
   }
 
-  async function doStart(): Promise<{ port: number }> {
+  async function doStart(): Promise<{ port: number; tlsPort: number | null }> {
     await ensureDirectory(dataDir);
     await ensureDirectory(dirname(configPath));
     const [loaded, persisted, id] = await Promise.all([
@@ -378,6 +434,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
     stored = loaded.config;
     effective = effectiveConfig(loaded.config, overrides);
     const config = effective;
+    tlsIdentity = await loadIdentity(config);
+    const identity = tlsIdentity;
 
     if (simulated) {
       simulation = (options.createSimulation ?? defaultCreateSimulation)(config, deps);
@@ -432,6 +490,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
 
     phone = new PhoneChannel({
       hudId: id,
+      certFingerprint: identity?.fingerprint ?? null,
       dispatch: (event) => hudEngine.dispatch(event),
       getConfig: currentEffective,
       tripsEndedAfter: (since, limit) => tripStore.endedAfter(since, limit),
@@ -482,6 +541,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
       renderer,
       phone,
       apiToken,
+      allowPlainPhone: () => currentEffective().server.allowPlainPhone,
+      tlsPort: () => boundTlsPort,
       allowedHost,
       timers,
       logger,
@@ -505,6 +566,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
         return obd.clearDtcs();
       },
       trips: tripStore,
+      tls: tlsInfo,
       simulation:
         sim === null
           ? null
@@ -519,17 +581,30 @@ export function createHudServer(options: HudServerOptions): HudServer {
               },
             },
     });
-    const server = createServer(
-      createRequestHandler({
-        api,
-        static: createStaticServer(rendererDir),
-        apiToken,
-        allowedHost,
-        logger,
-      }),
-    );
+    const handleRequest = createRequestHandler({
+      api,
+      static: createStaticServer(rendererDir),
+      apiToken,
+      allowedHost,
+      logger,
+    });
+    const server = createServer(handleRequest);
+    // The same pages, API and sockets over TLS: the phone's link. A client that does not finish
+    // its handshake in time is dropped like one that sends no request.
+    const secure =
+      identity === null || config.server.tlsPort === null
+        ? null
+        : createHttpsServer(
+            {
+              key: identity.keyPem,
+              cert: identity.certPem,
+              minVersion: 'TLSv1.2',
+              handshakeTimeout: HEADERS_TIMEOUT_MS,
+            },
+            handleRequest,
+          );
     let lastRefusalLog = Number.NEGATIVE_INFINITY;
-    limitConnections(server, {
+    limitConnections(secure === null ? [server] : [server, secure], {
       onRefused: (address) => {
         const at = now();
         if (Math.abs(at - lastRefusalLog) < REFUSAL_LOG_INTERVAL_MS) return;
@@ -539,7 +614,20 @@ export function createHudServer(options: HudServerOptions): HudServer {
     });
     server.on('upgrade', wsRouter.handleUpgrade);
     httpServer = server;
-    boundPort = await listen(server, config);
+    boundPort = await listen(server, config.server.host, config.server.port, 'HTTP');
+    if (secure !== null && identity !== null && config.server.tlsPort !== null) {
+      secure.on('upgrade', wsRouter.handleSecureUpgrade);
+      try {
+        boundTlsPort = await listen(secure, config.server.host, config.server.tlsPort, 'HTTPS');
+        httpsServer = secure;
+      } catch (err) {
+        // The display and the settings app work without it; only the phone cannot connect.
+        logger.error(
+          `TLS: ${describe(err)} — the phone cannot connect until this is fixed ` +
+            '(server.tlsPort, or --tls-port)',
+        );
+      }
+    }
 
     hudEngine.start();
     obd.start();
@@ -568,7 +656,20 @@ export function createHudServer(options: HudServerOptions): HudServer {
     logger.info(
       `HUD server ${HUD_VERSION} listening on ${config.server.host}:${boundPort}${simulated ? ' (simulator)' : ''}`,
     );
-    return { port: boundPort };
+    const tls = tlsInfo();
+    if (tls !== null) {
+      logger.info(
+        `Phone link: TLS on ${config.server.host}:${tls.port}, certificate SHA-256 ` +
+          `${shortFingerprint(tls.fingerprint)} (the companion app shows the same when it pairs)`,
+      );
+    } else if (config.server.tlsPort === null) {
+      logger.warn(
+        config.server.allowPlainPhone
+          ? 'Phone link: TLS is off (server.tlsPort); phones connect unencrypted'
+          : 'Phone link: TLS is off (server.tlsPort), so the phone cannot connect',
+      );
+    }
+    return { port: boundPort, tlsPort: boundTlsPort };
   }
 
   /** Run one shutdown step with a time limit; failures are logged and never stop the others. */
@@ -615,6 +716,10 @@ export function createHudServer(options: HudServerOptions): HudServer {
     if (httpServer !== null) {
       const server = httpServer;
       await step('HTTP server', () => closeHttp(server));
+    }
+    if (httpsServer !== null) {
+      const server = httpsServer;
+      await step('HTTPS server', () => closeHttp(server));
     }
     for (const source of [...startedSources].reverse()) {
       await step(source.name, async () => {
@@ -669,6 +774,9 @@ export function createHudServer(options: HudServerOptions): HudServer {
     },
     get port() {
       return boundPort;
+    },
+    get tls() {
+      return tlsInfo();
     },
     get simulation() {
       return simulation;

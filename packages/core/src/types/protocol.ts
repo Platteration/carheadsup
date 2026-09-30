@@ -9,17 +9,19 @@ import type { TripRecord } from './records.ts';
 /**
  * Wire protocols. Every message is a JSON object with a `t` (type) discriminator.
  *
- *  Phone  ⇄ HUD : WebSocket `ws://<hud>:<port>/ws/phone`   (companion app)
+ *  Phone  ⇄ HUD : WebSocket over TLS `wss://<hud>:<tlsPort>/ws/phone`   (companion app)
  *  Renderer ⇄ HUD : WebSocket `ws://<hud>:<port>/ws/hud`   (projected display & dev console)
  *
  * Timestamps on the phone link are the phone's epoch ms; the HUD re-stamps on receipt
  * and uses the phone's clock only for absolute values such as ETA.
  *
- * The phone link starts with a mutual proof of the pairing token (`phone.pairingToken`), which
- * itself never travels: HUD `challenge` → phone `hello` (with the phone's proof) → HUD
- * `welcome` (with the HUD's proof). The proof messages are built by `protocol/phone-auth.ts`.
+ * The phone link runs over TLS with the HUD's self-signed certificate, which the phone pins, and
+ * starts with a mutual proof of the pairing token (`phone.pairingToken`), which itself never
+ * travels: HUD `challenge` → phone `hello` (with the phone's proof) → HUD `welcome` (with the
+ * HUD's proof). Both proofs cover the certificate's fingerprint (channel binding). The proof
+ * messages are built by `protocol/phone-auth.ts`.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Phone → HUD
@@ -41,7 +43,8 @@ export interface PhoneHello {
   nonce: string;
   /**
    * base64url (43 characters, no padding) of HMAC-SHA256 keyed with the UTF-8 bytes of the
-   * pairing token over `phoneProofMessage(…)`: proves the phone knows the token.
+   * pairing token over `phoneProofMessage(…)`: proves the phone knows the token, for this
+   * challenge and the TLS certificate the phone was shown.
    */
   proof: string;
 }
@@ -173,7 +176,8 @@ export interface HudWelcome {
   hudId: string;
   /**
    * base64url (43 characters) of HMAC-SHA256 keyed with the pairing token over
-   * `hudProofMessage(…)`: proves the HUD knows the token.
+   * `hudProofMessage(…)`: proves the HUD knows the token, for this hello and its own TLS
+   * certificate.
    */
   proof: string;
 }

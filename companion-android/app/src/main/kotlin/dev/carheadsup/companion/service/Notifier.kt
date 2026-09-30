@@ -85,6 +85,8 @@ class Notifier(private val context: Context) {
                         is TrustProblem.DifferentHud -> R.string.notification_different_hud
                         is TrustProblem.UnconfirmedOpenHud -> R.string.notification_open_hud
                         TrustProblem.BadProof, is TrustProblem.ProtocolViolation -> R.string.notification_unverified_hud
+                        is TrustProblem.CertificateChanged -> R.string.notification_certificate_changed
+                        is TrustProblem.CertificateMismatch -> R.string.notification_certificate_mismatch
                     },
                 )
             }

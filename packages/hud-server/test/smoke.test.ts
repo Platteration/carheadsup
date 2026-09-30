@@ -8,7 +8,7 @@ import { createSimulation } from '../src/sim/index.ts';
 import {
   MemoryLogger,
   TestSocket,
-  answerChallenge,
+  helloOn,
   makeTempDir,
   testConfig,
   waitFor,
@@ -51,6 +51,7 @@ describe('smoke: the whole server with the real simulator', () => {
         dataDir: temp.dir,
         sim: true,
         port: 0,
+        tlsPort: 0,
         host: '127.0.0.1',
         rendererDir: renderer,
         backlight: false,
@@ -58,7 +59,7 @@ describe('smoke: the whole server with the real simulator', () => {
       });
       const sockets: TestSocket[] = [];
       try {
-        const { port } = await server.start();
+        const { port, tlsPort } = await server.start();
         const base = `http://127.0.0.1:${port}`;
 
         const hud = new TestSocket(`ws://127.0.0.1:${port}/ws/hud`);
@@ -89,16 +90,11 @@ describe('smoke: the whole server with the real simulator', () => {
         const diagnostics = await fetch(`${base}/api/diagnostics`);
         expect(diagnostics.status).toBe(200);
 
-        const phone = new TestSocket(`ws://127.0.0.1:${port}/ws/phone`);
+        const phone = new TestSocket(`wss://127.0.0.1:${tlsPort}/ws/phone`);
         sockets.push(phone);
         await phone.opened;
-        phone.send(
-          answerChallenge(await phone.nextOfType('challenge'), {
-            device: 'Smoke test',
-            app: 'test',
-            appVersion: '0',
-          }),
-        );
+        expect(phone.peerFingerprint).toBe(server.tls?.fingerprint);
+        await helloOn(phone, { device: 'Smoke test', app: 'test', appVersion: '0' });
         expect(await phone.nextOfType('welcome')).toMatchObject({ hudName: 'My car' });
       } finally {
         for (const socket of sockets) socket.close();

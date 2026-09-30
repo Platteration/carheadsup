@@ -10,6 +10,7 @@ import type {
   ApiConfigResult,
   ApiDiagnostics,
   ApiInfo,
+  ApiTlsInfo,
   DeepPartial,
   HudConfig,
   HudEvent,
@@ -59,6 +60,8 @@ export interface ApiDeps {
   clearDtcs(): Promise<ClearDtcsOutcome>;
   trips: Pick<TripStore, 'list' | 'csv' | 'delete'>;
   simulation: Pick<Simulation, 'status' | 'control'> | null;
+  /** The TLS listener and its certificate fingerprint, or null when it is not running. */
+  tls(): ApiTlsInfo | null;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -133,6 +136,7 @@ export function createApiRouter(deps: ApiDeps): Router {
       uptimeS: Math.max(0, Math.floor((deps.now() - deps.startedAt) / 1000)),
       obd: linkStatus(state),
       phoneConnected: state.phone.connected,
+      tls: deps.tls(),
     };
     return ok(info);
   });

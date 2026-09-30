@@ -37,6 +37,7 @@ const DEFAULT_SHOTS: ReadonlyArray<readonly [string, readonly Size[]]> = [
   ['blind-spot-left', [WIDE]],
   ['sport-shift', [WIDE]],
   ['speed-camera', [WIDE]],
+  ['traffic-jam', [WIDE]],
   ['imperial-us', [SMALL]],
   ['parked-overview', [SMALL, WIDE]],
   ['parked-trouble-codes', [SMALL]],

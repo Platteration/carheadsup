@@ -14,9 +14,13 @@ import dev.carheadsup.companion.hud.HudDiscovery
 import dev.carheadsup.companion.hud.HudLink
 import dev.carheadsup.companion.hud.LocalNetwork
 import dev.carheadsup.companion.hud.PhoneHub
+import dev.carheadsup.companion.hud.PinnedHudTrust
+import dev.carheadsup.companion.hud.TrustedHud
+import dev.carheadsup.companion.hud.withHudTrust
 import dev.carheadsup.companion.notifications.MessageRelay
 import dev.carheadsup.companion.service.Notifier
 import dev.carheadsup.companion.speech.MessageReader
+import dev.carheadsup.companion.traffic.TrafficBudgetStore
 import dev.carheadsup.protocol.HudCallAction
 import dev.carheadsup.protocol.HudMaintenanceDue
 import dev.carheadsup.protocol.HudToPhone
@@ -29,7 +33,10 @@ import dev.carheadsup.protocol.api.FuelEconomyUnit
 import dev.carheadsup.protocol.api.TripFormatter
 import dev.carheadsup.protocol.api.UnitSystem
 import dev.carheadsup.protocol.auth.HudPin
-import dev.carheadsup.protocol.link.HudEndpoint
+import dev.carheadsup.protocol.hazards.HazardAggregator
+import dev.carheadsup.protocol.traffic.TomTomTraffic
+import dev.carheadsup.protocol.traffic.TrafficState
+import dev.carheadsup.protocol.traffic.TrafficStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -57,6 +64,18 @@ class AppGraph(private val app: Application) {
     val trips = TripStore(File(app.filesDir, "trips.json"))
     val notifier = Notifier(app)
 
+    /**
+     * The HUD's one `hazards` list: speed cameras (`RoadInfoProvider`) and traffic incidents
+     * (`TrafficProvider`) merged, since the HUD replaces its whole list with each message.
+     */
+    val hazards = HazardAggregator(publish = { hub.publish(it) })
+
+    /** Today's traffic requests, kept across restarts (the daily budget). */
+    val trafficBudget = TrafficBudgetStore(app)
+
+    /** What the traffic look-up is doing, for the Setup screen (set by the connection service). */
+    val trafficStatus = MutableStateFlow(idleTrafficStatus())
+
     /** True while the system has our notification listener bound (notification access granted). */
     val listenerConnected = MutableStateFlow(false)
 
@@ -69,7 +88,10 @@ class AppGraph(private val app: Application) {
             HudPin.acceptsAdvertisement(current.hudPin, current.pairingToken, advertisedId)
         }
 
-    /** WebSocket client: no read timeout (the heartbeat detects dead links), transport pings as a backstop. */
+    /**
+     * WebSocket client: no read timeout (the heartbeat detects dead links), transport pings as a
+     * backstop. The trust in the HUD's certificate is added per connection (see [HudLink]).
+     */
     private val socketClient =
         OkHttpClient.Builder()
             .connectTimeout(5, TimeUnit.SECONDS)
@@ -77,7 +99,10 @@ class AppGraph(private val app: Application) {
             .pingInterval(15, TimeUnit.SECONDS)
             .build()
 
-    /** REST client for the HUD (bound to its Wi-Fi per call). */
+    /**
+     * REST client for the HUD (bound to its Wi-Fi and pinned to its certificate per call, see
+     * [api]).
+     */
     private val hudHttpClient =
         socketClient.newBuilder()
             .pingInterval(0, TimeUnit.MILLISECONDS)
@@ -86,8 +111,8 @@ class AppGraph(private val app: Application) {
             .build()
 
     /**
-     * Internet client (Overpass): always the default network — even while the settings page has
-     * bound the process to the HUD's Wi-Fi — with generous timeouts for big tiles.
+     * Internet client (Overpass, TomTom): always the default network — even while the settings
+     * page has bound the process to the HUD's Wi-Fi — with generous timeouts for big tiles.
      */
     val internetClient: OkHttpClient =
         localNetwork.bindToDefaultNetwork(
@@ -117,10 +142,17 @@ class AppGraph(private val app: Application) {
             onMessage = ::onHudMessage,
         )
 
+    /** The pinned certificate REST calls trust (the one the HUD proved itself with). */
+    private val restTrust = PinnedHudTrust()
+
     val api =
-        HudApi(client = {
-            localNetwork.bind(hudHttpClient)
-        }, endpoint = ::currentEndpoint, apiToken = { settings.value.apiToken })
+        HudApi(
+            client = { certificate ->
+                localNetwork.bind(hudHttpClient).withHudTrust(restTrust.forCertificate(certificate))
+            },
+            trusted = ::currentHud,
+            apiToken = { settings.value.apiToken },
+        )
 
     private val unitsState = MutableStateFlow(defaultUnits(Locale.getDefault()))
 
@@ -132,10 +164,21 @@ class AppGraph(private val app: Application) {
     val messageRelay = MessageRelay(hub, link.status, settings, ::messageReader)
 
     /**
-     * The HUD to talk to for REST and the settings page: only where a HUD has proven itself (or
-     * was confirmed by the user) — these carry the API token. Null until then.
+     * The HUD to talk to for REST and the settings page, with the certificate they pin: only
+     * where a HUD has proven itself (or was confirmed by the user) — these carry the API token.
+     * Null until then.
      */
-    fun currentEndpoint(): HudEndpoint? = link.trustedEndpoint
+    fun currentHud(): TrustedHud? = link.trusted
+
+    /** The traffic status while no traffic look-up runs: switched off, or on without a usable key. */
+    fun idleTrafficStatus(): TrafficStatus {
+        val current = settings.value
+        val noKey = current.trafficEnabled && !TomTomTraffic.isPlausibleKey(current.trafficApiKey)
+        return TrafficStatus(
+            if (noKey) TrafficState.NO_KEY else TrafficState.OFF,
+            requestsToday = trafficBudget.usedToday(),
+        )
+    }
 
     @Synchronized
     fun messageReader(): MessageReader = reader ?: MessageReader(app).also { reader = it }

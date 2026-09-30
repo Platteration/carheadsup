@@ -144,14 +144,19 @@ async function main(): Promise<void> {
     logger,
     ...(options.configPath !== undefined ? { configPath: options.configPath } : {}),
     ...(options.port !== undefined ? { port: options.port } : {}),
+    ...(options.tlsPort !== undefined ? { tlsPort: options.tlsPort } : {}),
     ...(options.host !== undefined ? { host: options.host } : {}),
     ...(options.rendererDir !== undefined ? { rendererDir: options.rendererDir } : {}),
   });
   try {
-    const { port } = await server.start();
+    const { port, tlsPort } = await server.start();
     const host = options.host ?? server.engine.config.server.host;
     for (const url of serverUrls(host, port, lanAddresses())) {
       logger.info(`HUD: ${url}/   settings: ${url}/settings   dev console: ${url}/dev`);
+    }
+    if (tlsPort !== null) {
+      const phoneUrls = serverUrls(host, tlsPort, lanAddresses(), 'wss');
+      logger.info(`Phone link: ${phoneUrls.map((url) => `${url}/ws/phone`).join('   ')}`);
     }
   } catch (err) {
     const failure = describeStartupFailure(err);

@@ -4,9 +4,11 @@ import android.location.Location
 import android.os.SystemClock
 import android.util.Log
 import dev.carheadsup.companion.hud.await
-import dev.carheadsup.protocol.PhoneHazards
 import dev.carheadsup.protocol.PhoneMessages
 import dev.carheadsup.protocol.PhoneToHud
+import dev.carheadsup.protocol.hazards.HazardAggregator
+import dev.carheadsup.protocol.hazards.HazardFeed
+import dev.carheadsup.protocol.hazards.HazardSource
 import dev.carheadsup.protocol.link.ChangeGate
 import dev.carheadsup.protocol.link.FixWatchdog
 import dev.carheadsup.protocol.osm.GeoTile
@@ -43,7 +45,8 @@ import java.io.IOException
  *   time ([OverpassThrottle]), and cached in memory and on disk for a week — stale tiles (up to
  *   90 days) are used while offline;
  * - each GPS fix is matched to a way ([WayMatcher]) → `road`; cameras ahead ([SpeedCameraFinder])
- *   → `hazards`, re-sent every few seconds so the HUD's copy stays fresh;
+ *   → the [HazardAggregator], which merges them with traffic incidents into the HUD's `hazards`
+ *   and re-sends them every few seconds so the HUD's copy stays fresh;
  * - without data for the current tile the limit is reported unknown rather than stale, and so
  *   is everything when usable fixes stop for a few seconds ([FixWatchdog]: tunnels, location
  *   switched off, GPS never started) — the HUD must not keep showing the last limit as current;
@@ -58,6 +61,9 @@ class RoadInfoProvider(
     private val userAgent: String,
     /** Whether speed-camera warnings are wanted right now (the driver's setting). */
     private val camerasEnabled: () -> Boolean,
+    /** Where cameras ahead go (merged with the other hazard sources). */
+    hazards: HazardAggregator,
+    /** Where `road` messages go. */
     private val publish: (PhoneToHud) -> Unit,
 ) {
     private val worker = Dispatchers.Default.limitedParallelism(1)
@@ -71,7 +77,6 @@ class RoadInfoProvider(
     private val matcher = WayMatcher()
     private val cameraFinder = SpeedCameraFinder()
     private val roadGate = ChangeGate<Any>(refreshMs = ROAD_REFRESH_MS)
-    private val hazardGate = ChangeGate<Set<String>>(refreshMs = HAZARD_REFRESH_MS)
     private val watchdog = FixWatchdog(timeoutMs = FIX_TIMEOUT_MS, maxAccuracyM = MAX_ACCURACY_M)
     private val heading = HeadingMemory(minSpeedMps = MIN_SPEED_FOR_BEARING_MPS)
     private var previousWayId: Long? = null
@@ -80,6 +85,12 @@ class RoadInfoProvider(
     @Volatile
     private var endpointIndex = 0
     private var fetchJob: Job? = null
+
+    /**
+     * The cameras ahead at the HUD. Opening it withdraws whatever a previous provider left; once
+     * closed ([stop]), a fix still being processed cannot bring them back.
+     */
+    private val cameraFeed: HazardFeed = hazards.open(HazardSource.CAMERAS, SystemClock.elapsedRealtime())
     private val job: Job
 
     private class Tile(val data: RoadData, val fetchedAtMs: Long)
@@ -88,7 +99,6 @@ class RoadInfoProvider(
         // Nothing is known until the first fix; this also replaces a limit the HUD may still
         // hold from before (the replay after a reconnect would otherwise bring nothing newer).
         publish(PhoneMessages.roadUnknown())
-        publish(PhoneMessages.noHazards())
         job =
             scope.launch(worker) {
                 launch {
@@ -115,9 +125,8 @@ class RoadInfoProvider(
         Log.i(TAG, "No usable GPS fix for ${FIX_TIMEOUT_MS / 1000} s; speed limit and cameras unknown")
         // Forget what was sent, so the first value after the gap goes out at once.
         roadGate.reset()
-        hazardGate.reset()
         publish(PhoneMessages.roadUnknown())
-        publish(PhoneMessages.noHazards())
+        cameraFeed.clear(SystemClock.elapsedRealtime())
     }
 
     /** Stops lookups; tells the HUD the limit and cameras are no longer known. */
@@ -125,7 +134,7 @@ class RoadInfoProvider(
         job.cancel()
         fetchJob?.cancel()
         publish(PhoneMessages.roadUnknown())
-        publish(PhoneMessages.noHazards())
+        cameraFeed.close(SystemClock.elapsedRealtime())
     }
 
     private suspend fun process(location: Location) {
@@ -162,7 +171,7 @@ class RoadInfoProvider(
             } else {
                 emptyList()
             }
-        if (hazardGate.shouldSend(cameras.map { it.id }.toSet(), now)) publish(PhoneHazards(cameras))
+        cameraFeed.update(cameras, SystemClock.elapsedRealtime())
     }
 
     /** Tile data from memory or disk, if usable. */
@@ -282,7 +291,6 @@ class RoadInfoProvider(
         const val MEMORY_TILES = 12
         const val DISK_CACHE_BYTES = 64L * 1024 * 1024
         const val ROAD_REFRESH_MS = 30_000L
-        const val HAZARD_REFRESH_MS = 5_000L
         const val MIN_SPEED_FOR_BEARING_MPS = 2.5
 
         /** Without a usable fix for this long, the limit and cameras are withdrawn. */

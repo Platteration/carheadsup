@@ -12,6 +12,8 @@ export interface RuntimeOverrides {
   /** `--port` / `--host` from the command line. */
   port?: number;
   host?: string;
+  /** `--tls-port` from the command line (null: TLS off). */
+  tlsPort?: number | null;
 }
 
 /** Custom PIDs with the simulator's TPMS PIDs merged in (they replace user PIDs for the same signal). */
@@ -31,6 +33,7 @@ export function effectiveConfig(stored: HudConfig, overrides: RuntimeOverrides):
       ...stored.server,
       ...(overrides.port !== undefined ? { port: overrides.port } : {}),
       ...(overrides.host !== undefined ? { host: overrides.host } : {}),
+      ...(overrides.tlsPort !== undefined ? { tlsPort: overrides.tlsPort } : {}),
     },
   };
   if (overrides.sim) {

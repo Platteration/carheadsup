@@ -46,20 +46,40 @@ class PhoneAuthTest {
     @Test
     fun `proofs match the vectors the HUD asserts`() {
         for (v in SHARED_AUTH_VECTORS) {
-            val phoneMessage = PhoneAuth.phoneProofMessage(v.hudId, v.hudNonce, v.phoneNonce, v.deviceId)
+            val phoneMessage =
+                PhoneAuth.phoneProofMessage(v.hudId, v.hudNonce, v.phoneNonce, v.deviceId, v.certFingerprint)
             assertEquals(v.phoneMessage, phoneMessage, v.name)
-            assertEquals(v.hudMessage, PhoneAuth.hudProofMessage(v.hudId, v.hudNonce, v.phoneNonce, v.deviceId), v.name)
+            assertEquals(
+                v.hudMessage,
+                PhoneAuth.hudProofMessage(v.hudId, v.hudNonce, v.phoneNonce, v.deviceId, v.certFingerprint),
+                v.name,
+            )
             assertEquals(
                 v.phoneProof,
-                PhoneAuth.phoneProof(v.pairingToken, v.hudId, v.hudNonce, v.phoneNonce, v.deviceId),
+                PhoneAuth.phoneProof(v.pairingToken, v.hudId, v.hudNonce, v.phoneNonce, v.deviceId, v.certFingerprint),
                 v.name,
             )
             assertEquals(
                 v.hudProof,
-                PhoneAuth.hudProof(v.pairingToken, v.hudId, v.hudNonce, v.phoneNonce, v.deviceId),
+                PhoneAuth.hudProof(v.pairingToken, v.hudId, v.hudNonce, v.phoneNonce, v.deviceId, v.certFingerprint),
                 v.name,
             )
         }
+    }
+
+    @Test
+    fun `proofs are bound to the certificate the phone was shown`() {
+        val direct = SHARED_AUTH_VECTORS[0]
+        val relayed = SHARED_AUTH_VECTORS[1]
+        // The same session, the same token: only the certificate differs, and so do both proofs.
+        assertEquals(direct.hudNonce, relayed.hudNonce)
+        assertEquals(direct.pairingToken, relayed.pairingToken)
+        assertEquals(direct.phoneNonce, relayed.phoneNonce)
+        assertNotEquals(direct.certFingerprint, relayed.certFingerprint)
+        assertNotEquals(direct.phoneProof, relayed.phoneProof)
+        assertNotEquals(direct.hudProof, relayed.hudProof)
+        assertTrue(PhoneAuth.PHONE_CONTEXT.endsWith("-v3"))
+        assertTrue(PhoneAuth.HUD_CONTEXT.endsWith("-v3"))
     }
 
     @Test

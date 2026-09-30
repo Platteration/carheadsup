@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  EXIT_14_AT,
+  HAZARD_ANNOUNCE_M,
   ROAD_SEGMENTS,
   ROUTE_LENGTH_M,
   ROUTE_MANEUVERS,
   ROUTE_ORIGIN,
   SCRIPTED_HAZARDS,
   THEN_WITHIN_M,
+  announceAt,
+  dropAt,
   locationAt,
   nextManeuverIndex,
   remainingSeconds,
@@ -35,6 +39,25 @@ describe('scripted route', () => {
     expect(ROUTE_LENGTH_M).toBeLessThan(4511);
     expect(SCRIPTED_HAZARDS[0]!.at).toBeGreaterThan(1116);
     expect(SCRIPTED_HAZARDS[0]!.at).toBeLessThan(3976);
+  });
+
+  it('puts a traffic jam on the A7 beyond exit 14, reported from the merge until the exit', () => {
+    const jam = SCRIPTED_HAZARDS.find((h) => h.type === 'traffic-jam')!;
+    const merge = ROUTE_MANEUVERS.find((m) => m.maneuver.type === 'merge-left')!;
+    const exit = ROUTE_MANEUVERS.find((m) => m.maneuver.type === 'exit-right')!;
+    expect(exit.at).toBe(EXIT_14_AT);
+    expect(announceAt(jam)).toBe(merge.at);
+    expect(dropAt(jam)).toBe(EXIT_14_AT);
+    // Past the exit: never reached, and more than the camera's 1 km reveal away while it passes.
+    expect(jam.at).toBeGreaterThan(EXIT_14_AT);
+    const camera = SCRIPTED_HAZARDS.find((h) => h.type === 'speed-camera')!;
+    // Within 3 km (`display.trafficRevealM`) only once the camera is within its own 1 km, so
+    // the HUD never flips from the jam to the camera and back.
+    expect(jam.at - 3000).toBeGreaterThan(camera.at - 1000);
+    expect(jam.delaySeconds).toBeGreaterThan(0);
+    // The camera keeps the defaults.
+    expect(announceAt(camera)).toBe(camera.at - HAZARD_ANNOUNCE_M);
+    expect(dropAt(camera)).toBe(camera.at);
   });
 
   it('gives lanes before the highway exit, with recommended lanes', () => {

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { hazardLabel } from '../../src/compose/widgets.ts';
+import {
+  delayMinutes,
+  hazardLabel,
+  hazardRevealDistanceM,
+  isTrafficHazard,
+} from '../../src/compose/widgets.ts';
+import { DEFAULT_CONFIG } from '../../src/config/config.ts';
 import type { HudConfig } from '../../src/types/config.ts';
 import type { Hazard, Lane } from '../../src/types/nav.ts';
 import {
@@ -509,6 +515,87 @@ describe('navigation widgets', () => {
       hazardLabel(hazard({ type: 'other', description: 'Stalled vehicle on the right shoulder' })),
     ).toBe('Stalled vehicle on the…');
     expect(hazardLabel(hazard({ type: 'other', description: '  ' }))).toBe('Hazard');
+  });
+
+  it('shows a traffic jam from 3 km on the highway, other hazards from 1 km', () => {
+    const h = highwayDrive(makeConfig(), { speed: 120 });
+    h.send({
+      type: 'hazards/update',
+      hazards: [
+        hazard({ id: 'camera', distanceM: 2_600 }),
+        hazard({
+          id: 'jam',
+          type: 'traffic-jam',
+          distanceM: 2_900,
+          speedLimitKph: null,
+          delaySeconds: 470,
+          description: 'Stationary traffic',
+        }),
+      ],
+      at: h.now,
+    });
+    // The camera is nearer but not yet within 1 km; the jam is within 3 km.
+    expect(widget(h.frame(), 'hazard')).toEqual({
+      id: 'hazard',
+      zone: 'top-right',
+      type: 'traffic-jam',
+      distance: { value: 2.9, unit: 'km', text: '2.9 km' },
+      speedLimit: null,
+      limitStyle: 'vienna',
+      delayMinutes: 8,
+      label: 'Traffic jam',
+    });
+    // 60 s at 120 km/h: 2 km on, the camera (600 m) is nearest and within its own range.
+    h.run(h.now + 60_000, { speed: 120, rpm: 2700 }, 500);
+    expect(widget(h.frame(), 'hazard')).toMatchObject({
+      type: 'speed-camera',
+      distance: { text: '600 m' },
+    });
+  });
+
+  it('keeps the shorter reveal for traffic in town, and never shortens the hazard reveal', () => {
+    const jam = hazard({ type: 'traffic-jam', distanceM: 2_000, speedLimitKph: null });
+    const h = cityDrive(makeConfig());
+    h.send({ type: 'hazards/update', hazards: [jam], at: h.now });
+    expect(widget(h.frame(), 'hazard')).toBeUndefined();
+    const display = DEFAULT_CONFIG.display;
+    expect(hazardRevealDistanceM(jam, 'highway', display)).toBe(3000);
+    expect(hazardRevealDistanceM(jam, 'city', display)).toBe(1000);
+    expect(hazardRevealDistanceM(hazard(), 'highway', display)).toBe(1000);
+    // A traffic reveal set below the hazard reveal does not hide traffic sooner.
+    expect(hazardRevealDistanceM(jam, 'highway', { ...display, trafficRevealM: 500 })).toBe(1000);
+    expect(hazardRevealDistanceM(jam, 'highway', { ...display, trafficRevealM: 6000 })).toBe(6000);
+  });
+
+  it('counts jams, slowdowns, accidents, road works and anything delayed as traffic', () => {
+    for (const type of ['traffic-jam', 'slowdown', 'accident', 'road-works'] as const) {
+      expect(isTrafficHazard(hazard({ type }))).toBe(true);
+    }
+    expect(isTrafficHazard(hazard())).toBe(false);
+    expect(isTrafficHazard(hazard({ type: 'other', description: 'Road closed' }))).toBe(false);
+    expect(isTrafficHazard(hazard({ type: 'other', delaySeconds: 600 }))).toBe(true);
+    expect(isTrafficHazard(hazard({ type: 'weather', delaySeconds: 0 }))).toBe(false);
+    expect(isTrafficHazard(hazard({ type: 'weather', delaySeconds: Number.NaN }))).toBe(false);
+  });
+
+  it('rounds the delay to whole minutes and drops one under half a minute', () => {
+    expect(delayMinutes(null)).toBeNull();
+    expect(delayMinutes(0)).toBeNull();
+    expect(delayMinutes(20)).toBeNull();
+    expect(delayMinutes(30)).toBe(1);
+    expect(delayMinutes(89)).toBe(1);
+    expect(delayMinutes(400)).toBe(7);
+    expect(delayMinutes(5_400)).toBe(90);
+    expect(delayMinutes(Number.POSITIVE_INFINITY)).toBeNull();
+    const h = highwayDrive(makeConfig(), { speed: 100 });
+    h.send({
+      type: 'hazards/update',
+      hazards: [
+        hazard({ type: 'slowdown', distanceM: 800, speedLimitKph: null, delaySeconds: 15 }),
+      ],
+      at: h.now,
+    });
+    expect(widget(h.frame(), 'hazard')).toMatchObject({ type: 'slowdown', delayMinutes: null });
   });
 
   it("never shows the phone's hazard text to a moving driver", () => {

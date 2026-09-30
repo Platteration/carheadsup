@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION, parsePhoneMessage } from '@carheadsup/core';
+import { NO_CHANNEL_BINDING, PROTOCOL_VERSION, parsePhoneMessage } from '@carheadsup/core';
 import type {
   HudChallenge,
   HudConfig,
@@ -34,6 +34,11 @@ export const PHONE_CLOSE = {
   helloRequired: 4003,
   /** Too many invalid messages in a row. */
   tooManyErrors: 4004,
+  /**
+   * A plain (`ws://`) session while the HUD no longer allows them (`server.allowPlainPhone`
+   * switched off): the phone must use TLS.
+   */
+  tlsRequired: 4005,
   /** The phone does not read what the HUD sends (its unsent backlog passed the limit). */
   backlog: 1008,
   /**
@@ -63,6 +68,11 @@ export const TRIPS_REQUEST_BURST = 3;
 export interface PhoneChannelOptions {
   /** The HUD's identity, sent in every `challenge` and `welcome` (see `store/hud-id.ts`). */
   hudId: string;
+  /**
+   * SHA-256 fingerprint of the HUD's TLS certificate (see `tls/identity.ts`), which the proofs
+   * of a session over TLS are bound to; null without TLS.
+   */
+  certFingerprint: string | null;
   /** Feed events into the engine. */
   dispatch(event: HudEvent): void;
   /** Effective config (vehicle name, pairing token, readMessagesAloud). */
@@ -87,10 +97,19 @@ export interface PhoneChannelOptions {
   maxConsecutiveInvalid?: number;
 }
 
+/** How a phone reached the HUD: over TLS (`wss://`, the norm) or plain `ws://`. */
+export type PhoneTransport = 'tls' | 'plain';
+
 interface Session {
   readonly id: number;
   readonly ws: WebSocket;
   readonly remoteAddress: string;
+  readonly transport: PhoneTransport;
+  /**
+   * What the proofs are bound to: the fingerprint of the certificate this TLS connection
+   * presented, or `NO_CHANNEL_BINDING` on a plain one.
+   */
+  readonly channelBinding: string;
   /** The nonce of this connection's `challenge`. */
   readonly hudNonce: string;
   phase: 'hello' | 'active' | 'closed';
@@ -105,14 +124,20 @@ interface Session {
 }
 
 /**
- * `/ws/phone`: the companion app's session protocol (v2, mutually authenticated).
+ * `/ws/phone`: the companion app's session protocol (v3, mutually authenticated, bound to the
+ * TLS certificate).
  *
  *  - On connect the HUD sends `challenge` (its id and a fresh nonce). The first message must be
  *    a valid `hello` within {@link HELLO_TIMEOUT_MS}. A different protocol version gets `error
  *    unsupported-version`; a proof that does not match `phone.pairingToken` (HMAC over the
- *    challenge, compared in constant time; with no token set, the empty key) gets `error
- *    bad-token` and close 4001. Otherwise the HUD answers `welcome` with its own proof, the
- *    phone counts as connected (`phone/link`) and due maintenance items are pushed.
+ *    challenge and this connection's certificate fingerprint, compared in constant time; with
+ *    no token set, the empty key) gets `error bad-token` and close 4001 — also a proof made for
+ *    another certificate, i.e. through a relay that terminated the phone's TLS. Otherwise the
+ *    HUD answers `welcome` with its own proof, the phone counts as connected (`phone/link`) and
+ *    due maintenance items are pushed.
+ *  - Sessions arrive over TLS ({@link PhoneTransport} `tls`), or — only while
+ *    `server.allowPlainPhone` is on — over plain `ws://`, where nothing is bound. Switching the
+ *    option off closes plain sessions (4005).
  *  - There is one active phone. A newer session from the same phone (same `deviceId`) replaces
  *    the older one (close 4000 "replaced") without a disconnect in between; another phone is
  *    refused (close 1013) while one is connected, so two paired phones never take the HUD from
@@ -145,7 +170,11 @@ export class PhoneChannel {
     return this.active !== null;
   }
 
-  accept(ws: WebSocket, remoteAddress: string | undefined): void {
+  /**
+   * A new `/ws/phone` connection, over TLS (bound to the HUD's certificate) or — where the
+   * router allowed it — plain.
+   */
+  accept(ws: WebSocket, remoteAddress: string | undefined, transport: PhoneTransport): void {
     if (this.closed) {
       closeSocket(ws, 1001, 'HUD shutting down');
       return;
@@ -156,6 +185,11 @@ export class PhoneChannel {
       id: this.nextId++,
       ws,
       remoteAddress: address,
+      transport,
+      channelBinding:
+        transport === 'tls'
+          ? (this.options.certFingerprint ?? NO_CHANNEL_BINDING)
+          : NO_CHANNEL_BINDING,
       hudNonce: randomAuthId(),
       phase: 'hello',
       helloTimer: null,
@@ -194,8 +228,20 @@ export class PhoneChannel {
     return session !== null && this.sendTo(session, message);
   }
 
-  /** Disconnect the active phone if its proof does not match the (new) pairing token. */
+  /**
+   * Disconnect the active phone if its proof does not match the (new) pairing token, and every
+   * plain session once plain sessions are no longer allowed.
+   */
   updateConfig(config: HudConfig): void {
+    if (!config.server.allowPlainPhone) {
+      for (const session of [...this.sessions]) {
+        if (session.transport !== 'plain' || session.phase === 'closed') continue;
+        this.options.logger.info(
+          `Phone: plain connections are no longer allowed; closing session ${session.id}`,
+        );
+        this.closeSession(session, PHONE_CLOSE.tlsRequired, 'TLS required');
+      }
+    }
     const session = this.active;
     if (session?.hello && !this.proofAccepted(session, session.hello, config)) {
       this.options.logger.info('Phone: pairing token changed; disconnecting the phone');
@@ -325,8 +371,8 @@ export class PhoneChannel {
     const config = this.options.getConfig();
     if (!this.proofAccepted(session, hello, config)) {
       this.options.logger.warn(
-        `Phone: ${hello.device || 'a phone'} from ${session.remoteAddress} sent a wrong pairing ` +
-          'token (its proof does not match phone.pairingToken)',
+        `Phone: ${hello.device || 'a phone'} from ${session.remoteAddress} sent a wrong proof ` +
+          '(a wrong pairing token, or a connection relayed through another TLS certificate)',
       );
       this.refuse(session, 'bad-token', 'Wrong pairing token', PHONE_CLOSE.badToken);
       return;
@@ -361,7 +407,7 @@ export class PhoneChannel {
     };
     this.sendTo(session, welcome);
     this.options.logger.info(
-      `Phone: ${hello.device || 'phone'} connected from ${session.remoteAddress} (${hello.app} ${hello.appVersion})`,
+      `Phone: ${hello.device || 'phone'} connected from ${session.remoteAddress} (${hello.app} ${hello.appVersion}${session.transport === 'plain' ? ', unencrypted' : ''})`,
     );
     if (previous === null) this.notifyPhoneChange(true);
     this.options.dispatch({
@@ -435,13 +481,14 @@ export class PhoneChannel {
       hudNonce: session.hudNonce,
       phoneNonce: hello.nonce,
       deviceId: hello.deviceId,
+      certFingerprint: session.channelBinding,
     };
   }
 
   /**
-   * Whether `hello.proof` was made with `phone.pairingToken` for this session's challenge. With
-   * no token configured the key is empty: anyone can make that proof, and a phone that holds a
-   * token (and proved it) does not pass.
+   * Whether `hello.proof` was made with `phone.pairingToken` for this session's challenge and
+   * certificate. With no token configured the key is empty: anyone can make that proof, and a
+   * phone that holds a token (and proved it) does not pass.
    */
   private proofAccepted(session: Session, hello: PhoneHello, config: HudConfig): boolean {
     const expected = phoneProof(config.phone.pairingToken, this.proofInput(session, hello));

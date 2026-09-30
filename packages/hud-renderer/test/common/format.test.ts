@@ -5,6 +5,7 @@ import {
   formatClock,
   formatClockText,
   formatCurrency,
+  formatDelay,
   formatDurationS,
   formatMinutes,
   formatNumber,
@@ -46,6 +47,19 @@ describe('formatTimer', () => {
   it('clamps negative and non-finite input', () => {
     expect(formatTimer(-5)).toBe('0:00');
     expect(formatTimer(Number.NaN)).toBe('0:00');
+  });
+});
+
+describe('formatDelay', () => {
+  it('signs traffic delays, in whole hours from 100 minutes', () => {
+    expect(formatDelay(7)).toBe('+7 min');
+    expect(formatDelay(12.4)).toBe('+12 min');
+    expect(formatDelay(65)).toBe('+65 min');
+    expect(formatDelay(99)).toBe('+99 min');
+    expect(formatDelay(100)).toBe('+2 h');
+    expect(formatDelay(125)).toBe('+2 h');
+    expect(formatDelay(150)).toBe('+3 h');
+    expect(formatDelay(Number.NaN)).toBe('+0 min');
   });
 });
 

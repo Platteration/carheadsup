@@ -1,10 +1,12 @@
 package dev.carheadsup.protocol.link
 
 /**
- * Where the HUD lives: a host (name, IPv4 or IPv6) and the port of its HTTP/WebSocket server.
+ * Where the HUD lives: a host (name, IPv4 or IPv6) and the port of its TLS listener
+ * (`server.tlsPort`, 8443 by default).
  *
- * The WebSocket for the phone is `ws://host:port/ws/phone`, the REST API is under
- * `http://host:port/api/` and the settings app is served at `/settings`.
+ * The WebSocket for the phone is `wss://host:port/ws/phone`, the REST API is under
+ * `https://host:port/api/` and the settings app is served at `/settings` — all with the HUD's
+ * self-signed certificate, which the phone pins (see [dev.carheadsup.protocol.tls]).
  */
 public data class HudEndpoint(val host: String, val port: Int = DEFAULT_PORT) {
     init {
@@ -15,8 +17,8 @@ public data class HudEndpoint(val host: String, val port: Int = DEFAULT_PORT) {
     private val authority: String
         get() = if (':' in host) "[$host]:$port" else "$host:$port"
 
-    public val webSocketUrl: String get() = "ws://$authority$PHONE_SOCKET_PATH"
-    public val httpBaseUrl: String get() = "http://$authority"
+    public val webSocketUrl: String get() = "wss://$authority$PHONE_SOCKET_PATH"
+    public val httpBaseUrl: String get() = "https://$authority"
     public val settingsUrl: String get() = "$httpBaseUrl/settings"
 
     /**
@@ -49,22 +51,41 @@ public data class HudEndpoint(val host: String, val port: Int = DEFAULT_PORT) {
         }
 
         /** RFC 3986 percent-encoding of everything but the unreserved characters (UTF-8). */
-        private fun percentEncode(text: String): String =
-            buildString {
-                for (byte in text.toByteArray(Charsets.UTF_8)) {
-                    val c = byte.toInt() and 0xff
-                    val ch = c.toChar()
-                    if (ch in 'A'..'Z' || ch in 'a'..'z' || ch in '0'..'9' || ch in "-._~") {
-                        append(ch)
-                    } else {
-                        append('%').append(HEX[c shr 4]).append(HEX[c and 0x0f])
-                    }
+        private fun percentEncode(text: String): String = buildString {
+            for (byte in text.toByteArray(Charsets.UTF_8)) {
+                val c = byte.toInt() and 0xff
+                val ch = c.toChar()
+                if (ch in 'A'..'Z' || ch in 'a'..'z' || ch in '0'..'9' || ch in "-._~") {
+                    append(ch)
+                } else {
+                    append('%').append(HEX[c shr 4]).append(HEX[c and 0x0f])
                 }
             }
+        }
 
         private const val HEX = "0123456789ABCDEF"
 
-        public const val DEFAULT_PORT: Int = 8080
+        /** The HUD's default TLS port (`server.tlsPort`), where the phone connects. */
+        public const val DEFAULT_PORT: Int = 8443
+
+        /**
+         * The HUD's default plain HTTP port (`server.port`), where apps from before the TLS link
+         * connected (and where the phone link is now refused).
+         */
+        public const val LEGACY_PLAIN_PORT: Int = 8080
+
+        /**
+         * A manual address saved by an app from before the TLS link: one naming the HUD's default
+         * plain port ([LEGACY_PLAIN_PORT]) now names the default TLS port ([DEFAULT_PORT]), in the
+         * form [display] gives. Anything else is returned unchanged — without a port the default
+         * already is the TLS port, and a HUD moved to another plain port has its TLS port wherever
+         * its `server.tlsPort` says, which the user has to enter.
+         */
+        public fun upgradeLegacyAddress(text: String): String {
+            val endpoint = parse(text) ?: return text
+            if (endpoint.port != LEGACY_PLAIN_PORT) return text
+            return endpoint.copy(port = DEFAULT_PORT).display()
+        }
         public const val PHONE_SOCKET_PATH: String = "/ws/phone"
 
         /** mDNS / DNS-SD service type the HUD advertises. */
@@ -76,8 +97,9 @@ public data class HudEndpoint(val host: String, val port: Int = DEFAULT_PORT) {
 
         /**
          * Parses a manually entered address: `host`, `host:port`, `[v6]:port`, a bare IPv6
-         * address, optionally with an `http://`, `https://`, `ws://` scheme and a trailing path
-         * (both ignored). Returns null when the text is not a usable address.
+         * address, optionally with an `https://` or `wss://` scheme and a trailing path (both
+         * ignored). The port is the HUD's TLS port ([DEFAULT_PORT] when left out). Returns null
+         * when the text is not a usable address.
          */
         public fun parse(input: String): HudEndpoint? {
             var text = input.trim()

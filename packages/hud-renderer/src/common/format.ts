@@ -56,6 +56,15 @@ export function formatMinutes(totalMinutes: number): string {
   return `${hours} h ${String(m % 60).padStart(2, '0')} min`;
 }
 
+/**
+ * A traffic delay, signed and short enough for the hazard widget next to the distance: "+8 min",
+ * "+95 min", and whole hours from 100 minutes ("+2 h").
+ */
+export function formatDelay(totalMinutes: number): string {
+  const m = Number.isFinite(totalMinutes) ? Math.max(0, Math.round(totalMinutes)) : 0;
+  return m < 100 ? `+${m} min` : `+${Math.round(m / 60)} h`;
+}
+
 /** `formatMinutes` for a duration in seconds (rounded to whole minutes). */
 export function formatDurationS(totalSeconds: number): string {
   return formatMinutes(totalSeconds / 60);
