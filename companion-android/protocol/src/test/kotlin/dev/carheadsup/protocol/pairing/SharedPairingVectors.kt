@@ -421,4 +421,86 @@ internal val SHARED_INVALID_PAIRING_VECTORS: List<InvalidPairingVector> =
                 "r%20HUD",
             error = "invalid",
         ),
+        InvalidPairingVector(
+            name = "a look-alike of the pairing address",
+            uri =
+            "carheadsup://pair.example.com?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e" +
+                "90afd8d47ff4c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=10.42.0.1,carheadsu" +
+                "p.local&p=8443&n=My%20car%20HUD",
+            error = "foreign",
+        ),
+        InvalidPairingVector(
+            name = "user information before the pairing address",
+            uri =
+            "carheadsup://user@pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d" +
+                "47ff4c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=10.42.0.1,carheadsup.local" +
+                "&p=8443&n=My%20car%20HUD",
+            error = "foreign",
+        ),
+        InvalidPairingVector(
+            name = "a port on the pairing address",
+            uri =
+            "carheadsup://pair:8443?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d" +
+                "47ff4c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=10.42.0.1,carheadsup.local" +
+                "&p=8443&n=My%20car%20HUD",
+            error = "foreign",
+        ),
+        InvalidPairingVector(
+            name = "a host label longer than 63 characters",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.local&p=8443&n=My%20car%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a host longer than 253 characters",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+                "aaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaa" +
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&p=8443&n=My%20car%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a host name starting with a hyphen",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=-hud.local&p=8443&n=My%20car%20" +
+                "HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a host with a port",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=10.42.0.1:8443&p=8443&n=My%20ca" +
+                "r%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "an escaped slash in a host",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=evil.example%2Fpath&p=8443&n=My" +
+                "%20car%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a web address as a host",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=https%3A%2F%2Fevil.example&p=84" +
+                "43&n=My%20car%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a name with a C1 control character",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=10.42.0.1,carheadsup.local&p=84" +
+                "43&n=My%C2%85car",
+            error = "invalid",
+        ),
     )

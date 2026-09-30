@@ -1,9 +1,8 @@
-import { networkInterfaces } from 'node:os';
 import { DEFAULT_CONFIG } from '@carheadsup/core';
 import type { HudFrame, RendererDisplayMessage } from '@carheadsup/core';
 import type { FrameSink } from '../../src/sources/types.ts';
 import { afterEach, describe, expect, it } from 'vitest';
-import { FakeSimulation, TestSocket, startTestServer, waitFor } from '../helpers.ts';
+import { FakeSimulation, TestSocket, lanAddress, startTestServer, waitFor } from '../helpers.ts';
 import type { TestServer, TestServerOptions } from '../helpers.ts';
 
 let current: TestServer | null = null;
@@ -25,15 +24,6 @@ afterEach(async () => {
   await current?.stop();
   current = null;
 });
-
-function lanAddress(): string | null {
-  for (const list of Object.values(networkInterfaces())) {
-    for (const info of list ?? []) {
-      if (info.family === 'IPv4' && !info.internal) return info.address;
-    }
-  }
-  return null;
-}
 
 async function patch(
   t: TestServer,
@@ -184,7 +174,8 @@ describe('/ws/hud', () => {
 
   it.skipIf(lan === null)('requires the API token from remote clients', async () => {
     const t = await start({ host: '0.0.0.0', config: { server: { apiToken: 's3cret' } } });
-    const remote = `ws://${lan}:${t.port}/ws/hud`;
+    // Other devices connect over TLS (plain ws:// is refused to them; see https-only.test.ts).
+    const remote = `wss://${lan}:${t.tlsPort}/ws/hud`;
     await expect(connect(remote).opened).rejects.toThrow(/401/);
     await expect(connect(`${remote}?token=wrong`).opened).rejects.toThrow(/401/);
     const byQuery = connect(`${remote}?token=s3cret`);

@@ -80,6 +80,7 @@ const DIGITS_AND_DOTS = /^[0-9.]+$/;
 const PORT = /^[1-9][0-9]{0,4}$/;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+const LONE_SURROGATES = new RegExp(LONE_SURROGATE.source, 'g');
 
 /** Whether `host` may appear in `h`: an IPv4 literal (canonical dotted decimal) or a DNS name. */
 export function isPairingHost(host: string): boolean {
@@ -101,12 +102,14 @@ function utf8Length(text: string): number {
 
 /**
  * The HUD's name as phones see it — "<vehicle name> HUD", as it advertises itself over mDNS and
- * the pairing URI carries it: control characters and runs of white space become one space, and
- * the vehicle name is cut (by whole code points) so that the whole fits one DNS label (63 bytes
- * of UTF-8). An empty vehicle name gives "carheadsup HUD".
+ * the pairing URI carries it: control characters and runs of white space become one space, a
+ * lone UTF-16 surrogate (which no UTF-8 can carry) becomes U+FFFD, and the vehicle name is cut
+ * (by whole code points) so that the whole fits one DNS label (63 bytes of UTF-8). An empty
+ * vehicle name gives "carheadsup HUD". So any vehicle name gives a name the pairing URI accepts.
  */
 export function hudDisplayName(vehicleName: string): string {
   const base = vehicleName
+    .replace(LONE_SURROGATES, '�')
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();

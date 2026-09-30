@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Logger } from '@carheadsup/obd';
 import { isAuthorized, isCrossSiteRequest } from './auth.ts';
+import { SERVE_PLAIN, httpsRequiredMessage, plainAccess, secureLocationOf } from './https-only.ts';
+import type { PlainAccessPolicy } from './https-only.ts';
 import { HttpError, MAX_JSON_BODY_BYTES, readJsonBody, sendError, sendReply } from './respond.ts';
 import type { Router } from './router.ts';
 import { applySecurityHeaders } from './security.ts';
@@ -13,6 +15,11 @@ export interface RequestHandlerOptions {
   apiToken: () => string;
   /** Whether a `Host` header names this HUD (DNS-rebinding protection; see `isAllowedHost`). */
   allowedHost: (host: string | undefined) => boolean;
+  /**
+   * Given for the plain listener only: while TLS is on, other devices are sent to HTTPS instead
+   * of being served (see `https-only.ts`).
+   */
+  plainAccess?: PlainAccessPolicy;
   logger: Logger;
   maxBodyBytes?: number;
 }
@@ -38,10 +45,39 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 export const UNKNOWN_HOST_MESSAGE =
   'Unknown host name: open the HUD by its IP address or <hostname>.local (or allow the name with --allowed-hosts)';
 
+const isApiPath = (path: string): boolean => path === '/api' || path.startsWith('/api/');
+const isSocketPath = (path: string): boolean => path === '/ws' || path.startsWith('/ws/');
+
+/**
+ * Send another device that reached the plain listener to HTTPS on `tlsPort`: GET and HEAD
+ * outside `/api` and `/ws` (the pages and their files) are redirected (307, not cached, so a
+ * config change applies at once); everything else — and everything while the TLS listener is not
+ * running (`tlsPort` null) — is refused with 403, without looking at its token or reading its body.
+ */
+function sendToHttps(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  tlsPort: number | null,
+): void {
+  const path = url.pathname;
+  const socket = isSocketPath(path);
+  const scheme = socket ? 'wss' : 'https';
+  const location = secureLocationOf(req, url, tlsPort, scheme);
+  const method = req.method ?? 'GET';
+  const page = !socket && !isApiPath(path) && (method === 'GET' || method === 'HEAD');
+  if (page && location !== null) {
+    sendReply(res, { status: 307, text: `Use ${location}\n`, headers: { Location: location } });
+    return;
+  }
+  sendError(res, 403, httpsRequiredMessage(location, tlsPort, scheme));
+}
+
 /**
  * The HTTP request listener: security headers on everything; a `Host` that is not the HUD's →
- * 403 (DNS rebinding); `/api/*` → auth, CSRF check and the API router (JSON errors); `/ws/*`
- * without an upgrade → 426; anything else → the static renderer files.
+ * 403 (DNS rebinding); on the plain listener, another device while TLS runs → redirect or 403
+ * (`plainAccess`); `/api/*` → auth, CSRF check and the API router (JSON errors); `/ws/*` without
+ * an upgrade → 426; anything else → the static renderer files.
  */
 export function createRequestHandler(
   options: RequestHandlerOptions,
@@ -98,12 +134,19 @@ export function createRequestHandler(
       sendError(res, 400, 'Malformed request target');
       return;
     }
+    if (options.plainAccess !== undefined) {
+      const access = plainAccess(req.socket.remoteAddress, options.plainAccess);
+      if (access !== SERVE_PLAIN) {
+        sendToHttps(req, res, url, access.tlsPort);
+        return;
+      }
+    }
     const path = url.pathname;
-    if (path === '/api' || path.startsWith('/api/')) {
+    if (isApiPath(path)) {
       await handleApi(req, res, url);
       return;
     }
-    if (path === '/ws' || path.startsWith('/ws/')) {
+    if (isSocketPath(path)) {
       sendError(res, 426, 'This endpoint only accepts WebSocket connections', {
         Upgrade: 'websocket',
         Connection: 'Upgrade',

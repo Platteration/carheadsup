@@ -638,7 +638,7 @@ describe('settings app', () => {
     const root = start(hud);
     await ready(root);
     const server = () => section(root, 'server');
-    const tlsPort = field(server(), 'Phone port (TLS)').querySelector('input')!;
+    const tlsPort = field(server(), 'Secure port (TLS)').querySelector('input')!;
     expect(tlsPort.value).toBe('8443');
     const plain = field(server(), 'unencrypted phone connections').querySelector<HTMLInputElement>(
       'input[type=checkbox]',
@@ -656,7 +656,40 @@ describe('settings app', () => {
     expect(hud.config.server).toMatchObject({ tlsPort: null, allowPlainPhone: true });
     // The same port for both is refused, like the HUD does.
     await type(tlsPort, String(hud.config.server.port));
-    await waitFor(() => text(field(server(), 'Phone port (TLS)')).includes('must differ'));
+    await waitFor(() => text(field(server(), 'Secure port (TLS)')).includes('must differ'));
+  });
+
+  it('offers plain http to other devices for development, and warns about it', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    const server = () => section(root, 'server');
+    const warning = () =>
+      [...server().querySelectorAll('.notice--warning')].find((notice) =>
+        text(notice).includes('can read the API token'),
+      ) ?? null;
+    const plain = field(server(), 'other devices over plain http').querySelector<HTMLInputElement>(
+      'input[type=checkbox]',
+    )!;
+    expect(plain.checked).toBe(false);
+    expect(text(field(server(), 'other devices over plain http'))).toContain(
+      'sent to the secure port',
+    );
+    expect(warning()).toBeNull();
+    await check(plain, true);
+    expect(text(warning())).toContain('Over plain http, anyone on the car’s Wi-Fi can read');
+    expect(text(warning())).toContain('Leave this off unless you need it.');
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => text(saveBar(root)) === 'Saved');
+    expect(patches(hud)).toEqual([{ server: { allowPlainRemote: true } }]);
+    await check(plain, false);
+    expect(warning()).toBeNull();
+    // Without a secure port, plain http is the only way in: said so whatever the switch says.
+    await type(field(server(), 'Secure port (TLS)').querySelector('input')!, '');
+    expect(text(warning())).toContain(
+      'Without a secure port, other devices use this app over plain http: anyone',
+    );
+    expect(text(warning())).not.toContain('Leave this off');
   });
 
   it('keeps a live change reverted while its PATCH was in flight', async () => {

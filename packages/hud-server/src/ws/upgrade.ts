@@ -4,6 +4,13 @@ import { PROTOCOL_LIMITS } from '@carheadsup/core';
 import type { Logger, Timers } from '@carheadsup/obd';
 import { WebSocketServer } from 'ws';
 import { bearerToken, isAuthorized, isCrossSiteRequest } from '../http/auth.ts';
+import {
+  SERVE_PLAIN,
+  httpsRequiredMessage,
+  plainAccess,
+  secureLocationOf,
+} from '../http/https-only.ts';
+import type { PlainAccessPolicy } from '../http/https-only.ts';
 import { UNKNOWN_HOST_MESSAGE, parseRequestUrl } from '../http/server.ts';
 import type { PhoneChannel, PhoneTransport } from './phone-channel.ts';
 import type { RendererChannel } from './renderer-channel.ts';
@@ -28,8 +35,12 @@ export interface WebSocketRouterOptions {
   apiToken: () => string;
   /** Current `server.allowPlainPhone`: whether `/ws/phone` is served on the plain listener. */
   allowPlainPhone: () => boolean;
-  /** The port the TLS listener is bound to (named when a plain phone connection is refused). */
-  tlsPort: () => number | null;
+  /**
+   * Whether other devices may open `/ws/hud` on the plain listener (see `https-only.ts`); its
+   * `tlsPort` (the TLS listener's port, null while it is not running) is also named when a plain
+   * phone connection is refused.
+   */
+  plainAccess: PlainAccessPolicy;
   /** Whether a `Host` header names this HUD (DNS-rebinding protection). */
   allowedHost: (host: string | undefined) => boolean;
   timers: Timers;
@@ -45,14 +56,24 @@ const STATUS_TEXT: Readonly<Record<number, string>> = {
   503: 'Service Unavailable',
 };
 
-/** Answer an upgrade request with a plain HTTP error and close the socket. */
-function reject(socket: Duplex, status: number, message: string): void {
-  const body = `${message}\n`;
+/**
+ * Answer an upgrade request with a plain HTTP error and close the socket: the message as text,
+ * or as the REST API's `{ "error": … }` JSON.
+ */
+function reject(
+  socket: Duplex,
+  status: number,
+  message: string,
+  format: 'text' | 'json' = 'text',
+): void {
+  const json = format === 'json';
+  const body = json ? JSON.stringify({ error: message }) : `${message}\n`;
   const extra = status === 401 ? 'WWW-Authenticate: Bearer realm="carheadsup"\r\n' : '';
   socket.end(
     `HTTP/1.1 ${status} ${STATUS_TEXT[status] ?? 'Error'}\r\n` +
       'Connection: close\r\n' +
-      'Content-Type: text/plain; charset=utf-8\r\n' +
+      `Content-Type: ${json ? 'application/json' : 'text/plain'}; charset=utf-8\r\n` +
+      'Cache-Control: no-store\r\n' +
       `Content-Length: ${Buffer.byteLength(body)}\r\n` +
       extra +
       '\r\n' +
@@ -72,9 +93,11 @@ export function tlsRequiredMessage(tlsPort: number | null): string {
  * noServer mode): `/ws/hud` (same access rule as the REST API; remote clients pass the token as
  * `?token=` or a Bearer header) and `/ws/phone` (authenticated by its `hello`, and bound to the
  * TLS certificate). The phone endpoint is served on the TLS listener, and on the plain one only
- * while `server.allowPlainPhone` is on (403 otherwise). Unknown paths, upgrades addressed to a
- * host name that is not the HUD's (DNS rebinding) and cross-site browser upgrades are refused.
- * Keeps every socket alive with pings every 10 s.
+ * while `server.allowPlainPhone` is on (403 otherwise). On the plain listener `/ws/hud` is
+ * refused to other devices while TLS is on (403 with a JSON error naming the `wss:` address),
+ * before their token is looked at, unless `server.allowPlainRemote` is on. Unknown
+ * paths, upgrades addressed to a host name that is not the HUD's (DNS rebinding) and cross-site
+ * browser upgrades are refused. Keeps every socket alive with pings every 10 s.
  */
 export class WebSocketRouter {
   private readonly options: WebSocketRouterOptions;
@@ -145,6 +168,16 @@ export class WebSocketRouter {
     const remoteAddress = req.socket.remoteAddress;
 
     if (path === HUD_SOCKET_PATH) {
+      const access =
+        transport === 'plain' ? plainAccess(remoteAddress, this.options.plainAccess) : SERVE_PLAIN;
+      if (access !== SERVE_PLAIN) {
+        const location = secureLocationOf(req, url, access.tlsPort, 'wss');
+        this.options.logger.debug(
+          `Renderer: refused a plain connection from ${remoteAddress ?? '?'} (TLS required)`,
+        );
+        reject(socket, 403, httpsRequiredMessage(location, access.tlsPort, 'wss'), 'json');
+        return;
+      }
       const token = url.searchParams.get('token') ?? bearerToken(req.headers.authorization);
       const authorized = isAuthorized({
         remoteAddress,
@@ -161,7 +194,7 @@ export class WebSocketRouter {
       }
       this.rendererServer.handleUpgrade(req, socket, head, (ws) => {
         this.heartbeat.track(ws);
-        this.options.renderer.accept(ws, { remoteAddress, token });
+        this.options.renderer.accept(ws, { remoteAddress, token, listener: transport });
       });
       return;
     }
@@ -170,7 +203,7 @@ export class WebSocketRouter {
       this.options.logger.debug(
         `Phone: refused a plain connection from ${remoteAddress ?? '?'} (TLS required)`,
       );
-      reject(socket, 403, tlsRequiredMessage(this.options.tlsPort()));
+      reject(socket, 403, tlsRequiredMessage(this.options.plainAccess.tlsPort()));
       return;
     }
     this.phoneServer.handleUpgrade(req, socket, head, (ws) => {

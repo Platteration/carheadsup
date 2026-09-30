@@ -66,7 +66,8 @@ test_never_answers() {
 
 test_error_status() {
   local status
-  for status in 403 404 503; do
+  # 307: the HUD sends the kiosk to HTTPS when it comes by another address than loopback.
+  for status in 403 404 503 307; do
     echo "$status" >"${WORK}/status"
     run_kiosk 3 CARHEADSUP_KIOSK_WAIT_S=1
     if [[ $code == 124 && ! -e ${WORK}/browser-args && $output == *"HTTP ${status}"* ]]; then
@@ -75,6 +76,16 @@ test_error_status() {
       fail "HTTP ${status}: expected to keep waiting without a browser (exit ${code}): ${output}"
     fi
   done
+}
+
+test_redirect_to_https() {
+  echo 307 >"${WORK}/status"
+  run_kiosk 3 CARHEADSUP_KIOSK_WAIT_S=1
+  if [[ $output == *"only serves other devices over HTTPS"* && $output == *"localhost"* ]]; then
+    pass "HTTP 307: says to use localhost"
+  else
+    fail "HTTP 307: expected the log to point at localhost: ${output}"
+  fi
 }
 
 test_answers_later() {
@@ -113,6 +124,7 @@ test_invalid_wait() {
 
 test_never_answers
 test_error_status
+test_redirect_to_https
 test_answers_later
 test_invalid_wait
 

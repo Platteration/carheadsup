@@ -191,10 +191,13 @@ public object PairingUri {
                 bytes[size++] = ((high shl 4) or low).toByte()
                 i += 3
             } else {
-                // Unescaped characters (a space a scanner kept, a raw 'ü') stand for themselves.
+                // Unescaped characters (a space a scanner kept, a raw 'ü') stand for themselves —
+                // except a lone surrogate, which has no UTF-8 form (it would turn into '?').
                 var end = i + 1
                 while (end < text.length && text[end] != '%') end++
-                for (b in text.substring(i, end).toByteArray(Charsets.UTF_8)) bytes[size++] = b
+                val raw = text.substring(i, end)
+                if (hasLoneSurrogate(raw)) return null
+                for (b in raw.toByteArray(Charsets.UTF_8)) bytes[size++] = b
                 i = end
             }
         }

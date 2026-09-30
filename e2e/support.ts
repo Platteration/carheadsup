@@ -5,7 +5,7 @@
  */
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DeepPartial, HudConfig, SimControl, SimStatus } from '@carheadsup/core';
@@ -54,6 +54,8 @@ export interface SimulatedHud {
    * certificate, as the companion app's settings page loads them.
    */
   httpsBase: string;
+  /** The TLS listener's port. */
+  tlsPort: number;
   /** SHA-256 of the HUD's certificate (what the companion app pins). */
   fingerprint: string;
   dataDir: string;
@@ -77,11 +79,29 @@ export interface StartOptions {
    * which no phone can reach, so the pairing page has no code to show.
    */
   pairingHosts?: string[];
+  /**
+   * Bind address; default 127.0.0.1. `0.0.0.0` lets a page opened at `lanAddress()` play
+   * another device on the car's Wi-Fi.
+   */
+  host?: string;
 }
 
 /**
- * Start the real HUD server with the simulator (`--sim`) on 127.0.0.1 and a free port, with
- * mDNS and the backlight off (nothing leaves the test machine).
+ * A non-loopback IPv4 address of this machine, if any. A browser that opens the HUD at it
+ * connects from it, not from loopback: another device, as far as the HUD can tell.
+ */
+export function lanAddress(): string | null {
+  for (const list of Object.values(networkInterfaces())) {
+    for (const info of list ?? []) {
+      if (info.family === 'IPv4' && !info.internal) return info.address;
+    }
+  }
+  return null;
+}
+
+/**
+ * Start the real HUD server with the simulator (`--sim`) on 127.0.0.1 (or `options.host`) and a
+ * free port, with mDNS and the backlight off (nothing is advertised).
  */
 export async function startSimulatedHud(options: StartOptions = {}): Promise<SimulatedHud> {
   const dataDir = await mkdtemp(join(tmpdir(), 'carheadsup-e2e-'));
@@ -101,7 +121,7 @@ export async function startSimulatedHud(options: StartOptions = {}): Promise<Sim
     sim: true,
     port: options.port ?? 0,
     tlsPort: 0,
-    host: '127.0.0.1',
+    host: options.host ?? '127.0.0.1',
     backlight: false,
     ...(options.pairingHosts !== undefined
       ? { pairingHosts: () => [...(options.pairingHosts ?? [])] }
@@ -137,6 +157,7 @@ export async function startSimulatedHud(options: StartOptions = {}): Promise<Sim
     port,
     base,
     httpsBase: `https://127.0.0.1:${tlsPort}`,
+    tlsPort,
     fingerprint,
     dataDir,
     sim: (control) => json<SimStatus>('POST', '/api/sim', control),

@@ -149,8 +149,13 @@ notification and sends it to the HUD.
   with the settings app. Without a pairing token (only a HUD set up before new HUDs made one, or
   one whose token was removed) nothing is proven: the phone asks you to confirm the HUD, and any
   phone can connect — set one ([details](docs/protocol.md#pairing-by-qr-code)).
-- The web pages in a browser (settings app, developer console) use plain HTTP on the car's
-  network; protect it with WPA2 on the Wi-Fi and the API token (see
+- The web pages in a browser on another device (settings app, developer console) use HTTPS on
+  port 8443 — plain `http://…:8080` redirects there, and the API refuses other devices over plain
+  HTTP, so the API token never crosses the Wi-Fi in clear text. The certificate is the HUD's own:
+  each browser warns once, and only comparing its fingerprint with the one the HUD shows tells a
+  real HUD from someone posing as it on the Wi-Fi. With TLS switched off (`server.tlsPort` null)
+  or `server.allowPlainRemote` on, browsers fall back to plain HTTP and the token is readable on
+  the Wi-Fi. Protect the network with WPA2 and set an API token (see
   [docs/architecture.md](docs/architecture.md#security-model)).
 - A flat reflection puts the image about a metre ahead of your eyes, not several metres down the
   road like a factory HUD with focusing optics.
@@ -218,6 +223,11 @@ a red light never opens it); it closes as the car drives off on the next loop. T
   car is parked (at the start, or in the developer console's *manual* mode with the engine off),
   *Phone → Show pairing code on the HUD* puts the pairing QR code on the HUD, for the companion
   to scan when the phone is on the same network.
+
+These addresses are for the machine running the simulator. From another device, open
+`https://<its address>:8443/dev` (plain `http://…:8080` redirects there) and accept the browser's
+warning about the HUD's self-signed certificate — or switch on *Server → Also serve other devices
+over plain http* for development.
 
 Simulated drives use their own data directory (`$XDG_DATA_HOME/carheadsup/sim`, by default
 `~/.local/share/carheadsup/sim`), so they never mix with real trips. In the developer console

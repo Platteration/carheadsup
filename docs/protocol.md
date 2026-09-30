@@ -1,16 +1,19 @@
 # Protocols and API
 
 Everything the HUD server exposes. The pages, the REST API and the WebSockets are served twice:
-plainly on `server.port` (8080 by default) and over TLS on `server.tlsPort` (8443 by default),
-with the HUD's self-signed certificate ([TLS](#tls-and-the-huds-certificate)). The phone link
-`/ws/phone` is served over TLS only — on the plain port just with `server.allowPlainPhone`.
+over TLS on `server.tlsPort` (8443 by default), with the HUD's self-signed certificate
+([TLS](#tls-and-the-huds-certificate)), for the phone and every other device; and plainly on
+`server.port` (8080 by default) for the Pi itself — other devices that come to the plain port
+are [sent to HTTPS](#plain-http-and-other-devices) (unless `server.allowPlainRemote`, or TLS is
+off). The phone link `/ws/phone` is served over TLS only — on the plain port just with
+`server.allowPlainPhone`.
 
 | Endpoint | Transport | Used by |
 | --- | --- | --- |
 | [`/ws/phone`](#phone-websocket-wsphone) | WebSocket over TLS (`wss://`, port 8443), JSON text frames | the Android companion |
-| [`/ws/hud`](#renderer-websocket-wshud) | WebSocket, JSON text frames (`ws://` or `wss://`) | the HUD page (kiosk) and the developer console |
-| [`/api/*`](#rest-api) | HTTP or HTTPS, JSON | the settings app, the developer console, the companion (HTTPS), scripts |
-| `/`, `/settings`, `/dev` | HTTP (HTTPS for the companion's settings page) | the three web pages |
+| [`/ws/hud`](#renderer-websocket-wshud) | WebSocket, JSON text frames (`ws://` on the Pi itself, `wss://` from other devices) | the HUD page (kiosk) and the developer console |
+| [`/api/*`](#rest-api) | HTTP on the Pi itself, HTTPS from other devices; JSON | the settings app, the developer console, the companion, scripts |
+| `/`, `/settings`, `/dev` | HTTP on the Pi itself, HTTPS from other devices | the three web pages |
 | [UDP `sensors.adasUdpPort`](#adas-udp-feed) | UDP, newline-delimited JSON | an optional ADAS module |
 | [`_carheadsup._tcp`](#mdns-discovery) | mDNS / DNS-SD | discovery by the companion |
 
@@ -235,9 +238,9 @@ every 5 s while it is up, so a Wi-Fi that comes up meanwhile shows in the code.
    goes on.
 2. It stores the pairing token and pins the `hudId` and the certificate fingerprint of the code,
    replacing any earlier pin: from now on the TLS layer accepts exactly that certificate.
-3. It tries the code's hosts on the TLS port and sets the first one it reaches as the HUD's
-   address (else the first IPv4 address: the phone may not be on the car's Wi-Fi yet), switching
-   automatic discovery off, and connects.
+3. It tries the code's hosts on the TLS port — all at once, for at most 2.5 s — and sets the
+   first one (in the code's order) it reaches as the HUD's address (else the first IPv4 address:
+   the phone may not be on the car's Wi-Fi yet), switching automatic discovery off, and connects.
 4. The connection proceeds as always — `challenge`, `hello`, `welcome` — except that the very
    first connection already demands the pinned certificate and `hudId`: a device posing as the
    HUD gets nothing, not even the phone's proof.
@@ -518,8 +521,11 @@ messages per second (bursts of up to 100); messages over the limit are dropped, 
 
 ## Renderer WebSocket (`/ws/hud`)
 
-Used by the HUD page and the developer console, on either port (the pages use `wss:` when they
-were loaded over HTTPS).
+Used by the HUD page and the developer console (the pages use `wss:` when they were loaded over
+HTTPS). Other devices connect over TLS: on the plain port their upgrade is refused with `403` and
+a JSON error naming `wss://<host>:8443/ws/hud`, before any token is looked at
+([details](#plain-http-and-other-devices)); switching `server.allowPlainRemote` off closes their
+plain sockets with code 4005.
 
 - **Access**: clients on the Pi itself are always allowed. When `server.apiToken` is set, other
   clients must pass it as `?token=<token>` or `Authorization: Bearer <token>`; otherwise the
@@ -675,12 +681,19 @@ Examples: [hardware.md](hardware.md#optional-adas-module).
 
 ## REST API
 
-JSON in, JSON out, under `/api/`, on both ports. The client in the renderer
-([`common/api.ts`](../packages/hud-renderer/src/common/api.ts)) and the companion's `HudApi` use
-exactly these endpoints; the companion over HTTPS on the TLS port, pinned to the HUD's
-certificate.
+JSON in, JSON out, under `/api/`, on both ports — for other devices on the TLS port only. The
+client in the renderer ([`common/api.ts`](../packages/hud-renderer/src/common/api.ts)) and the
+companion's `HudApi` use exactly these endpoints, with relative URLs in the pages (so they use
+whichever port the page came from); the companion over HTTPS on the TLS port, pinned to the
+HUD's certificate.
 
 **Conventions**
+
+- **HTTPS for other devices**: while TLS is on, the plain port serves only the Pi itself
+  (loopback). Another device's API request there gets `403` with
+  `{ "error": "HTTPS required: use https://<host>:8443/api/… — …" }`, whatever its token — the
+  token is not looked at, the body not read. See
+  [Plain HTTP and other devices](#plain-http-and-other-devices).
 
 - **Authentication**: requests from the Pi itself need nothing. When `server.apiToken` is set,
   everyone else sends `Authorization: Bearer <token>`, or gets `401` with
@@ -722,8 +735,15 @@ certificate.
 ### Info
 
 ```sh
-curl http://hud.local:8080/api/info
+curl http://localhost:8080/api/info                       # on the Pi
+curl --insecure -H 'Authorization: Bearer <token>' \
+  https://hud.local:8443/api/info                         # from another device
 ```
+
+(`--insecure` skips the certificate check. To check it instead, copy the certificate off the Pi
+— `sudo openssl x509 -in /var/lib/carheadsup/tls.pem -out hud.crt` — and use
+`curl --cacert hud.crt https://<hostname>.local:8443/api/info`: the certificate names the host
+name, `<hostname>.local` and localhost, not the HUD's Wi-Fi addresses.)
 
 ```json
 {
@@ -753,7 +773,7 @@ the whole config (missing fields take their current values). Both validate per f
 to the running HUD. The answer is the stored config plus the problems:
 
 ```sh
-curl -X PATCH http://hud.local:8080/api/config \
+curl --insecure -X PATCH https://hud.local:8443/api/config \
   -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
   -d '{"units":{"system":"imperial"},"display":{"brightness":{"minLevel":2}}}'
 ```
@@ -897,11 +917,41 @@ the simulated phone is then silent (no messages, no link changes) until the real
 
 ### Pages and other paths
 
-`GET /`, `/settings`, `/dev` serve the three pages from the built renderer, on both ports; hashed assets under
-`/assets/` are cached for a year, pages are revalidated. Without a build every page answers `503`
-with instructions. `/ws/*` without a WebSocket upgrade answers `426`. The HUD page understands
+`GET /`, `/settings`, `/dev` serve the three pages from the built renderer, on both ports (to
+other devices on the TLS port: see below); hashed assets under `/assets/` are cached for a year,
+pages are revalidated. Without a build every page answers `503` with instructions. `/ws/*`
+without a WebSocket upgrade answers `426`. The HUD page understands
 `?preview=1` (ignore mirroring, rotation and keystone) and `?fixture=<name>` (draw a sample frame
 without a server, e.g. `?fixture=city-nav&preview=1`).
+
+### Plain HTTP and other devices
+
+The plain port carries the API token, the config and the HUD's frames in clear text. While TLS is
+on (`server.tlsPort` set) it therefore serves only clients on the Pi itself (loopback: the kiosk,
+local scripts) exactly as described above; for every other client it answers:
+
+| Request on `server.port` from another device | Answer |
+| --- | --- |
+| `GET` or `HEAD` outside `/api` and `/ws` (pages, assets) | `307`, `Location: https://<host>:<tlsPort><path>[?query]`, `Cache-Control: no-store` |
+| Anything under `/api` (any method); `/ws/*` without an upgrade; other methods | `403`, `{ "error": "HTTPS required: use https://<host>:<tlsPort>/… — over plain http the HUD serves only itself, so this request was not processed (see server.allowPlainRemote)" }` (`wss://` for `/ws/*`) |
+| WebSocket upgrade of `/ws/hud` | `403` with the same JSON body (`Content-Type: application/json`) |
+| WebSocket upgrade of `/ws/phone` | unchanged: `403` (text) unless `server.allowPlainPhone` |
+
+None of these looks at a bearer token or `?token=`, or reads a request body. `<host>` is the
+`Host` header's host once the header passed the [host check](#rest-api) — and only if it is an
+IPv4 address, a bracketed IPv6 address (without a zone) or a DNS name that the URL parser keeps
+as it is; otherwise the address the client reached the HUD at. So a redirect never leads away
+from the HUD, and a crafted `Host` cannot add a path, credentials or another host. The path and
+query are kept, except a `token` query parameter, which is dropped: it crossed the network in
+clear text already and is neither handed on to the HTTPS page nor echoed back. The redirect is
+temporary and not cached, so a changed `server.allowPlainRemote` applies at once. There is no
+HSTS header: with a self-signed certificate it would make the browser's warning impossible to
+pass.
+
+If the TLS listener could not start (its port taken), there is nowhere to send other devices:
+everything they ask on the plain port gets `403` with "HTTPS required, but the HUD's TLS listener
+is not running …". With `server.tlsPort` null, or with `server.allowPlainRemote` on, the plain
+port serves everyone as described above, unencrypted.
 
 ## mDNS discovery
 

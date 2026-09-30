@@ -413,12 +413,16 @@ export interface SensorsConfig {
 }
 
 export interface ServerConfig {
-  /** Plain HTTP and WebSocket port: the kiosk, the settings app and the developer console. */
+  /**
+   * Plain HTTP and WebSocket port: the kiosk and anything else on the HUD itself. Other devices
+   * are sent to `tlsPort` while it runs (unless `allowPlainRemote`).
+   */
   port: number;
   /**
    * HTTPS and secure WebSocket port (the same pages, API and sockets, over TLS with the HUD's
-   * self-signed certificate): the companion app's link. Null switches TLS off, and with it the
-   * phone link (unless `allowPlainPhone`).
+   * self-signed certificate): the companion app's link, and the settings app and developer
+   * console on other devices. Null switches TLS off, and with it the phone link (unless
+   * `allowPlainPhone`); other devices then use the plain port, unencrypted.
    */
   tlsPort: number | null;
   /**
@@ -426,6 +430,14 @@ export interface ServerConfig {
    * binding — for development and custom clients only. Off: phones must use TLS.
    */
   allowPlainPhone: boolean;
+  /**
+   * Also serve the pages, the API and the display socket to other devices on the plain port,
+   * where the API token and the config cross the network unencrypted — for development only.
+   * Off (while the TLS listener runs): other devices' page requests are redirected to HTTPS on
+   * `tlsPort`, their API requests and display-socket upgrades refused. The HUD itself (loopback)
+   * always uses the plain port.
+   */
+  allowPlainRemote: boolean;
   /** Bind address; "0.0.0.0" to allow the phone on the car's Wi-Fi. */
   host: string;
   /** Bearer token required for the config API from non-local clients. Empty = open. */

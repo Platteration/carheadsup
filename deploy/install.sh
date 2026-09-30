@@ -469,14 +469,16 @@ report_missing_tools() {
 }
 
 summary() {
-  local host port tls_port phone
+  local host port tls_port phone settings
   host=$(hostname 2>/dev/null || echo raspberrypi)
   port=$(config_port)
   tls_port=$(config_tls_port)
   if [[ $tls_port == off ]]; then
     phone="off: server.tlsPort is null, so the companion app cannot connect"
+    settings="http://${host}.local:${port}/settings   (or http://<HUD address>:${port}/settings; TLS is off, so the API token crosses the Wi-Fi unencrypted)"
   else
     phone="TLS port ${tls_port} (open it in any firewall); to pair, park and scan the QR code the HUD shows (settings app: Phone, Show pairing code on the HUD)"
+    settings="https://${host}.local:${tls_port}/settings   (or https://<HUD address>:${tls_port}/settings; compare the certificate fingerprint the HUD shows before accepting the browser's warning)"
   fi
   cat <<EOF
 
@@ -485,7 +487,7 @@ carheadsup is installed.
   config   ${CONFIG_FILE}   (created with defaults and a random pairing code on the first start)
   data     ${DATA_DIR}   (tls.pem: the HUD's TLS key and certificate, made on the first start)
   logs     journalctl -u carheadsup -f     (kiosk: journalctl -u carheadsup-kiosk -f)
-  settings http://${host}.local:${port}/settings   (or http://<HUD address>:${port}/settings)
+  settings ${settings}
   phone    ${phone}
 EOF
   if ((!opt_start)); then

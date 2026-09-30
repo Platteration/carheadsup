@@ -19,9 +19,10 @@ the allowed ranges are in [`schema.ts`](../packages/core/src/config/schema.ts).
 
 ## Changing settings
 
-- **Settings app** (`/settings`, also opened by the companion app): every option below except
-  the brightness curve (`display.brightness.curve`, by hand or through the API), with validation
-  as you type. Changes apply to the running HUD immediately.
+- **Settings app** (`/settings`, also opened by the companion app; from a laptop or phone
+  browser at `https://<HUD address>:8443/settings` — see [Remote HTTPS](#remote-https)): every
+  option below except the brightness curve (`display.brightness.curve`, by hand or through the
+  API), with validation as you type. Changes apply to the running HUD immediately.
 - **REST API**: `PATCH /api/config` with a partial config (deep-merged), or `PUT /api/config`
   with a whole one — a lenient replace, not a reset: fields missing from the body keep their
   current values. See [protocol.md](protocol.md#config).
@@ -363,13 +364,43 @@ call and media state ([more](hardware.md#steering-wheel-buttons)).
 
 | Option | Default | Range | Notes |
 | --- | --- | --- | --- |
-| `server.port` | `8080` | 1–65535 | Plain HTTP and WebSocket port: the kiosk, the settings app in a browser, the developer console. Takes effect after a restart. On the Pi, move the kiosk with it (`CARHEADSUP_KIOSK_URL`, [install guide](install-raspberry-pi.md#the-units)) — the kiosk stays black until then — and use 1024 or above: the service has no privilege to listen below that, so it would fail to start. |
-| `server.tlsPort` | `8443` | 1–65535, not `server.port`, or `null` | HTTPS and secure WebSocket port with the HUD's self-signed certificate (`<data dir>/tls.pem`, made on the first start): the companion app's link, encrypted and pinned to that certificate ([details](protocol.md#tls-and-the-huds-certificate)); it serves the same pages and API as `server.port`. `null` switches TLS off — and with it the phone link, unless `server.allowPlainPhone` is on. Takes effect after a restart; 1024 or above on the Pi. A TLS port that cannot be opened (taken by another service) is logged and left out; the HUD keeps running without the phone. A config file from before this setting whose `server.port` is 8443 keeps that port and gets 8444 here. |
+| `server.port` | `8080` | 1–65535 | Plain HTTP and WebSocket port: the kiosk and anything else on the Pi itself. Other devices are sent to `server.tlsPort` while TLS is on (see [`server.allowPlainRemote`](#remote-https)). Takes effect after a restart. On the Pi, move the kiosk with it (`CARHEADSUP_KIOSK_URL`, [install guide](install-raspberry-pi.md#the-units)) — the kiosk stays black until then — and use 1024 or above: the service has no privilege to listen below that, so it would fail to start. |
+| `server.tlsPort` | `8443` | 1–65535, not `server.port`, or `null` | HTTPS and secure WebSocket port with the HUD's self-signed certificate (`<data dir>/tls.pem`, made on the first start): the companion app's link, encrypted and pinned to that certificate ([details](protocol.md#tls-and-the-huds-certificate)), and where browsers on other devices use the settings app and the developer console; it serves the same pages and API as `server.port`. `null` switches TLS off — and with it the phone link, unless `server.allowPlainPhone` is on; other devices then use `server.port`, unencrypted (the API token and settings cross the Wi-Fi in clear text; the HUD logs a warning). Takes effect after a restart; 1024 or above on the Pi. A TLS port that cannot be opened (taken by another service) is logged and left out; the HUD keeps running without the phone, and other devices' browsers are refused until it is fixed. A config file from before this setting whose `server.port` is 8443 keeps that port and gets 8444 here. |
 | `server.allowPlainPhone` | `false` | | Also serve the phone link (`/ws/phone`) on `server.port`, unencrypted, with nothing bound to a certificate — for development and custom clients only; the companion app always uses TLS. Off: a plain phone connection is refused (`403`); switching it off closes plain sessions at once. |
-| `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. An address the kiosk cannot reach leaves it black. |
+| `server.allowPlainRemote` | `false` | | Also serve the pages, the API and the display socket to other devices on `server.port`, unencrypted — for development only. Off (while TLS is on): other devices' page requests on the plain port are redirected to HTTPS on `server.tlsPort`, their API requests and `/ws/hud` upgrades refused (`403`) without their token being looked at ([details](#remote-https)). The Pi itself always uses the plain port; `/ws/phone` follows `server.allowPlainPhone`. Applies at once; switching it off closes other devices' plain display sockets (4005). |
+| `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. An address the kiosk cannot reach leaves it black — and so does a single network address (say `10.42.0.1`): the kiosk would reach the HUD there, not over loopback, and be taken for another device ([Remote HTTPS](#remote-https)). |
 | `server.apiToken` | `""` | ≤ 256 printable ASCII chars | Bearer token required from every client except the Pi itself. Empty = open to the car's network. Letters, digits, symbols and spaces only (not spaces alone): it travels in HTTP headers and `?token=` addresses, which carry nothing else. |
 | `server.mdns` | `true` | | Advertise `_carheadsup._tcp` so the companion finds the HUD. |
 | `server.frameRate` | `15` | 1–60 | Frames per second pushed to the HUD page. Keep it at 2 or more: at 2 fps and above the page blanks after 1 s without a frame, and slower rates make the HUD slow to notice a stalled server. Lower (10) on a Pi Zero 2 W. |
+
+#### Remote HTTPS
+
+The plain port carries everything in clear text — the API token, the config, the HUD's frames — to
+anyone listening on the car's Wi-Fi. So while TLS is on, it serves only the Pi itself (the kiosk
+browser, `curl` on the Pi: loopback clients); a laptop or phone browser on the Wi-Fi uses the
+same pages over HTTPS:
+
+| Request from another device on `server.port` | Answer |
+| --- | --- |
+| `GET`/`HEAD` of a page or file (`/settings`, `/dev?x=1`, `/assets/…`) | `307` to `https://<same host>:<server.tlsPort><same path and query>` — the host from the `Host` header once it passed the [host check](architecture.md#security-model) (an IP address, bracketed IPv6 or DNS name, else the address the browser reached the HUD at: never another site). A `token` query parameter is dropped: it has crossed the Wi-Fi in clear text already, and is neither handed on nor echoed back. Not cached, so a config change applies at once. |
+| `/api/*` (any method), `/ws/*` without an upgrade, other methods on pages | `403` with `{ "error": "HTTPS required: use https://<host>:8443/api/… — …" }`; the request's token is never looked at and its body never read |
+| WebSocket upgrade of `/ws/hud` | `403` with the same JSON error, naming `wss://<host>:8443/ws/hud` |
+| WebSocket upgrade of `/ws/phone` | as before: refused unless `server.allowPlainPhone` |
+
+Open `https://<HUD address>:8443/settings` (or `/dev`) directly — or the plain address, which
+redirects. The browser warns about the self-signed certificate once per device: compare the
+fingerprint it shows (certificate details, SHA-256) with the one the settings app shows under
+Phone (*Certificate fingerprint*) on a device that already has access, or on the HUD's *Pair a
+phone* page, before accepting it. Browsers keep the token they were given (`?token=` or entered
+when asked) per origin, so enter it once more on the HTTPS address. The companion app's settings
+page always used HTTPS.
+
+When the TLS listener could not start (its port taken), other devices are refused (`403`, "the
+HUD's TLS listener is not running") rather than served in clear text; the Pi's own display keeps
+working. With `server.tlsPort` null, plain http is the only way in and serves everyone as before
+— with the token and settings readable by anyone on the Wi-Fi, so keep the hotspot on WPA2 with a
+strong passphrase and prefer leaving TLS on. `server.allowPlainRemote` restores plain access for
+development (e.g. `npm run sim` opened from another machine) and makes the HUD log a warning.
 
 ## Layouts
 
@@ -539,7 +570,7 @@ polled less and less often (back-off up to a minute).
 | `--config <file>` | `CARHEADSUP_CONFIG` | `<data dir>/config.json` | Config file (created with defaults and a random pairing code if missing). |
 | `--data-dir <dir>` | `CARHEADSUP_DATA_DIR` | `$XDG_DATA_HOME/carheadsup` or `~/.local/share/carheadsup`; with `--sim` its `sim` subdirectory | State, trips, the HUD's identity and TLS certificate, and (by default) the config. |
 | `--port <n>` | `CARHEADSUP_PORT` | `server.port` | Override the port (`0` = any free port). Not saved. |
-| `--tls-port <n\|off>` | `CARHEADSUP_TLS_PORT` | `server.tlsPort` | Override the TLS port of the phone link (`0` = any free port, `off` = no TLS listener). Not saved. |
+| `--tls-port <n\|off>` | `CARHEADSUP_TLS_PORT` | `server.tlsPort` | Override the TLS port of the phone link and of other devices' browsers (`0` = any free port, `off` = no TLS listener). Not saved. |
 | `--host <addr>` | `CARHEADSUP_HOST` | `server.host` | Override the bind address. Not saved. |
 | `--renderer-dir <dir>` | `CARHEADSUP_RENDERER_DIR` | `packages/hud-renderer/dist` | Built web pages to serve. |
 | `--backlight <dir\|auto\|off>` | `CARHEADSUP_BACKLIGHT` | `auto` | Backlight device (e.g. `/sys/class/backlight/rpi_backlight`), `auto` = the first writable device, `off` = never touch it (the page is dimmed instead). A device that is missing or not writable at start-up is looked for again every 10 s. |

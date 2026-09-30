@@ -24,6 +24,8 @@ export { PersistStore, parsePersistedState } from './store/persist-store.ts';
 export { DEFAULT_MAX_TRIPS, TripStore, isTripRecord } from './store/trip-store.ts';
 export { writeFileAtomic } from './store/atomic.ts';
 export { isAuthorized, isCrossSiteRequest, isLoopbackAddress, secretsEqual } from './http/auth.ts';
+export { SERVE_PLAIN, plainAccess, secureLocation } from './http/https-only.ts';
+export type { Listener, PlainAccessPolicy } from './http/https-only.ts';
 export { CONTENT_SECURITY_POLICY } from './http/security.ts';
 export { PHONE_CLOSE } from './ws/phone-channel.ts';
 export type { PhoneTransport } from './ws/phone-channel.ts';

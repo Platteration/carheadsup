@@ -302,9 +302,10 @@ wheel's call and media buttons, and the HUD follows the phone's call and media s
    resistor-ladder steering-wheel buttons, ADAS UDP — each idles quietly when its hardware is
    absent or disabled), the frame sinks (backlight; the renderer channel tells the page whether
    the backlight follows the brightness, so the page does not dim as well), the phone and
-   renderer channels, and the HTTP server — twice: plainly on `server.port` and over TLS on
-   `server.tlsPort` with the HUD's self-signed certificate (made on the first start); listen;
-   start everything; advertise over mDNS.
+   renderer channels, and the HTTP server — twice: over TLS on `server.tlsPort` with the HUD's
+   self-signed certificate (made on the first start), for the phone and other devices, and
+   plainly on `server.port`, for the Pi itself (other devices are sent to TLS); listen (TLS
+   first); start everything; advertise over mDNS.
 4. On `SIGINT` / `SIGTERM`, write the persisted state (including the trip in progress) first —
    a supercapacitor or UPS HAT may not last long — then stop everything in reverse order (each
    step limited to 5 s), write the state once more if it changed meanwhile and flush the trip
@@ -314,7 +315,8 @@ A config change through the API is validated, saved atomically and pushed to eve
 without a restart: the engine, the OBD service (reconnects if the link settings changed), the
 sensor sources (only those whose settings changed restart), the renderer (`display` message), the
 phone channel (disconnects a phone whose proof no longer matches the pairing token, and plain
-phone sessions once `server.allowPlainPhone` is switched off) and mDNS. Only a new `server.port`,
+phone sessions once `server.allowPlainPhone` is switched off; the renderer channel likewise
+closes other devices' plain display sockets once `server.allowPlainRemote` is) and mDNS. Only a new `server.port`,
 `server.tlsPort` or `server.host` needs a restart.
 
 Failures stay local: the OBD service reconnects with a back-off that doubles up to 30 s; the
@@ -354,7 +356,18 @@ with mode `0600` and directories with `0700`: they hold the tokens and your driv
 The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. The protections:
 
 - **Loopback is trusted.** Requests from the Pi itself (the kiosk browser, local tools) are always
-  allowed.
+  allowed, over plain http on `server.port`.
+- **Other devices use HTTPS.** Plain http carries the API token, the config and the HUD's frames
+  in clear text, so while TLS is on the plain port serves only the Pi itself. A laptop or phone
+  browser on the Wi-Fi that comes to it is redirected to the same page on `server.tlsPort`
+  (`307`; the host is taken from the `Host` header only after the host check below, and only if
+  it is a plain IP address or DNS name — else the address the browser reached — so the redirect
+  never leads elsewhere; a `?token=` is dropped, not handed on); its API requests and `/ws/hud`
+  upgrades are refused (`403`, a JSON error naming the `https://` / `wss://` address) before any
+  token they carry is looked at. The pages use relative URLs and `wss:` under HTTPS, so they work
+  there unchanged. If the TLS listener could not start, other devices are refused rather than
+  served in clear text. `server.allowPlainRemote` restores plain access for development
+  (`http/https-only.ts`; [details](protocol.md#plain-http-and-other-devices)).
 - **API token.** When `server.apiToken` is set, every other client must send
   `Authorization: Bearer <token>` to use `/api/*`, and remote renderer clients (`/ws/hud`) must
   pass it as a Bearer header or `?token=`. With no token, anyone on the car's network can use the
@@ -452,11 +465,20 @@ What remains:
   anyone who can see the panel — it lies under the windshield — can scan the pairing token.
   Show it when nobody else is at the car, and generate a new token (then pair again) if someone
   may have scanned it.
-- **The browser pages are plain HTTP.** The kiosk, the developer console and the settings app
-  opened in a browser use `http://` on `server.port`, and a browser outside the Pi sends the API
-  token in clear text there. The same pages are served over TLS on `server.tlsPort` (the
-  companion's settings page uses that, pinned), but a browser shows its warning for the
-  self-signed certificate. Keep the hotspot on WPA2 with a strong passphrase.
+- **Browsers cannot pin the certificate.** The settings app and the developer console on
+  another device run over HTTPS with the HUD's self-signed certificate, which a browser only
+  accepts after its warning. Someone who controls the Wi-Fi at that moment could present their
+  own certificate instead and read the API token as it is entered. Compare the fingerprint the
+  browser shows with the one on the HUD's *Pair a phone* page or in the settings app (Phone)
+  before accepting it, and do that where the Wi-Fi is yours. (The companion's settings page is
+  let through by its pin.) The first request to the plain port — before the redirect — still
+  crosses the Wi-Fi in clear text: bookmark the `https://` address, and never put the token in a
+  plain `http://` address.
+- **Plain HTTP when TLS is off, or allowed.** With `server.tlsPort` null the plain port is the
+  only way in and serves everyone, and with `server.allowPlainRemote` on it serves everyone as
+  well: a browser outside the Pi then sends the API token and the settings in clear text, which
+  anyone on the Wi-Fi can read and use. The HUD logs a warning at start and the settings app
+  shows one. Keep the hotspot on WPA2 with a strong passphrase.
 - **A plain phone link, if enabled.** With `server.allowPlainPhone` on, a client on the plain
   port (not the companion, which always uses TLS) has a readable, alterable session with nothing
   bound to a certificate.

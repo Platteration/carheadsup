@@ -271,6 +271,7 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
     port: 8080,
     tlsPort: 8443,
     allowPlainPhone: false,
+    allowPlainRemote: false,
     host: '0.0.0.0',
     apiToken: '',
     mdns: true,

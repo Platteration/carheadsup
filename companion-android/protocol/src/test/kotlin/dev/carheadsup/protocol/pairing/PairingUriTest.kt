@@ -65,6 +65,19 @@ class PairingUriTest {
     }
 
     @Test
+    fun `a raw lone surrogate is refused, with or without escapes next to it, as the HUD refuses it`() {
+        // Not a shared vector: JSON parsers disagree about lone surrogates. A scanner never
+        // produces one (ZXing decodes bytes to well-formed text), but the parser must not turn
+        // it into '?' and accept the result.
+        for (token in listOf("abc\uD800", "abc%41\uD800", "\uDC00%41")) {
+            val uri =
+                "carheadsup://pair?v=1&id=${payload.hudId}&fp=${payload.certFingerprint}&k=$token" +
+                    "&h=10.42.0.1&p=8443"
+            assertInstanceOf(PairingScan.Invalid::class.java, PairingUri.parse(uri), token)
+        }
+    }
+
+    @Test
     fun `pins the scanned HUD and certificate for the scanned token`() {
         val pin = payload.pin()
         assertEquals(HudPin.of(payload.hudId, payload.pairingToken, payload.certFingerprint), pin)

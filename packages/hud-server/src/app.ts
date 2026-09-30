@@ -21,8 +21,10 @@ import { PAIRING_HOSTS_REFRESH_MS, pairingHosts } from './discovery/pairing-host
 import { HudEngine, maintenanceDueMessage } from './engine.ts';
 import { createApiRouter } from './http/api.ts';
 import type { ConfigChange } from './http/api.ts';
-import { hudHostNames, isAllowedHost, isAuthorized } from './http/auth.ts';
+import { hudHostNames, isAllowedHost, isAuthorized, isLoopbackAddress } from './http/auth.ts';
 import { HEADERS_TIMEOUT_MS, limitConnections } from './http/connections.ts';
+import { SERVE_PLAIN, plainAccess } from './http/https-only.ts';
+import type { PlainAccessPolicy } from './http/https-only.ts';
 import { HttpError } from './http/respond.ts';
 import { createRequestHandler } from './http/server.ts';
 import { createStaticServer } from './http/static.ts';
@@ -162,10 +164,12 @@ function defaultPairingHosts(listenHost: string): string[] {
  * Compose the on-car service: config/state/trip stores in the data directory, the engine, the
  * OBD link (to the simulator with `sim`), simulated and hardware event sources, frame sinks,
  * mDNS advertisement, and the HTTP server with the REST API, the renderer files and the two
- * WebSockets — served twice: plainly on `server.port` (the kiosk, browsers) and over TLS with the
- * HUD's self-signed certificate on `server.tlsPort` (the phone; `/ws/phone` is served on the
- * plain port only with `server.allowPlainPhone`). A TLS listener that cannot start is logged and
- * left out; the HUD itself keeps running.
+ * WebSockets — served twice: over TLS with the HUD's self-signed certificate on
+ * `server.tlsPort` (the phone, browsers on other devices) and plainly on `server.port` (the
+ * kiosk and whatever else runs on the HUD itself: other devices are sent to TLS unless
+ * `server.allowPlainRemote`, see `http/https-only.ts`; `/ws/phone` is served on the plain port
+ * only with `server.allowPlainPhone`). A TLS listener that cannot start is logged and left out;
+ * the HUD itself keeps running.
  *
  * Config changes through the API are validated, saved, and applied to every component: the
  * engine, the OBD service, the sources, the renderer (`display`), the phone (pairing token) and
@@ -485,6 +489,13 @@ export function createHudServer(options: HudServerOptions): HudServer {
     const config = effective;
     tlsIdentity = await loadIdentity(config);
     const identity = tlsIdentity;
+    /** Other devices must use TLS (unless `server.allowPlainRemote`); see `https-only.ts`. */
+    const tlsEnabled = config.server.tlsPort !== null;
+    const plainAccessPolicy: PlainAccessPolicy = {
+      tlsEnabled: () => tlsEnabled,
+      tlsPort: () => boundTlsPort,
+      allowPlainRemote: () => currentEffective().server.allowPlainRemote,
+    };
 
     if (simulated) {
       simulation = (options.createSimulation ?? defaultCreateSimulation)(config, deps);
@@ -571,6 +582,12 @@ export function createHudServer(options: HudServerOptions): HudServer {
           token: auth.token,
           apiToken: cfg.server.apiToken,
         }),
+      listenerAllowed: (auth, cfg) =>
+        auth.listener !== 'plain' ||
+        plainAccess(auth.remoteAddress, {
+          ...plainAccessPolicy,
+          allowPlainRemote: () => cfg.server.allowPlainRemote,
+        }) === SERVE_PLAIN,
       now,
       timers,
       logger,
@@ -591,7 +608,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
       phone,
       apiToken,
       allowPlainPhone: () => currentEffective().server.allowPlainPhone,
-      tlsPort: () => boundTlsPort,
+      plainAccess: plainAccessPolicy,
       allowedHost,
       timers,
       logger,
@@ -631,16 +648,20 @@ export function createHudServer(options: HudServerOptions): HudServer {
               },
             },
     });
-    const handleRequest = createRequestHandler({
+    const handlerOptions = {
       api,
       static: createStaticServer(rendererDir),
       apiToken,
       allowedHost,
       logger,
-    });
-    const server = createServer(handleRequest);
-    // The same pages, API and sockets over TLS: the phone's link. A client that does not finish
-    // its handshake in time is dropped like one that sends no request.
+    };
+    // Plainly: the HUD itself; other devices only while TLS is off or with allowPlainRemote.
+    const server = createServer(
+      createRequestHandler({ ...handlerOptions, plainAccess: plainAccessPolicy }),
+    );
+    // The same pages, API and sockets over TLS: the phone's link, and browsers on other devices.
+    // A client that does not finish its handshake in time is dropped like one that sends no
+    // request.
     const secure =
       identity === null || config.server.tlsPort === null
         ? null
@@ -651,7 +672,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
               minVersion: 'TLSv1.2',
               handshakeTimeout: HEADERS_TIMEOUT_MS,
             },
-            handleRequest,
+            createRequestHandler(handlerOptions),
           );
     let lastRefusalLog = Number.NEGATIVE_INFINITY;
     limitConnections(secure === null ? [server] : [server, secure], {
@@ -662,22 +683,23 @@ export function createHudServer(options: HudServerOptions): HudServer {
         logger.warn(`HTTP: refusing connections from ${address || '?'} (too many open)`);
       },
     });
-    server.on('upgrade', wsRouter.handleUpgrade);
-    httpServer = server;
-    boundPort = await listen(server, config.server.host, config.server.port, 'HTTP');
+    // TLS first: once the plain listener takes requests, where other devices go is settled.
     if (secure !== null && identity !== null && config.server.tlsPort !== null) {
       secure.on('upgrade', wsRouter.handleSecureUpgrade);
       try {
         boundTlsPort = await listen(secure, config.server.host, config.server.tlsPort, 'HTTPS');
         httpsServer = secure;
       } catch (err) {
-        // The display and the settings app work without it; only the phone cannot connect.
+        // The display works without it; the phone and other devices' browsers do not.
         logger.error(
-          `TLS: ${describe(err)} — the phone cannot connect until this is fixed ` +
-            '(server.tlsPort, or --tls-port)',
+          `TLS: ${describe(err)} — the phone cannot connect, and browsers on other devices are ` +
+            'refused, until this is fixed (server.tlsPort, or --tls-port)',
         );
       }
     }
+    server.on('upgrade', wsRouter.handleUpgrade);
+    httpServer = server;
+    boundPort = await listen(server, config.server.host, config.server.port, 'HTTP');
 
     hudEngine.start();
     listenHost = config.server.host;
@@ -722,7 +744,30 @@ export function createHudServer(options: HudServerOptions): HudServer {
           : 'Phone link: TLS is off (server.tlsPort), so the phone cannot connect',
       );
     }
+    logRemoteAccess(config, tls);
     return { port: boundPort, tlsPort: boundTlsPort };
+  }
+
+  /** How browsers on other devices reach the HUD, and what that exposes. */
+  function logRemoteAccess(config: HudConfig, tls: ApiTlsInfo | null): void {
+    // Bound to loopback, no other device reaches the HUD at all.
+    if (isLoopbackAddress(config.server.host)) return;
+    if (config.server.tlsPort === null) {
+      logger.warn(
+        'Browsers on other devices: TLS is off (server.tlsPort), so they use the settings app and ' +
+          'the API over plain http, where the API token and settings cross the network unencrypted',
+      );
+    } else if (config.server.allowPlainRemote) {
+      logger.warn(
+        'Browsers on other devices: server.allowPlainRemote is on, so they may use the settings ' +
+          'app and the API over plain http, where the API token crosses the network unencrypted',
+      );
+    } else if (tls !== null) {
+      logger.info(
+        `Browsers on other devices: HTTPS on port ${tls.port} (plain http serves only the HUD ` +
+          'itself); they warn about its self-signed certificate — compare its fingerprint',
+      );
+    }
   }
 
   /** Run one shutdown step with a time limit; failures are logged and never stop the others. */

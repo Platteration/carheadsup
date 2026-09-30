@@ -21,16 +21,16 @@ import dev.carheadsup.protocol.pairing.PairingAddress
 import dev.carheadsup.protocol.pairing.PairingPayload
 import dev.carheadsup.protocol.traffic.TrafficStatus
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 /** The HUD's settings page for the WebView: its address and the certificate it must present. */
 data class HudPage(val url: String, val certFingerprint: String)
@@ -145,15 +145,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         qrPairingState.value = QrPairing.Pairing(payload.hudName)
         viewModelScope.launch {
             val candidates = payload.endpoints()
-            val reached =
-                withContext(Dispatchers.IO) {
-                    candidates
-                        .map { endpoint ->
-                            async { endpoint.takeIf { graph.localNetwork.canConnect(it, PROBE_TIMEOUT_MS) } }
-                        }.awaitAll()
-                        .filterNotNull()
-                        .toSet()
-                }
+            val reached = reachable(candidates)
             val endpoint = PairingAddress.choose(candidates) { it in reached } ?: return@launch
             graph.settingsStore.update {
                 it.copy(
@@ -174,6 +166,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     serviceStarted = started,
                 )
         }
+    }
+
+    /**
+     * Which of [candidates] accept a connection now, all tried at once off the main thread. The
+     * wait is bounded by [PROBE_BUDGET_MS]: a name whose lookup hangs (a `.local` name the Wi-Fi's
+     * DNS does not answer) counts as unreachable — the lookup cannot be cut short, so it is left
+     * to end by itself.
+     */
+    private suspend fun reachable(candidates: List<HudEndpoint>): Set<HudEndpoint> {
+        val reached = ConcurrentHashMap.newKeySet<HudEndpoint>()
+        val probes =
+            candidates.map { endpoint ->
+                viewModelScope.launch(Dispatchers.IO) {
+                    if (graph.localNetwork.canConnect(endpoint, PROBE_TIMEOUT_MS)) reached.add(endpoint)
+                }
+            }
+        withTimeoutOrNull(PROBE_BUDGET_MS) { probes.joinAll() }
+        return reached.toSet()
     }
 
     /** Forget the outcome of the last QR pairing (a new scan starts). */
@@ -254,5 +264,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         /** How long a scanned address may take to accept a connection before the next is preferred. */
         const val PROBE_TIMEOUT_MS = 1_500
+
+        /** How long pairing waits for all the scanned addresses (name lookups included) at most. */
+        const val PROBE_BUDGET_MS = 2_500L
     }
 }

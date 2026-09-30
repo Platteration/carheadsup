@@ -11,6 +11,7 @@ const PLAIN = plainUnit('');
 export function ServerSection({ root }: { root: Scope<HudConfig> }) {
   const server = root.child('server');
   const tokenChanged = server.dirty('apiToken');
+  const tlsOff = server.value.tlsPort === null;
   return (
     <Section
       id="server"
@@ -32,16 +33,16 @@ export function ServerSection({ root }: { root: Scope<HudConfig> }) {
             label="Port"
             unit={PLAIN}
             integer
-            hint="This app, the display and the developer console (http)."
+            hint="The HUD’s own display (http). Other devices are sent to the secure port."
           />
           <NumberField
             scope={server}
             k="tlsPort"
-            label="Phone port (TLS)"
+            label="Secure port (TLS)"
             unit={PLAIN}
             integer
             nullable
-            hint="The companion app connects here, encrypted. Empty: the phone cannot connect."
+            hint="The companion app and this app on other devices connect here, encrypted. Empty: the phone cannot connect."
           />
           <NumberField
             scope={server}
@@ -68,6 +69,22 @@ export function ServerSection({ root }: { root: Scope<HudConfig> }) {
           <Notice tone="warning">
             On the plain port, anyone on the car’s Wi-Fi can read the phone’s session — location,
             calls, who messages you — and alter it. Leave this off unless you need it.
+          </Notice>
+        )}
+        <ToggleField
+          scope={server}
+          k="allowPlainRemote"
+          label="Also serve other devices over plain http"
+          hint="For development only. Otherwise other devices are sent to the secure port; the HUD’s own display always uses plain http."
+        />
+        {(tlsOff || server.value.allowPlainRemote) && (
+          <Notice tone="warning">
+            {tlsOff
+              ? 'Without a secure port, other devices use this app over plain http: '
+              : 'Over plain http, '}
+            anyone on the car’s Wi-Fi can read the API token and the settings as they cross the
+            network — and then change them.
+            {!tlsOff && ' Leave this off unless you need it.'}
           </Notice>
         )}
         <TextField

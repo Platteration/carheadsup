@@ -130,21 +130,16 @@ private class FrameAnalyzer(private val onText: (String) -> Unit) : ImageAnalysi
         val text =
             try {
                 image.use(::decode)
-            } catch (e: IllegalArgumentException) {
-                skip(e)
-            } catch (e: IndexOutOfBoundsException) {
-                skip(e)
+            } catch (e: RuntimeException) {
+                // A frame whose planes do not match its size, or a decoder failure: skip the
+                // frame. An exception escaping here would end the analysis thread — and the app.
+                Log.w(TAG, "Skipping an unreadable frame", e)
+                null
             }
         if (text != null && text != lastText) {
             lastText = text
             onText(text)
         }
-    }
-
-    /** A frame whose planes do not match its size is skipped: never kill the analysis thread. */
-    private fun skip(e: RuntimeException): String? {
-        Log.w(TAG, "Skipping an unreadable frame", e)
-        return null
     }
 
     /** The QR code in [image]'s luminance plane (YUV_420_888's Y plane), if any. */

@@ -257,18 +257,21 @@ private fun ScanPairing(viewModel: MainViewModel) {
             scanning = granted
         }
 
+    fun cameraAllowed(): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
     fun startScanning() {
         problem = null
         cameraError = null
         denied = false
         viewModel.resetQrPairing()
-        val granted =
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-        if (granted) scanning = true else askForCamera.launch(Manifest.permission.CAMERA)
+        if (cameraAllowed()) scanning = true else askForCamera.launch(Manifest.permission.CAMERA)
     }
 
     Text(stringResource(R.string.setup_scan_intro), style = MaterialTheme.typography.bodySmall, color = muted)
-    if (scanning) {
+    // `scanning` survives the process; the permission may not (revoking it in the system
+    // settings ends the process, and the restored screen must not open the camera without it).
+    if (scanning && cameraAllowed()) {
         QrScanner(
             onText = { text ->
                 when (val result = PairingUri.parse(text)) {

@@ -1,6 +1,5 @@
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { request } from 'node:http';
-import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_CONFIG, INPUT_ACTIONS, parseConfig } from '@carheadsup/core';
 import type {
@@ -24,7 +23,9 @@ import {
   MemoryLogger,
   TestSocket,
   helloOn,
+  lanAddress,
   makeTempDir,
+  rawRequest,
   sleep,
   startTestServer,
   waitFor,
@@ -94,16 +95,6 @@ function trip(n: number): TripRecord {
 }
 
 const tripsFile = (...ns: number[]) => ns.map((n) => `${JSON.stringify(trip(n))}\n`).join('');
-
-/** A non-loopback IPv4 address of this machine (to exercise remote-client rules), if any. */
-function lanAddress(): string | null {
-  for (const list of Object.values(networkInterfaces())) {
-    for (const info of list ?? []) {
-      if (info.family === 'IPv4' && !info.internal) return info.address;
-    }
-  }
-  return null;
-}
 
 describe('REST API basics', () => {
   it('reports info', async () => {
@@ -739,42 +730,36 @@ describe('simulator API', () => {
 describe('remote clients', () => {
   const lan = lanAddress();
 
+  // Other devices use HTTPS (plain http is refused to them; see https-only.test.ts).
   it.skipIf(lan === null)('need the API token once one is configured', async () => {
     const t = await start({ host: '0.0.0.0', config: { server: { apiToken: 'hunter2' } } });
-    const remote = `http://${lan}:${t.port}`;
-    const none = await fetch(`${remote}/api/info`);
+    const remote = `https://${lan}:${t.tlsPort}`;
+    const bearer = (token: string) => ({ headers: { authorization: `Bearer ${token}` } });
+    const none = await rawRequest(`${remote}/api/info`);
     expect(none.status).toBe(401);
-    expect(none.headers.get('www-authenticate')).toMatch(/^Bearer/);
-    expect(await none.json()).toEqual({ error: expect.any(String) as unknown });
-    expect(
-      (await fetch(`${remote}/api/info`, { headers: { Authorization: 'Bearer nope' } })).status,
-    ).toBe(401);
-    expect(
-      (await fetch(`${remote}/api/info`, { headers: { Authorization: 'Bearer hunter2' } })).status,
-    ).toBe(200);
+    expect(none.fingerprint).toBe(t.fingerprint);
+    expect(none.headers['www-authenticate']).toMatch(/^Bearer/);
+    expect(JSON.parse(none.body)).toEqual({ error: expect.any(String) as unknown });
+    expect((await rawRequest(`${remote}/api/info`, bearer('nope'))).status).toBe(401);
+    expect((await rawRequest(`${remote}/api/info`, bearer('hunter2'))).status).toBe(200);
     // Static files stay public (the settings app must load to ask for the token).
-    expect((await fetch(`${remote}/settings`)).status).toBe(200);
+    expect((await rawRequest(`${remote}/settings`)).status).toBe(200);
     // Loopback needs no token.
     expect((await fetch(`${t.base}/api/info`)).status).toBe(200);
     // Changing the token applies to the very next request.
-    const patched = await fetch(`${remote}/api/config`, {
+    const patched = await rawRequest(`${remote}/api/config`, {
       method: 'PATCH',
-      headers: { Authorization: 'Bearer hunter2', 'Content-Type': 'application/json' },
+      headers: { authorization: 'Bearer hunter2', 'content-type': 'application/json' },
       body: JSON.stringify({ server: { apiToken: 'correct-horse' } }),
     });
     expect(patched.status).toBe(200);
-    expect(
-      (await fetch(`${remote}/api/info`, { headers: { Authorization: 'Bearer hunter2' } })).status,
-    ).toBe(401);
-    expect(
-      (await fetch(`${remote}/api/info`, { headers: { Authorization: 'Bearer correct-horse' } }))
-        .status,
-    ).toBe(200);
+    expect((await rawRequest(`${remote}/api/info`, bearer('hunter2'))).status).toBe(401);
+    expect((await rawRequest(`${remote}/api/info`, bearer('correct-horse'))).status).toBe(200);
   });
 
   it.skipIf(lan === null)('are open when no token is configured', async () => {
     const t = await start({ host: '0.0.0.0' });
-    expect((await fetch(`http://${lan}:${t.port}/api/info`)).status).toBe(200);
+    expect((await rawRequest(`https://${lan}:${t.tlsPort}/api/info`)).status).toBe(200);
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { USAGE, defaultDataDir, parseCli, serverUrls } from '../src/cli.ts';
+import { USAGE, defaultDataDir, pageUrls, parseCli, serverUrls } from '../src/cli.ts';
 import type { CliOptions } from '../src/cli.ts';
 import { createLogger, formatLogMessage, isLogLevel } from '../src/logger.ts';
 
@@ -191,6 +191,37 @@ describe('serverUrls', () => {
       'wss://localhost:8443',
       'wss://10.42.0.1:8443',
     ]);
+  });
+});
+
+describe('pageUrls', () => {
+  const base = {
+    host: '0.0.0.0',
+    port: 8080,
+    tlsEnabled: true,
+    tlsPort: 8443,
+    allowPlainRemote: false,
+    lanAddresses: ['10.42.0.1', 'fd00::10'],
+  };
+
+  it('lists plain http for the HUD itself and https for other devices', () => {
+    expect(pageUrls(base)).toEqual([
+      'http://localhost:8080',
+      'https://10.42.0.1:8443',
+      'https://[fd00::10]:8443',
+    ]);
+    expect(pageUrls({ ...base, host: '10.42.0.1' })).toEqual(['https://10.42.0.1:8443']);
+    expect(pageUrls({ ...base, host: '127.0.0.1' })).toEqual(['http://127.0.0.1:8080']);
+  });
+
+  it('lists plain http for other devices with TLS off or server.allowPlainRemote', () => {
+    const plain = ['http://localhost:8080', 'http://10.42.0.1:8080', 'http://[fd00::10]:8080'];
+    expect(pageUrls({ ...base, tlsEnabled: false, tlsPort: null })).toEqual(plain);
+    expect(pageUrls({ ...base, allowPlainRemote: true })).toEqual(plain);
+  });
+
+  it('lists nothing for other devices while the TLS listener could not start', () => {
+    expect(pageUrls({ ...base, tlsPort: null })).toEqual(['http://localhost:8080']);
   });
 });
 

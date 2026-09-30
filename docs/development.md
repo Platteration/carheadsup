@@ -23,7 +23,7 @@ Everything here runs on an ordinary Linux or macOS machine; no car, Pi or phone 
 
 | Command | What it does |
 | --- | --- |
-| `npm run sim` | Builds the web pages if they are missing, then starts the server with the simulator on port 8080, and its phone link over TLS on 8443 (data in `$XDG_DATA_HOME/carheadsup/sim`, by default `~/.local/share/carheadsup/sim`, including the simulator HUD's own certificate `tls.pem`). Extra flags go after `--`, e.g. `npm run sim -- --port 8090 --tls-port 8444 --log-level debug`. |
+| `npm run sim` | Builds the web pages if they are missing, then starts the server with the simulator on port 8080, and over TLS on 8443 for the phone link and other devices' browsers (data in `$XDG_DATA_HOME/carheadsup/sim`, by default `~/.local/share/carheadsup/sim`, including the simulator HUD's own certificate `tls.pem`). Extra flags go after `--`, e.g. `npm run sim -- --port 8090 --tls-port 8444 --log-level debug`. |
 | `npm run dev` | Vite development server for the web pages with hot reload on <http://localhost:5173/> (`/`, `/settings`, `/dev`). It proxies `/api` and `/ws` to the HUD server at `HUD_SERVER` (default `http://localhost:8080`), so run `npm run sim` next to it. |
 | `npm run build` | Production build of the web pages into `packages/hud-renderer/dist` (what the server serves). `npm run sim` does not rebuild once `dist` exists: rebuild after changing the renderer, or use `npm run dev`. |
 | `npm start` | The server without the simulator (talks to a real adapter per `config.json`). |
@@ -70,8 +70,13 @@ made from scratch has a random pairing code, like a new HUD. A client of your ow
 [protocol.md](protocol.md#authentication), or plain `ws://…:8080/ws/phone` once
 `server.allowPlainPhone` is on (its proofs then bind an empty fingerprint).
 
-With `server.apiToken` set, a console opened from another device asks for the token (or takes
-it once from `/dev?token=<token>`) and uses it for the API and the live feed.
+From another device the console runs over HTTPS on the TLS port — `https://<host>:8443/dev`;
+the plain `http://<host>:8080/dev` redirects there — after the browser's warning about the
+simulator HUD's self-signed certificate; the live feed then uses `wss:`. With `server.apiToken`
+set, it asks for the token (or takes it once from `https://…/dev?token=<token>`) and uses it for
+the API and the live feed. To reach it over plain http from other machines while developing,
+switch on `server.allowPlainRemote` (settings app: *Server → Also serve other devices over plain
+http*). `npm run dev`'s proxy talks to the server from the same machine, so it is unaffected.
 
 ### Sample frames
 

@@ -177,6 +177,7 @@ describe('DEFAULT_CONFIG', () => {
       port: 8080,
       tlsPort: 8443,
       allowPlainPhone: false,
+      allowPlainRemote: false,
       host: '0.0.0.0',
       apiToken: '',
       mdns: true,
@@ -207,6 +208,21 @@ describe('DEFAULT_CONFIG', () => {
     const flag = mergeConfig(DEFAULT_CONFIG, { server: { allowPlainPhone: 'yes' as never } });
     expect(flag.config.server.allowPlainPhone).toBe(false);
     expect(flag.errors).toHaveLength(1);
+  });
+
+  it('keeps other devices on HTTPS unless plain remote access is asked for', () => {
+    expect(DEFAULT_CONFIG.server.allowPlainRemote).toBe(false);
+    expect(mergeConfig(DEFAULT_CONFIG, { server: { allowPlainRemote: true } })).toMatchObject({
+      config: { server: { allowPlainRemote: true, allowPlainPhone: false } },
+      errors: [],
+    });
+    const flag = mergeConfig(DEFAULT_CONFIG, { server: { allowPlainRemote: 1 as never } });
+    expect(flag.config.server.allowPlainRemote).toBe(false);
+    expect(flag.errors).toEqual([expect.stringMatching(/^server\.allowPlainRemote: /)]);
+    // A config file from before the setting gets the default, without an error.
+    const legacy = parseConfig({ server: { port: 8080, tlsPort: 8443, allowPlainPhone: true } });
+    expect(legacy.config.server).toMatchObject({ allowPlainPhone: true, allowPlainRemote: false });
+    expect(legacy.errors).toEqual([]);
   });
 
   it('keeps the HTTP port of a config from before TLS that used the new TLS port', () => {

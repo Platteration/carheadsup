@@ -106,8 +106,10 @@ npm run build
 the server logs that the sensors are unavailable. `npm run build` builds the three web pages into
 `packages/hud-renderer/dist`.
 
-To try it before installing: `npm run sim`, then open `http://hud.local:8080/dev` from your
-computer (`Ctrl+C` to stop).
+To try it before installing: `npm run sim`, then open `https://hud.local:8443/dev` from your
+computer — `http://hud.local:8080/dev` redirects there — and accept the browser's warning about
+the HUD's self-signed certificate ([below](#browsers-and-the-huds-certificate)). `Ctrl+C` stops
+it.
 
 ## 6. Pair the OBD-II adapter
 
@@ -262,8 +264,8 @@ sudo nmcli connection add type wifi ifname wlan0 con-name carheadsup-hotspot \
 ```
 
 On the phone, join `CarHUD` and tell Android to stay connected although the network has no
-internet. The HUD is `http://10.42.0.1:8080` for browsers; the companion app connects to its TLS
-port, `10.42.0.1:8443`.
+internet. The HUD is `https://10.42.0.1:8443` for browsers (`http://10.42.0.1:8080` redirects
+there); the companion app connects to the same TLS port, `10.42.0.1:8443`.
 
 The Pi itself has no internet on its own network — no network time (see
 [hardware.md](hardware.md#clock)) and no updates. To update at home:
@@ -283,10 +285,11 @@ phone; if the companion does not find the HUD, enter its address (from the phone
 connected devices) in the companion's *Setup*.
 
 In both cases the server must listen on the network: `server.host` is `0.0.0.0` by default. It
-listens on two ports: **8080** (`server.port`, plain HTTP: browsers and the kiosk) and **8443**
-(`server.tlsPort`, HTTPS: the companion app, whose link is encrypted and pinned to the HUD's
-certificate). A firewall on the Pi, if you add one, must let the phone reach 8443 (and 8080 for
-browsers on other devices); UDP 5353 for mDNS.
+listens on two ports: **8443** (`server.tlsPort`, HTTPS: the companion app, whose link is
+encrypted and pinned to the HUD's certificate, and browsers on other devices) and **8080**
+(`server.port`, plain HTTP: the kiosk on the Pi itself; other devices are redirected to 8443). A
+firewall on the Pi, if you add one, must let phones and laptops reach 8443 (8080 only for the
+redirect); UDP 5353 for mDNS.
 
 ## 9. Boot configuration
 
@@ -339,8 +342,9 @@ This file is a single line; append options with a space, on the same line:
 ## 10. Configure the HUD
 
 Open the settings app from the phone — the companion's *Setup → HUD settings*, or any browser at
-`http://10.42.0.1:8080/settings` (HUD hotspot) or `http://hud.local:8080/settings` — and go
-through it. Changes apply immediately. At least:
+`https://10.42.0.1:8443/settings` (HUD hotspot) or `https://hud.local:8443/settings` (the plain
+`http://…:8080` addresses redirect there) — and go through it. Changes apply immediately. At
+least:
 
 1. **Pair the phone** — parked: the HUD made a random pairing code when it created its
    `config.json`. In the settings app, *Phone → Show pairing code on the HUD* (or page to the
@@ -368,8 +372,9 @@ through it. Changes apply immediately. At least:
 
    From then on, browsers on other devices need the API token too: the settings app and the
    developer console ask for it once and keep it in that browser (or open
-   `http://hud.local:8080/settings?token=<token>` or `/dev?token=<token>` once). The kiosk on
-   the Pi itself needs none.
+   `https://hud.local:8443/settings?token=<token>` or `/dev?token=<token>` once — never a plain
+   `http://` address with the token: it would cross the Wi-Fi in clear text, and the redirect
+   drops it). The kiosk on the Pi itself needs none.
 
 3. **Vehicle**: fuel type, tank size, engine displacement, transmission, redline, fuel price.
 4. **Units**: km/h or mph, economy, temperature, pressure, clock, currency.
@@ -379,11 +384,33 @@ through it. Changes apply immediately. At least:
 7. **Sensors and buttons**, **Layout**, **Alerts**, **Maintenance** (enter the date and odometer
    of each item's last service).
 
-Leave *Server → Port*, *Phone port (TLS)* and *Listen address* alone unless you need them: they
+Leave *Server → Port*, *Secure port (TLS)* and *Listen address* alone unless you need them: they
 take effect at the next restart, and the kiosk only follows a new port once
 `CARHEADSUP_KIOSK_URL` says so (it stays black until then; see [the units](#the-units)). Ports
 below 1024 do not work, since the service has no privileges. Leave *Also accept unencrypted
-phone connections* off: the companion does not need it.
+phone connections* and *Also serve other devices over plain http* off: the companion and
+browsers do not need them.
+
+### Browsers and the HUD's certificate
+
+Browsers on other devices use the settings app and the developer console over HTTPS on the TLS
+port (8443), so the API token and your settings never cross the Wi-Fi in clear text; the plain
+port (8080) serves only the Pi itself and sends other devices there
+([details](configuration.md#remote-https)). The HUD's certificate is its own, not one from an
+authority, so each browser warns once ("Your connection is not private", "Warning: Potential
+Security Risk Ahead"). Before you accept it, compare the fingerprint: in the browser, open the
+certificate details (the warning page's *Advanced* / padlock → certificate) and read its SHA-256
+fingerprint; it must begin with the short form the HUD shows — on its *Pair a phone* page, under
+*Phone → Certificate fingerprint* in the settings app on a device that already has access, or in
+`journalctl -u carheadsup | grep 'Phone link'` (e.g. `FDC1 53EE DCA2 B536 4DD7`). If it differs,
+another device is posing as the HUD: do not accept it, and do not enter the token. Browsers keep
+the exception per address, so accept it for the address you use (`10.42.0.1` or `hud.local`).
+The companion app needs none of this: it pins the certificate when it pairs.
+
+For development only, *Server → Also serve other devices over plain http*
+(`server.allowPlainRemote`) serves other devices on the plain port again — with the token in
+clear text. With *Secure port (TLS)* empty (TLS off), plain http is the only way in, with the
+same risk; the HUD logs a warning and the settings app shows one.
 
 Every option is described in [configuration.md](configuration.md). To edit the file by hand, stop
 the service first, since it rewrites the file on changes from the settings app, and check the
@@ -520,7 +547,7 @@ renderer clients pass their token) or message content.
 
 | Symptom | Things to check |
 | --- | --- |
-| Display stays black | `systemctl status carheadsup-kiosk`, `journalctl -u carheadsup-kiosk -b`. "waiting for http://localhost:8080/ … (no answer)": the kiosk waits for the server — is it running (`systemctl status carheadsup`), and on the port in `CARHEADSUP_KIOSK_URL`? "HTTP 503": the renderer is not built (`npm run build` in the checkout, then `sudo deploy/install.sh`). "HTTP 403": the server does not accept the host name in `CARHEADSUP_KIOSK_URL` (use `localhost`). Otherwise: is `graphical.target` the default (`systemctl get-default`)? A desktop display manager competing for the screen (`sudo systemctl disable display-manager.service`)? `dtoverlay=vc4-kms-v3d` still in `config.txt` (cage needs KMS)? |
+| Display stays black | `systemctl status carheadsup-kiosk`, `journalctl -u carheadsup-kiosk -b`. "waiting for http://localhost:8080/ … (no answer)": the kiosk waits for the server — is it running (`systemctl status carheadsup`), and on the port in `CARHEADSUP_KIOSK_URL`? "HTTP 503": the renderer is not built (`npm run build` in the checkout, then `sudo deploy/install.sh`). "HTTP 403": the server does not accept the host name in `CARHEADSUP_KIOSK_URL` (use `localhost`). "HTTP 307": `CARHEADSUP_KIOSK_URL` names one of the Pi's network addresses, so the server takes the kiosk for another device and sends it to HTTPS (use `localhost`). Otherwise: is `graphical.target` the default (`systemctl get-default`)? A desktop display manager competing for the screen (`sudo systemctl disable display-manager.service`)? `dtoverlay=vc4-kms-v3d` still in `config.txt` (cage needs KMS)? |
 | Page "The HUD renderer has not been built" (in a browser) | `npm run build` in the checkout, then `sudo deploy/install.sh` again. |
 | HUD does not start; `systemctl status carheadsup` says "Dependency failed" | With the [read-only root](#read-only-root-file-system) recipe: the `hud-data` file system is missing or cannot be mounted (`lsblk -f`, `journalctl -b -u var-lib-carheadsup.mount`). |
 | Settings, odometer or trips are back to old values after every start | With a read-only root: the data partition is under the overlay (`findmnt /var/lib/carheadsup` says `overlay`) — see [step 4 of the recipe](#read-only-root-file-system). |
@@ -538,7 +565,9 @@ renderer clients pass their token) or message content.
 | Companion asks "This is my HUD — connect" | The HUD has no pairing code, so the phone cannot verify it. Confirm only if it is yours; better, set a pairing code. |
 | The pairing page shows no QR code | "No pairing code set": generate one under *Phone → Pairing code* and save. "Pairing unavailable": the TLS listener is not running (`server.tlsPort`, see the log) or the HUD listens only on a loopback address (`server.host`). The page exists only while parked. |
 | The companion does not read the QR code | Hold the phone close to the display and square to it, and avoid glare; turning the HUD brighter helps. Scanning the reflection in the windshield works too. It reports a code that is not a carheadsup pairing code, or one it cannot read. Pairing by hand still works. |
-| Settings app asks for a token | `server.apiToken` is set: enter it (it is stored in that browser). |
+| Browser warns that the connection is not private | Expected for the HUD's self-signed certificate on `https://…:8443`: compare its fingerprint, then accept it ([how](#browsers-and-the-huds-certificate)). |
+| `http://…:8080` from a laptop or phone jumps to `https://…:8443`, or answers "HTTPS required" | Expected: other devices use the TLS port. Open `https://<HUD address>:8443/settings`. "…the HUD's TLS listener is not running": the TLS port is taken or no certificate could be made (`journalctl -u carheadsup -b \| grep TLS`); the kiosk keeps working. |
+| Settings app asks for a token | `server.apiToken` is set: enter it (it is stored in that browser, per address: once more after moving to `https://`). |
 | Developer console from another device: "No feed", no live HUD | `server.apiToken` is set: enter it when the console asks, or open `/dev?token=<token>` once. |
 | Browser says "Unknown host name" | The HUD answers only to its IP address, `localhost`, `<hostname>` and `<hostname>.local` (protection against DNS rebinding). Use one of those, or add the name to `CARHEADSUP_ALLOWED_HOSTS` in `/etc/default/carheadsup`. |
 | Light or gesture sensor does nothing | `i2cdetect -y 1` shows the address? I²C enabled? The log says whether the `i2c-bus` module is missing (then rebuild with `build-essential` installed: `npm ci`, `sudo deploy/install.sh`). `id carheadsup` lists the `i2c` group? |

@@ -687,6 +687,7 @@ const serverSchema = withRules(
     port: int(1, 65_535),
     tlsPort: int(1, 65_535).nullable(),
     allowPlainPhone: bool,
+    allowPlainRemote: bool,
     host: hostSchema,
     apiToken: apiTokenSchema,
     mdns: bool,

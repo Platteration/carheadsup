@@ -163,6 +163,14 @@ describe('parsePairingUri', () => {
       detail: 'p is missing',
     });
   });
+
+  it('refuses a raw lone surrogate, with or without escapes next to it (as the companion does)', () => {
+    // Not a shared vector: JSON parsers disagree about lone surrogates.
+    for (const token of ['abc\ud800', 'abc%41\ud800', '\udc00%41']) {
+      const uri = encodePairingUri(PAYLOAD).replace(`k=${PAYLOAD.pairingToken}`, `k=${token}`);
+      expect(parsePairingUri(uri)).toMatchObject({ ok: false, error: 'invalid' });
+    }
+  });
 });
 
 describe('hudDisplayName', () => {
@@ -181,8 +189,25 @@ describe('hudDisplayName', () => {
     expect(wide.endsWith(' HUD')).toBe(true);
     expect(wide).toBe(`${'🚗'.repeat(14)} HUD`);
     // Any vehicle name gives a name the pairing URI accepts.
-    for (const name of ['x'.repeat(60), 'ü'.repeat(60), 'a\u0000b', '🚗'.repeat(60)]) {
+    for (const name of [
+      'x'.repeat(60),
+      'ü'.repeat(60),
+      'a\u0000b',
+      '🚗'.repeat(60),
+      'Golf \ud83d',
+    ]) {
       expect(pairingPayloadProblem({ ...PAYLOAD, hudName: hudDisplayName(name) })).toBeNull();
     }
+  });
+
+  it('replaces a lone surrogate (a hand-edited config) instead of making a name no URI accepts', () => {
+    expect(hudDisplayName('Golf \ud83d')).toBe('Golf \ufffd HUD');
+    expect(hudDisplayName('\udc00Golf')).toBe('\ufffdGolf HUD');
+    // A surrogate pair is one character and stays as it is.
+    expect(hudDisplayName('Golf \ud83d\ude97')).toBe('Golf \ud83d\ude97 HUD');
+    // Cutting to one DNS label counts U+FFFD as 3 bytes, as UTF-8 does.
+    const cut = hudDisplayName('\ud800'.repeat(40));
+    expect(cut).toBe(`${'\ufffd'.repeat(19)} HUD`);
+    expect(utf8Bytes(cut)).toBeLessThanOrEqual(63);
   });
 });

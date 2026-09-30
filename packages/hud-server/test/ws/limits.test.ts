@@ -3,18 +3,22 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { connect } from 'node:net';
 import type { AddressInfo, Socket } from 'node:net';
-import { networkInterfaces } from 'node:os';
 import type { HudFrame } from '@carheadsup/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WebSocket } from 'ws';
 import { limitConnections } from '../../src/http/connections.ts';
+import { SERVE_PLAIN, plainAccess } from '../../src/http/https-only.ts';
+import type { Listener } from '../../src/http/https-only.ts';
 import {
+  CLOSE_TLS_REQUIRED,
+  CLOSE_UNAUTHORIZED,
   MAX_REMOTE_RENDERER_CLIENTS,
   MAX_RENDERER_CLIENTS_PER_ADDRESS,
   RendererChannel,
 } from '../../src/ws/renderer-channel.ts';
+import type { RendererChannelOptions } from '../../src/ws/renderer-channel.ts';
 import { FakeClock, memoryLogger } from '../sensors/fakes.ts';
-import { TestSocket, startTestServer, testConfig } from '../helpers.ts';
+import { TestSocket, lanAddress, startTestServer, testConfig } from '../helpers.ts';
 import type { TestServer } from '../helpers.ts';
 
 class FakeSocket extends EventEmitter {
@@ -36,9 +40,11 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-function renderer(): {
+function renderer(
+  checks: Partial<Pick<RendererChannelOptions, 'authorize' | 'listenerAllowed'>> = {},
+): {
   channel: RendererChannel;
-  open: (address: string) => FakeSocket;
+  open: (address: string, listener?: Listener) => FakeSocket;
 } {
   const clock = new FakeClock();
   const config = testConfig();
@@ -51,13 +57,18 @@ function renderer(): {
     getConfig: () => config,
     simulated: false,
     authorize: () => true,
+    ...checks,
     now: clock.now,
     timers: clock,
     logger: memoryLogger(),
   });
-  const open = (address: string): FakeSocket => {
+  const open = (address: string, listener: Listener = 'tls'): FakeSocket => {
     const socket = new FakeSocket();
-    channel.accept(socket as unknown as WebSocket, { remoteAddress: address, token: null });
+    channel.accept(socket as unknown as WebSocket, {
+      remoteAddress: address,
+      token: null,
+      listener,
+    });
     return socket;
   };
   return { channel, open };
@@ -86,6 +97,36 @@ describe('RendererChannel client limits', () => {
     expect(open('10.42.0.99').closeCode).toBe(1013);
     for (let i = 0; i < 20; i += 1) expect(open('127.0.0.1').closeCode).toBeNull();
     expect(channel.clientCount).toBe(MAX_REMOTE_RENDERER_CLIENTS + 20);
+  });
+});
+
+describe('RendererChannel config changes', () => {
+  it('drops plain clients from other devices once they must use TLS, before checking tokens', () => {
+    let plainRemote = true;
+    let token = 'old';
+    const policy = {
+      tlsEnabled: () => true,
+      tlsPort: () => 8443,
+      allowPlainRemote: () => plainRemote,
+    };
+    const { channel, open } = renderer({
+      // As the HUD decides it (app.ts).
+      listenerAllowed: (auth) =>
+        auth.listener === 'tls' || plainAccess(auth.remoteAddress, policy) === SERVE_PLAIN,
+      authorize: (auth) => auth.remoteAddress === '127.0.0.1' || token === 'old',
+    });
+    const plain = open('10.42.0.23', 'plain');
+    const secure = open('10.42.0.24', 'tls');
+    const kiosk = open('127.0.0.1', 'plain');
+    channel.updateConfig(testConfig());
+    expect([plain, secure, kiosk].map((s) => s.closeCode)).toEqual([null, null, null]);
+    plainRemote = false;
+    token = 'new';
+    channel.updateConfig(testConfig());
+    expect(plain.closeCode).toBe(CLOSE_TLS_REQUIRED);
+    expect(secure.closeCode).toBe(CLOSE_UNAUTHORIZED);
+    expect(kiosk.closeCode).toBeNull();
+    expect(channel.clientCount).toBe(1);
   });
 });
 
@@ -170,14 +211,6 @@ describe('limitConnections', () => {
   });
 });
 
-function lanAddress(): string | null {
-  for (const list of Object.values(networkInterfaces())) {
-    for (const info of list ?? []) {
-      if (info.family === 'IPv4' && !info.internal) return info.address;
-    }
-  }
-  return null;
-}
 const lan = lanAddress();
 
 describe('/ws/hud from other devices', () => {
@@ -192,12 +225,13 @@ describe('/ws/hud from other devices', () => {
 
   it.skipIf(lan === null)('refuses display upgrades beyond the per-device limit', async () => {
     const t = (current = await startTestServer({ host: '0.0.0.0' }));
+    // Other devices use TLS.
     for (let i = 0; i < MAX_RENDERER_CLIENTS_PER_ADDRESS; i += 1) {
-      const socket = new TestSocket(`ws://${lan}:${t.port}/ws/hud`);
+      const socket = new TestSocket(`wss://${lan}:${t.tlsPort}/ws/hud`);
       sockets.push(socket);
       await socket.opened;
     }
-    const extra = new TestSocket(`ws://${lan}:${t.port}/ws/hud`);
+    const extra = new TestSocket(`wss://${lan}:${t.tlsPort}/ws/hud`);
     sockets.push(extra);
     await expect(extra.opened).rejects.toThrow(/503/);
     // The HUD's own display still connects.

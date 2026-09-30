@@ -1,5 +1,6 @@
 import { isAbsolute, join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { isLoopbackAddress } from './http/auth.ts';
 import { LOG_LEVELS, isLogLevel } from './logger.ts';
 import type { LogLevel } from './logger.ts';
 
@@ -229,4 +230,38 @@ export function serverUrls(
     return [format('localhost'), ...lanAddresses.map(format)];
   }
   return [format(host)];
+}
+
+export interface PageUrlOptions {
+  /** The bind address (`server.host`). */
+  host: string;
+  /** The plain listener's port. */
+  port: number;
+  /** Whether TLS is on (`server.tlsPort` set). */
+  tlsEnabled: boolean;
+  /** The TLS listener's port; null when it is off or could not start. */
+  tlsPort: number | null;
+  allowPlainRemote: boolean;
+  lanAddresses: readonly string[];
+}
+
+/**
+ * Where the pages are opened, for the start-up log. On the HUD itself: plain http (localhost for
+ * a wildcard bind). From other devices (the LAN addresses, or a bind address that is not
+ * loopback): https on the TLS port while TLS is on; plain http while it is off or with
+ * `server.allowPlainRemote`; not at all when the TLS listener could not start.
+ */
+export function pageUrls(options: PageUrlOptions): string[] {
+  const { host, port, tlsPort } = options;
+  const wildcard = host === '0.0.0.0' || host === '::' || host === '';
+  const local = wildcard || host === 'localhost' || isLoopbackAddress(host);
+  const remote = wildcard ? options.lanAddresses : local ? [] : [host];
+  const plainRemote = !options.tlsEnabled || options.allowPlainRemote;
+  return [
+    ...(local ? serverUrls(wildcard ? 'localhost' : host, port, []) : []),
+    ...remote.flatMap((address) => {
+      if (plainRemote) return serverUrls(address, port, []);
+      return tlsPort === null ? [] : serverUrls(address, tlsPort, [], 'https');
+    }),
+  ];
 }

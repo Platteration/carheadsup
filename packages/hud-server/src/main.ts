@@ -7,7 +7,7 @@
 import { homedir, networkInterfaces } from 'node:os';
 import { createHudServer } from './app.ts';
 import type { HudServer } from './app.ts';
-import { USAGE, parseCli, serverUrls } from './cli.ts';
+import { USAGE, pageUrls, parseCli, serverUrls } from './cli.ts';
 import { createLogger } from './logger.ts';
 import { HUD_VERSION } from './meta.ts';
 
@@ -150,8 +150,17 @@ async function main(): Promise<void> {
   });
   try {
     const { port, tlsPort } = await server.start();
-    const host = options.host ?? server.engine.config.server.host;
-    for (const url of serverUrls(host, port, lanAddresses())) {
+    const config = server.engine.config.server;
+    const host = options.host ?? config.host;
+    const urls = pageUrls({
+      host,
+      port,
+      tlsEnabled: config.tlsPort !== null,
+      tlsPort,
+      allowPlainRemote: config.allowPlainRemote,
+      lanAddresses: lanAddresses(),
+    });
+    for (const url of urls) {
       logger.info(`HUD: ${url}/   settings: ${url}/settings   dev console: ${url}/dev`);
     }
     if (tlsPort !== null) {

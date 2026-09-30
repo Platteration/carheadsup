@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { request as httpRequest } from 'node:http';
+import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TLSSocket } from 'node:tls';
 import {
@@ -515,4 +518,88 @@ export async function waitFor(
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await sleep(10);
   }
+}
+
+/**
+ * A non-loopback IPv4 address of this machine, if any. Requests to it come from that address, not
+ * from loopback: how the tests play another device on the car's Wi-Fi.
+ */
+export function lanAddress(): string | null {
+  for (const list of Object.values(networkInterfaces())) {
+    for (const info of list ?? []) {
+      if (info.family === 'IPv4' && !info.internal) return info.address;
+    }
+  }
+  return null;
+}
+
+export interface RawReply {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+  /** SHA-256 of the certificate the server presented (HTTPS only, else ''). */
+  fingerprint: string;
+}
+
+export interface RawRequestInit {
+  method?: string;
+  /** Sent as given; without `host`, the Host header names the URL's host and port. */
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+/**
+ * An HTTP or HTTPS request with full control over its headers (fetch sets Host itself and rejects
+ * the HUD's self-signed certificate). HTTPS accepts that certificate at whatever address the HUD
+ * is reached, as a browser does once its warning was accepted; compare `fingerprint`. An upgrade
+ * request that is refused resolves with the refusal.
+ */
+export function rawRequest(url: string, init: RawRequestInit = {}): Promise<RawReply> {
+  const target = new URL(url);
+  const secure = target.protocol === 'https:' || target.protocol === 'wss:';
+  const options = {
+    host: target.hostname.replace(/^\[|\]$/g, ''),
+    port: Number(target.port),
+    method: init.method ?? 'GET',
+    path: `${target.pathname}${target.search}`,
+    headers: init.headers ?? {},
+    setHost: init.headers?.['host'] === undefined,
+    agent: false as const,
+  };
+  return new Promise((resolve, reject) => {
+    const onResponse = (res: IncomingMessage): void => {
+      const socket = res.socket;
+      const fingerprint =
+        socket instanceof TLSSocket ? certificateFingerprint(socket.getPeerCertificate().raw) : '';
+      let body = '';
+      res.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      res.on('end', () =>
+        resolve({ status: res.statusCode ?? 0, headers: res.headers, body, fingerprint }),
+      );
+    };
+    const req = secure
+      ? httpsRequest({ ...options, rejectUnauthorized: false }, onResponse)
+      : httpRequest(options, onResponse);
+    req.on('upgrade', (res, socket) => {
+      socket.destroy();
+      resolve({ status: res.statusCode ?? 0, headers: res.headers, body: '', fingerprint: '' });
+    });
+    req.on('error', reject);
+    req.end(init.body);
+  });
+}
+
+/** Headers of a WebSocket upgrade request (for `rawRequest`). */
+export function upgradeHeaders(
+  host: string,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    host,
+    connection: 'Upgrade',
+    upgrade: 'websocket',
+    'sec-websocket-version': '13',
+    'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+    ...extra,
+  };
 }

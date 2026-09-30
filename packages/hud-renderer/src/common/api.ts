@@ -196,7 +196,10 @@ function safeLocalStorage(): Storage | null {
 // Client
 
 export interface HudApiOptions {
-  /** Origin (and optional path prefix) of the HUD, e.g. "http://192.168.4.1:8080". Default: same origin. */
+  /**
+   * Origin (and optional path prefix) of the HUD, e.g. "https://192.168.4.1:8443" (other devices
+   * use its TLS port; plain http serves only the HUD itself). Default: same origin.
+   */
   baseUrl?: string;
   /** Default: the global `fetch`. */
   fetch?: typeof fetch;

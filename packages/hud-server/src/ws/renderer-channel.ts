@@ -9,6 +9,7 @@ import type {
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
 import type { RawData, WebSocket } from 'ws';
 import { isLoopbackAddress } from '../http/auth.ts';
+import type { Listener } from '../http/https-only.ts';
 import { TokenBucket } from './rate-limit.ts';
 import { closeAll, closeSocket, rawDataToString, sendJson, sendText } from './sockets.ts';
 
@@ -20,6 +21,11 @@ const INPUT_BURST = 40;
 /** Close code for a client whose credentials stopped being valid (the API token changed). */
 export const CLOSE_UNAUTHORIZED = 4001;
 /**
+ * Close code for another device's plain (`ws://`) connection once the HUD no longer serves those
+ * (`server.allowPlainRemote` switched off while the TLS listener runs).
+ */
+export const CLOSE_TLS_REQUIRED = 4005;
+/**
  * Clients from other machines, per address and in total (each gets every frame, and up to
  * {@link MAX_RENDERER_BACKLOG_BYTES} buffered). The HUD's own display (loopback) is never
  * limited.
@@ -27,11 +33,13 @@ export const CLOSE_UNAUTHORIZED = 4001;
 export const MAX_RENDERER_CLIENTS_PER_ADDRESS = 4;
 export const MAX_REMOTE_RENDERER_CLIENTS = 16;
 
-/** How a renderer client authenticated, re-checked when the API token changes. */
+/** How a renderer client connected and authenticated, re-checked when the config changes. */
 export interface RendererClientAuth {
   remoteAddress: string | undefined;
   /** Token from `?token=` or the Authorization header, if any. */
   token: string | null;
+  /** The listener it connected to. */
+  listener: Listener;
 }
 
 export interface RendererChannelOptions {
@@ -50,6 +58,11 @@ export interface RendererChannelOptions {
   hardwareBrightness?(): boolean;
   /** Whether a client may stay connected under `config` (same rule as for the HTTP API). */
   authorize(auth: RendererClientAuth, config: HudConfig): boolean;
+  /**
+   * Whether a client may stay on the listener it used under `config` (default: always); see
+   * `https-only.ts`.
+   */
+  listenerAllowed?(auth: RendererClientAuth, config: HudConfig): boolean;
   now: Clock;
   timers: Timers;
   logger: Logger;
@@ -124,10 +137,20 @@ export class RendererChannel {
     );
   }
 
-  /** Re-send `display` when the projection changed; drop clients the new token locks out. */
+  /**
+   * Re-send `display` when the projection changed; drop plain clients from other devices that
+   * must use TLS now, and clients the new token locks out.
+   */
   updateConfig(config: HudConfig): void {
     this.sendDisplayIfChanged(config);
     for (const client of [...this.clients.values()]) {
+      if (this.options.listenerAllowed?.(client.auth, config) === false) {
+        this.options.logger.info(
+          'Renderer: plain connections from other devices are off; disconnecting a remote client',
+        );
+        closeSocket(client.ws, CLOSE_TLS_REQUIRED, 'use wss');
+        continue;
+      }
       if (!this.options.authorize(client.auth, config)) {
         this.options.logger.info('Renderer: API token changed; disconnecting a remote client');
         closeSocket(client.ws, CLOSE_UNAUTHORIZED, 'unauthorized');

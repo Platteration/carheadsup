@@ -22,7 +22,9 @@ export default defineConfig({
   use: {
     browserName: 'chromium',
     headless: true,
-    launchOptions: { executablePath },
+    // The pages only talk to the HUD under test — at this machine's LAN address, too
+    // (remote.spec.ts) — never through a proxy the environment may name.
+    launchOptions: { executablePath, args: ['--no-proxy-server'] },
     trace: 'off',
     screenshot: 'only-on-failure',
   },
