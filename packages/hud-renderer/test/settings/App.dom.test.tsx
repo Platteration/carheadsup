@@ -487,6 +487,78 @@ describe('settings app', () => {
     });
   });
 
+  it('does not send the HUD’s own estimate back as a dash reading', async () => {
+    const hud = new MockHud();
+    const { odometer: _fromCar, ...signals } = hud.diagnostics.signals;
+    hud.diagnostics = {
+      ...hud.diagnostics,
+      signals,
+      odometer: { km: 61_400, source: 'estimated', kmSinceConfirmed: 2350 },
+    };
+    const root = start(hud);
+    await ready(root);
+    const maintenance = section(root, 'maintenance');
+    await waitFor(() => maintenance.querySelector('.service'));
+    const markDone = async (selector: string) => {
+      await click(button(maintenance.querySelector(selector)!, 'Mark done'));
+      return waitFor(() => {
+        const el = root.querySelector<HTMLInputElement>('#done-odometer');
+        return el && el.value !== '' ? el : null;
+      });
+    };
+    // Saved unchanged: no reading, so the HUD neither takes its estimate for a confirmed dash
+    // reading nor stops asking for one.
+    const input = await markDone('.service--due-soon');
+    expect(input.value).toBe('61400');
+    expect(text(root.querySelector('[role=dialog]')!)).toContain('the HUD’s estimate');
+    await click(button(root.querySelector('[role=dialog]')!, 'Save'));
+    await waitFor(() => hud.writes().length === 1);
+    expect(hud.writes()[0]).toMatchObject({ path: '/api/maintenance/oil/done' });
+    expect(hud.writes()[0]?.body).toEqual({});
+    await waitFor(() => root.querySelector('[role=dialog]') === null);
+    expect(text(maintenance)).toContain('Check the odometer');
+    // Corrected to the dash: that is a reading.
+    await type(await markDone('.service--overdue'), '61450');
+    await click(button(root.querySelector('[role=dialog]')!, 'Save'));
+    await waitFor(() => hud.writes().length === 2);
+    expect(hud.writes()[1]).toMatchObject({
+      path: '/api/maintenance/brake-fluid/done',
+      body: { odometerKm: 61_450 },
+    });
+  });
+
+  it('asks for the dash reading when marking a service done while the odometer is unknown', async () => {
+    const hud = new MockHud();
+    const { odometer: _fromCar, ...signals } = hud.diagnostics.signals;
+    hud.diagnostics = {
+      ...hud.diagnostics,
+      signals,
+      odometer: { km: null, source: null, kmSinceConfirmed: null },
+    };
+    const root = start(hud);
+    await ready(root);
+    const maintenance = section(root, 'maintenance');
+    await waitFor(() => text(maintenance).includes('Odometer unknown'));
+    await click(button(maintenance.querySelector('.service--due-soon')!, 'Mark done'));
+    const dialog = await waitFor(() => {
+      const el = root.querySelector<HTMLElement>('[role=dialog]');
+      return el && text(el).includes('enter the reading on the dash') ? el : null;
+    });
+    // Not pre-filled from an old service or trip: saved, that would become the odometer.
+    const input = root.querySelector<HTMLInputElement>('#done-odometer')!;
+    expect(input.value).toBe('');
+    await type(input, '58100');
+    await click(button(dialog, 'Save'));
+    await waitFor(() => hud.writes().length === 1);
+    expect(hud.writes()[0]).toMatchObject({
+      path: '/api/maintenance/oil/done',
+      body: { odometerKm: 58_100 },
+    });
+    // The odometer card follows: the reading turned distance reminders on.
+    await waitFor(() => !text(maintenance).includes('Odometer unknown'));
+    expect(text(maintenance)).toMatch(/HUD odometer: ≈ 58\s?100 km/);
+  });
+
   it('says where the HUD odometer comes from and asks for the dash reading when needed', async () => {
     // Read from the car: just the reading.
     const car = new MockHud();

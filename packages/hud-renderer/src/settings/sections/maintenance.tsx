@@ -15,10 +15,10 @@ import { jsonEqual } from '../model/diff.ts';
 import type { Scope } from '../model/scope.ts';
 import {
   MAINTENANCE_STATUS_LABELS,
-  bestKnownOdometerKm,
   maintenanceIdFor,
   maintenanceLastDone,
   maintenanceRemaining,
+  odometerPrefill,
   sortMaintenance,
 } from '../model/records.ts';
 import { DAYS, parseNumberText, toCanonical } from '../model/units.ts';
@@ -57,6 +57,8 @@ export function MaintenanceSection({ api, units, root, savedSchedule }: Maintena
     status.reload();
   }, [savedSchedule]);
   const [marking, setMarking] = useState<MaintenanceItemStatus | null>(null);
+  // Bumped when a service was recorded: its reading may have set the HUD's odometer.
+  const [servicesRecorded, setServicesRecorded] = useState(0);
   const items = status.data === null ? null : sortMaintenance(status.data);
   const attention =
     items?.filter((i) => i.status === 'overdue' || i.status === 'due-soon').length ?? 0;
@@ -113,7 +115,12 @@ export function MaintenanceSection({ api, units, root, savedSchedule }: Maintena
           ))}
         </ul>
       )}
-      <OdometerCard api={api} units={units} onSaved={status.reload} />
+      <OdometerCard
+        api={api}
+        units={units}
+        onSaved={status.reload}
+        servicesRecorded={servicesRecorded}
+      />
       {root !== null && <ScheduleEditor scope={root.child('maintenance')} />}
       {marking !== null && (
         <MarkDoneDialog
@@ -124,6 +131,7 @@ export function MaintenanceSection({ api, units, root, savedSchedule }: Maintena
           onDone={(next) => {
             status.setData(next);
             setMarking(null);
+            setServicesRecorded((n) => n + 1);
           }}
         />
       )}
@@ -161,28 +169,38 @@ function MarkDoneDialog({
   const unit = driverUnits.distance;
   const input = useOdometerInput(unit, '');
   const [prefilled, setPrefilled] = useState(false);
+  /** The text pre-filled from the HUD's own estimate (not a reading), if that is what it is. */
+  const [estimateText, setEstimateText] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  // Best-effort prefill from the car / last trip / last service (whichever is known).
+  // Best-effort prefill from the HUD / the car / last trip / last service (whichever is known).
   const prefill = useResource(async (signal) => {
     const [diag, trips] = await Promise.all([
       api.getDiagnostics({ signal }).catch(() => null),
       api.getTrips({ limit: 1 }, { signal }).catch(() => []),
     ]);
-    return bestKnownOdometerKm(diag, trips, all);
+    return odometerPrefill(diag, trips, all);
   });
   useEffect(() => {
-    if (prefilled || prefill.data === null) return;
+    const km = prefill.data?.km ?? null;
+    if (prefilled || km === null) return;
     setPrefilled(true);
-    if (input.text === '') input.setText(String(Math.round(unit.toDisplay(prefill.data))));
+    if (input.text !== '') return;
+    const text = String(Math.round(unit.toDisplay(km)));
+    input.setText(text);
+    if (prefill.data?.estimate === true) setEstimateText(text);
   }, [prefill.data]);
+  const showsEstimate = estimateText !== null && input.text.trim() === estimateText;
 
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
-      onDone(await api.markMaintenanceDone(item.itemId, input.km ?? undefined));
+      // The reading entered is today's dash reading, which also confirms (or sets) the odometer
+      // of a car that does not report it: the HUD's own estimate, saved unchanged, is not one.
+      const km = showsEstimate ? undefined : (input.km ?? undefined);
+      onDone(await api.markMaintenanceDone(item.itemId, km));
     } catch (err) {
       setError(err);
       setBusy(false);
@@ -214,13 +232,29 @@ function MarkDoneDialog({
           class="input input--number"
           inputMode="numeric"
           value={input.text}
-          placeholder={prefill.loading ? 'Reading…' : 'Leave empty to use the HUD’s reading'}
+          placeholder={
+            prefill.loading
+              ? 'Reading…'
+              : prefill.data?.unknown === true
+                ? 'The reading on the dash'
+                : 'Leave empty to use the HUD’s reading'
+          }
           onInput={(event) => input.setText(event.currentTarget.value)}
         />
         <span class="input-unit__label">{unit.label}</span>
       </div>
       {input.error !== null && input.text.trim() !== '' ? (
         <p class="field__error">{input.error}</p>
+      ) : prefill.data?.unknown === true ? (
+        <p class="field__hint">
+          The HUD does not know the odometer yet: enter the reading on the dash. It also sets the
+          HUD’s odometer, which turns distance reminders on.
+        </p>
+      ) : showsEstimate ? (
+        <p class="field__hint">
+          This is the HUD’s estimate. If the dash shows something else, enter that: it also corrects
+          the HUD’s odometer.
+        </p>
       ) : (
         <p class="field__hint">Pre-filled with the best-known reading; correct it if needed.</p>
       )}
@@ -237,10 +271,13 @@ function OdometerCard({
   api,
   units,
   onSaved,
+  servicesRecorded,
 }: {
   api: HudApi;
   units: UnitsConfig;
   onSaved: () => void;
+  /** Changes when a service was recorded (its reading may have set the odometer). */
+  servicesRecorded: number;
 }) {
   const { driverUnits } = useForm();
   const unit = driverUnits.distance;
@@ -248,6 +285,9 @@ function OdometerCard({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const diagnostics = useResource((signal) => api.getDiagnostics({ signal }));
+  useEffect(() => {
+    if (servicesRecorded > 0) diagnostics.reload();
+  }, [servicesRecorded]);
   // Absent from a HUD that predates it.
   const odometer = diagnostics.data?.odometer ?? null;
   const submit = async () => {

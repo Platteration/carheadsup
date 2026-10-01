@@ -15,6 +15,7 @@ import {
   maintenanceIdFor,
   maintenanceLastDone,
   maintenanceRemaining,
+  odometerPrefill,
   signalRows,
   sortMaintenance,
   watchSignals,
@@ -161,15 +162,57 @@ describe('maintenance', () => {
       odometer: { km: 58_100, source: 'estimated', kmSinceConfirmed: 88 },
     };
     expect(bestKnownOdometerKm(estimated, mockTrips(), [oil])).toBe(58_100);
-    // … then the car's reading, the last trip and the last service.
-    const noOdo: ApiDiagnostics = {
+    // … then the car's reading …
+    const unknown: ApiDiagnostics = {
+      ...diag,
+      odometer: { km: null, source: null, kmSinceConfirmed: null },
+    };
+    expect(bestKnownOdometerKm(unknown, mockTrips(), [oil])).toBe(58_012.4);
+    // … but no guess from old trips or services while the HUD says it does not know: saved
+    // unchanged, that guess would become the odometer.
+    const noOdo: ApiDiagnostics = { ...unknown, signals: {} };
+    expect(bestKnownOdometerKm(noOdo, mockTrips(), [oil])).toBeNull();
+    // A HUD that does not report its own odometer: the last trip, then the last service.
+    const older: ApiDiagnostics = { ...diag, signals: {} };
+    delete (older as Partial<ApiDiagnostics>).odometer;
+    expect(bestKnownOdometerKm(older, mockTrips(), [oil])).toBeCloseTo(58_042.7, 6);
+    expect(bestKnownOdometerKm(null, [], [oil, tyres])).toBe(54_000);
+    expect(bestKnownOdometerKm(null, [{ ...TRIP, endOdometerKm: null }], [cabin])).toBeNull();
+  });
+
+  it('marks an estimate as such and asks for the dash reading while the odometer is unknown', () => {
+    const diag = mockDiagnostics();
+    expect(odometerPrefill(diag, mockTrips(), [oil])).toEqual({
+      km: 58_012.4,
+      estimate: false,
+      unknown: false,
+    });
+    const estimated: ApiDiagnostics = {
+      ...diag,
+      signals: {},
+      odometer: { km: 58_100, source: 'estimated', kmSinceConfirmed: 88 },
+    };
+    expect(odometerPrefill(estimated, mockTrips(), [oil])).toEqual({
+      km: 58_100,
+      estimate: true,
+      unknown: false,
+    });
+    const unknown: ApiDiagnostics = {
       ...diag,
       signals: {},
       odometer: { km: null, source: null, kmSinceConfirmed: null },
     };
-    expect(bestKnownOdometerKm(noOdo, mockTrips(), [oil])).toBeCloseTo(58_042.7, 6);
-    expect(bestKnownOdometerKm(null, [], [oil, tyres])).toBe(54_000);
-    expect(bestKnownOdometerKm(null, [{ ...TRIP, endOdometerKm: null }], [cabin])).toBeNull();
+    expect(odometerPrefill(unknown, mockTrips(), [oil])).toEqual({
+      km: null,
+      estimate: false,
+      unknown: true,
+    });
+    // Diagnostics unavailable: a guess, not known to be unknown.
+    expect(odometerPrefill(null, [], [oil, tyres])).toEqual({
+      km: 54_000,
+      estimate: false,
+      unknown: false,
+    });
   });
 });
 

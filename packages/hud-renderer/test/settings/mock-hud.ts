@@ -360,6 +360,13 @@ export class MockHud {
     if (method === 'POST' && doneMatch) {
       const id = decodeURIComponent(doneMatch[1] ?? '');
       const odometerKm = (body as { odometerKm?: number } | null)?.odometerKm ?? null;
+      if (odometerKm !== null && this.diagnostics.odometer.source !== 'pid') {
+        // Like the HUD: the dash reading of a service also sets an odometer the car lacks.
+        this.diagnostics = {
+          ...this.diagnostics,
+          odometer: { km: odometerKm, source: 'estimated', kmSinceConfirmed: 0 },
+        };
+      }
       this.maintenance = this.maintenance.map((m) =>
         m.itemId === id
           ? {

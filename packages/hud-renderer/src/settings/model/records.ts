@@ -246,8 +246,14 @@ export function maintenanceLastDone(
 }
 
 /**
- * Best guess of the current odometer for pre-filling "mark done": the car's own odometer PID,
- * else the end of the newest trip, else the most recent service record. Null when unknown.
+ * Best guess of the current odometer for pre-filling "mark done": the HUD's own odometer (the
+ * car's reading or its estimate), else the car's odometer PID, else — only from a HUD that does
+ * not report its own odometer — the end of the newest trip or the most recent service record.
+ * Null when unknown.
+ *
+ * A HUD that says its odometer is unknown gets no guess from old trips or services: the reading
+ * entered with a service also sets the odometer of a car that does not report it, so a stale
+ * pre-fill saved unchanged would become the odometer.
  */
 export function bestKnownOdometerKm(
   diagnostics: ApiDiagnostics | null,
@@ -259,6 +265,8 @@ export function bestKnownOdometerKm(
   if (fromHud !== null && fromHud !== undefined && Number.isFinite(fromHud)) return fromHud;
   const fromCar = diagnostics?.signals.odometer?.value;
   if (fromCar !== undefined && Number.isFinite(fromCar)) return fromCar;
+  // Absent from a HUD that predates it.
+  if (diagnostics?.odometer !== undefined) return null;
   const newestTrip = [...trips].sort((a, b) => b.startedAt - a.startedAt)[0];
   if (newestTrip?.endOdometerKm !== null && newestTrip?.endOdometerKm !== undefined) {
     return newestTrip.endOdometerKm;
@@ -267,6 +275,34 @@ export function bestKnownOdometerKm(
     .map((m) => m.lastDoneKm)
     .filter((km): km is number => km !== null && Number.isFinite(km));
   return serviced.length > 0 ? Math.max(...serviced) : null;
+}
+
+/** What the "mark done" dialog pre-fills the odometer with (see {@link odometerPrefill}). */
+export interface OdometerPrefill {
+  /** km to pre-fill, or null for none. */
+  km: number | null;
+  /**
+   * `km` is the HUD's own estimate, not a reading: saved unchanged it is not sent (the HUD uses
+   * its estimate anyway), so it never counts as a dash reading that confirms the estimate.
+   */
+  estimate: boolean;
+  /** The HUD does not know the odometer: the dialog asks for the reading on the dash. */
+  unknown: boolean;
+}
+
+/** The odometer pre-fill of the "mark done" dialog (see {@link bestKnownOdometerKm}). */
+export function odometerPrefill(
+  diagnostics: ApiDiagnostics | null,
+  trips: readonly TripRecord[],
+  maintenance: readonly MaintenanceItemStatus[],
+): OdometerPrefill {
+  const km = bestKnownOdometerKm(diagnostics, trips, maintenance);
+  const hud = diagnostics?.odometer;
+  return {
+    km,
+    estimate: km !== null && hud?.source === 'estimated' && hud.km === km,
+    unknown: km === null && hud !== undefined && hud.km === null,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------

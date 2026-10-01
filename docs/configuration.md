@@ -295,7 +295,10 @@ speedometer's lead), so each dash reading entered at least 200 km after the prev
 the estimate's scale (by half the measured error each time, within ±10 %; a reading that implies
 more than −20 %/+25 % is taken as a typo and corrects nothing). The settings app shows the HUD's
 odometer and where it comes from, and asks for the dash reading again after 2,000 estimated km;
-the parked dashboard marks an estimated odometer with "≈".
+the parked dashboard marks an estimated odometer with "≈". Its *mark done* dialog pre-fills the
+HUD's estimate, which is not a dash reading: saved unchanged, it records the service without
+confirming the odometer. While the odometer is unknown the dialog asks for the dash reading
+instead of guessing one from an earlier service.
 
 ### trip
 
