@@ -49,8 +49,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        // Restore the connection the user left running (e.g. after the process was killed).
-        if (viewModel.settings.value.serviceEnabled && !HudConnectionService.isRunning.value) viewModel.startService()
+        // Restore the connection the user left running (e.g. after the process was killed); a
+        // service started at boot gets the location type now that the app is in the foreground.
+        if (HudConnectionService.isRunning.value) {
+            HudConnectionService.refresh(this)
+        } else if (viewModel.settings.value.serviceEnabled) {
+            viewModel.startService()
+        }
     }
 }
 

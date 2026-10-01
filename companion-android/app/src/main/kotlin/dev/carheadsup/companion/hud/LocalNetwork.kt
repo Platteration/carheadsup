@@ -6,13 +6,21 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import dev.carheadsup.protocol.link.HudEndpoint
+import dev.carheadsup.protocol.link.HudRoute
+import dev.carheadsup.protocol.link.InterfaceAddress
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
+import java.net.SocketException
 import java.net.UnknownHostException
 import javax.net.SocketFactory
 
@@ -23,20 +31,29 @@ import javax.net.SocketFactory
  * the default network, and sockets opened without a network binding go out over mobile data,
  * where the HUD's private address is unreachable. Connections to the HUD are therefore bound to
  * the Wi-Fi network explicitly ([bind]); internet traffic (Overpass) keeps the default network.
+ * Without any Wi-Fi, [route] tells whether the HUD is reachable at all (the phone's own hotspot)
+ * or the link should wait for a network rather than dial over mobile data.
  */
 class LocalNetwork(context: Context) {
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     private val wifiNetworks = LinkedHashSet<Network>()
+    @Volatile
     private var registered = false
+    private val changes = MutableStateFlow(0L)
+
+    /** Counts Wi-Fi networks coming and going: the link retries at once when it moves. */
+    val generation: StateFlow<Long> = changes.asStateFlow()
 
     private val callback =
         object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 synchronized(wifiNetworks) { wifiNetworks += network }
+                changes.update { it + 1 }
             }
 
             override fun onLost(network: Network) {
                 synchronized(wifiNetworks) { wifiNetworks -= network }
+                changes.update { it + 1 }
             }
         }
 
@@ -104,6 +121,37 @@ class LocalNetwork(context: Context) {
         } catch (e: IOException) {
             false
         }
+    }
+
+    /**
+     * How [endpoint] can be reached now ([HudRoute.choose]): over the Wi-Fi, over another local
+     * network (the phone's own hotspot), or not at all without going out over mobile data.
+     */
+    fun route(endpoint: HudEndpoint): HudRoute {
+        if (wifi != null) return HudRoute.WIFI
+        // Not watching Wi-Fi (the callback could not be registered): no way to tell, so try.
+        if (!registered) return HudRoute.LOCAL
+        val defaultInterface =
+            try {
+                connectivity.getLinkProperties(connectivity.activeNetwork)?.interfaceName
+            } catch (e: SecurityException) {
+                null
+            }
+        return HudRoute.choose(endpoint.host, onWifi = false, interfaceAddresses(), defaultInterface)
+    }
+
+    /** The IPv4 addresses of the phone's interfaces that are up (loopback aside). */
+    private fun interfaceAddresses(): List<InterfaceAddress> = try {
+        NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { nic ->
+                nic.interfaceAddresses.mapNotNull { entry ->
+                    val address = entry.address as? Inet4Address ?: return@mapNotNull null
+                    InterfaceAddress.of(nic.name, address.address, entry.networkPrefixLength.toInt())
+                }
+            }
+    } catch (e: SocketException) {
+        emptyList()
     }
 
     /** [client] with sockets and DNS bound to the Wi-Fi network, or unchanged without Wi-Fi. */

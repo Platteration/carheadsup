@@ -21,6 +21,7 @@ import dev.carheadsup.protocol.auth.TrustProblem
 import dev.carheadsup.protocol.link.Heartbeat
 import dev.carheadsup.protocol.link.HudAdvertisement
 import dev.carheadsup.protocol.link.HudEndpoint
+import dev.carheadsup.protocol.link.HudRoute
 import dev.carheadsup.protocol.link.MessageRateLimiter
 import dev.carheadsup.protocol.link.PhoneCloseCode
 import dev.carheadsup.protocol.link.ReconnectBackoff
@@ -38,6 +39,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -126,6 +129,10 @@ data class TrustedHud(val endpoint: HudEndpoint, val certFingerprint: String)
  * - reconnects with exponential backoff; a refused or untrusted pairing, or a session a newer one
  *   of this phone replaced (close 4000), waits the maximum delay; while another phone holds the
  *   HUD it is refused with close 1013 ("another phone is connected") and backs off as usual;
+ * - tries again at once when a Wi-Fi network comes or goes ([LocalNetwork.generation]) — the
+ *   car's Wi-Fi usually comes up after the phone gave up on it — and, with no network to reach
+ *   the HUD over ([HudRoute.NONE]: no Wi-Fi, no hotspot of its own), waits for one instead of
+ *   dialling the HUD's private address over mobile data;
  * - hands every other message of a verified HUD to [onMessage].
  *
  * Changing the address or pairing token restarts the connection. All work runs in [scope].
@@ -172,6 +179,14 @@ class HudLink(
         if (job?.isActive == true) return
         job =
             scope.launch {
+                launch {
+                    localNetwork.generation.drop(1).collect {
+                        val current = state.value
+                        // Not after a hard stop (a changed certificate): that waits for the user.
+                        val hardStop = current is LinkStatus.Untrusted && current.retryAtElapsedMs == null
+                        if (current !is LinkStatus.Connected && !hardStop) reconnectNow()
+                    }
+                }
                 settings
                     .map { it.connectionKey }
                     .distinctUntilChanged()
@@ -200,6 +215,11 @@ class HudLink(
         while (currentCoroutineContext().isActive) {
             val target = resolveTarget()
             val endpoint = target.endpoint
+            val network = localNetwork.generation.value
+            if (localNetwork.route(endpoint) == HudRoute.NONE) {
+                awaitNetwork(endpoint, network)
+                continue
+            }
             state.value = LinkStatus.Connecting(endpoint)
             val outcome =
                 try {
@@ -213,10 +233,18 @@ class HudLink(
             if (outcome is SessionOutcome.Untrusted && endpoint == trusted?.endpoint) trusted = null
             // Another certificate for the paired HUD: stop until the user re-pairs or retries.
             val hardStop = outcome is SessionOutcome.Untrusted && outcome.problem is TrustProblem.CertificateChanged
-            val delayMs =
+            val backoffMs =
                 when (outcome) {
                     is SessionOutcome.Refused, is SessionOutcome.Untrusted -> backoff.refusedDelayMs()
                     is SessionOutcome.Closed -> backoff.delayAfterClose(outcome.code)
+                }
+            // The Wi-Fi changed while this attempt ran on the old one: try the new one soon.
+            val networkChanged = localNetwork.generation.value != network
+            val delayMs =
+                if (networkChanged && outcome is SessionOutcome.Closed) {
+                    minOf(backoffMs, NETWORK_RETRY_MS)
+                } else {
+                    backoffMs
                 }
             val retryAt = SystemClock.elapsedRealtime() + delayMs
             state.value =
@@ -237,6 +265,22 @@ class HudLink(
             } else {
                 withTimeoutOrNull(delayMs) { wakeUp.receive() }
             }
+        }
+    }
+
+    /**
+     * Nothing local reaches the HUD (see [HudRoute.NONE]): wait until a Wi-Fi network comes or
+     * goes after [network], a "reconnect now", or [NETWORK_POLL_MS] — the phone's own hotspot
+     * switched on brings no callback. No backoff: nothing was tried.
+     */
+    private suspend fun awaitNetwork(endpoint: HudEndpoint, network: Long) {
+        state.value = LinkStatus.Waiting(endpoint, NO_NETWORK_REASON, SystemClock.elapsedRealtime() + NETWORK_POLL_MS)
+        wakeUp.tryReceive()
+        withTimeoutOrNull(NETWORK_POLL_MS) {
+            merge(
+                localNetwork.generation.filter { it != network }.map { },
+                wakeUp.receiveAsFlow(),
+            ).first()
         }
     }
 
@@ -580,5 +624,13 @@ class HudLink(
 
         /** How long to wait for mDNS before restarting discovery. */
         const val DISCOVERY_RESTART_MS = 30_000L
+
+        /** Without a network to reach the HUD over, how often to look again (a hotspot has no callback). */
+        const val NETWORK_POLL_MS = 30_000L
+
+        /** The retry after an attempt that failed on a Wi-Fi network that has since changed. */
+        const val NETWORK_RETRY_MS = 500L
+
+        const val NO_NETWORK_REASON = "no Wi-Fi to reach the HUD over"
     }
 }

@@ -43,6 +43,8 @@
     <string name="status_read_aloud_on">Messages are read aloud on the phone</string>
     <string name="status_read_aloud_off">Messages are not read aloud (HUD or app setting)</string>
     <string name="service_start_refused">Android did not allow starting the service. Try again with the app open.</string>
+    <string name="link_stopped_title">HUD link stopped</string>
+    <string name="link_stopped_text">Android did not let the connection start in the background. Tap to restart it.</string>
 
     <!-- Actions -->
     <string name="action_start">Connect to HUD</string>

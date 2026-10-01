@@ -113,6 +113,26 @@ class Notifier(private val context: Context) {
 
     fun updateLink(status: LinkStatus) = notify(ID_LINK, linkNotification(status))
 
+    /**
+     * Android did not let the connection service start (or restart) in the background: say so,
+     * instead of the link silently staying down. Tapping it opens the app, which starts the
+     * service again.
+     */
+    fun linkStopped() {
+        val notification =
+            NotificationCompat.Builder(context, CHANNEL_LINK)
+                .setSmallIcon(R.drawable.ic_stat_hud)
+                .setContentTitle(context.getString(R.string.link_stopped_title))
+                .setContentText(context.getString(R.string.link_stopped_text))
+                .setContentIntent(openApp())
+                .setAutoCancel(true)
+                .setCategory(NotificationCompat.CATEGORY_ERROR)
+                .build()
+        notify(ID_LINK_STOPPED, notification)
+    }
+
+    fun cancelLinkStopped() = manager.cancel(ID_LINK_STOPPED)
+
     fun tripLogged(trip: TripRecord, formatter: TripFormatter) {
         val notification =
             NotificationCompat.Builder(context, CHANNEL_TRIPS)
@@ -200,6 +220,7 @@ class Notifier(private val context: Context) {
         const val CHANNEL_MAINTENANCE = "maintenance"
         const val ID_LINK = 1
         const val ID_TRIP = 2
+        const val ID_LINK_STOPPED = 3
         const val ID_MAINTENANCE_BASE = 0x10000
         private const val REQUEST_OPEN = 1
         private const val REQUEST_STOP = 2
