@@ -86,7 +86,10 @@ test('blanks to the "no signal" dot as soon as the server stops, and recovers af
   expect(errors).toEqual([]);
 });
 
-test('sends its heartbeat while it draws, and reports the errors it catches', async ({ page }) => {
+test('sends its heartbeat while it draws, and reports the errors it catches', async ({
+  page,
+  context,
+}) => {
   const health = async (): Promise<ApiKioskHealth> =>
     (await (await fetch(`${hud.base}/api/kiosk/health`)).json()) as ApiKioskHealth;
   await page.goto(`${hud.base}/`);
@@ -113,4 +116,17 @@ test('sends its heartbeat while it draws, and reports the errors it catches', as
   await expect
     .poll(async () => (await health()).aliveAgoMs ?? 0, { timeout: 10_000 })
     .toBeGreaterThan(2000);
+  await expect.poll(async () => (await health()).displays).toBe(0);
+
+  // A preview opened on the Pi itself (for debugging) draws live frames but proves nothing
+  // about the windshield: it must not hide a hung kiosk from the launcher.
+  const preview = await context.newPage();
+  await preview.goto(`${hud.base}/?preview=1`);
+  await expect.poll(async () => (await health()).displays, { timeout: 10_000 }).toBe(1);
+  await expect(preview.locator('.hud-content[data-mode]')).toBeVisible();
+  await expect(preview.locator('[data-no-signal="true"]')).toHaveCount(0);
+  const silentFor = (await health()).aliveAgoMs ?? 0;
+  await preview.waitForTimeout(2500);
+  expect((await health()).aliveAgoMs).toBeGreaterThanOrEqual(silentFor + 2000);
+  await preview.close();
 });

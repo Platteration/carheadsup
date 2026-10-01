@@ -582,13 +582,18 @@ come back as empty files after a cut. The replaced version stays in `/opt/carhea
 the restarted server does not answer within 60 s (`--start-timeout`), the installer puts the
 previous version back, with its systemd units, and says so ("the update failed and was rolled
 back"); the failed one is then in `/opt/carheadsup.prev`. To go back by hand — a version that
-starts but misbehaves in the car:
+starts but misbehaves in the car — use the installer of the checkout, which knows `--rollback`
+even when the version it goes back to is older than that option:
 
 ```sh
-sudo /opt/carheadsup/deploy/install.sh --rollback   # the version before the last update
-sudo /opt/carheadsup/deploy/install.sh --rollback   # again: forward to the newer one
-``` Config files from older versions are read leniently: new options get their defaults,
-and a file that had to be corrected is kept as `config.json.bak`. With a read-only root, switch
+cd ~/carheadsup
+sudo deploy/install.sh --rollback   # the version before the last update
+sudo deploy/install.sh --rollback   # again: forward to the newer one
+```
+
+A rollback keeps the kiosk and the hardware watchdog as they are installed (add `--no-kiosk` or
+`--no-hardware-watchdog` to remove them). Config files from older versions are read leniently:
+new options get their defaults, and a file that had to be corrected is kept as `config.json.bak`. With a read-only root, switch
 the overlay off first ([changing the system later](#read-only-root-file-system)).
 
 ## Logs
@@ -628,7 +633,8 @@ renderer clients pass their token) or message content.
 
 The server also watches the Pi itself: its SoC temperature and the firmware's under-voltage and
 throttling flags. It logs each change ("under-voltage: the Pi's 5 V supply sags", "the SoC is at
-82 °C", and when it is fine again), reports them in `/api/info` (`system`), and the settings app
+82 °C", and when it is fine again — for the supply and the CPU speed after 30 s without a
+relapse, so a supply that hovers at the limit is one warning, not one every few seconds), reports them in `/api/info` (`system`), and the settings app
 shows them on its Status page (*HUD computer*). Under-voltage, even only "since start-up", means
 the 12 V → 5 V converter or its wiring is not up to the job: expect random resets and a corrupted
 card until it is fixed ([power](hardware.md#power), [heat](hardware.md#heat-and-sun)).
@@ -649,7 +655,7 @@ the adapter's traffic* in the settings app (or `--record`); the files land in
 | Only a tiny red dot in a corner | The page is loaded but receives no frames: the server is down or restarting (`systemctl status carheadsup`). |
 | The display goes dark for a few seconds and the HUD comes back | A watchdog restarted something: `journalctl -u carheadsup-kiosk -b \| grep heartbeat` (the page hung or its renderer crashed — on a 512 MB board often for lack of memory) or `journalctl -u carheadsup -b \| grep -i watchdog` (the server hung). Page errors are in the server's log ("page error on the HUD's display"). See [Watchdogs](#watchdogs). |
 | The kiosk restarts every half minute | Its page draws nothing: no panel connected or detected (force the connector on, see [cmdline.txt](#bootfirmwarecmdlinetxt)), or a board too slow to show the page within `CARHEADSUP_KIOSK_GRACE_S` (raise it). |
-| The installer says "the update failed and was rolled back" | The new version did not answer within 60 s; the previous one runs again. The journal lines it printed say why; `sudo /opt/carheadsup/deploy/install.sh --rollback` tries the new one again (`--start-timeout 180` for a slow first start). |
+| The installer says "the update failed and was rolled back" | The new version did not answer within 60 s; the previous one runs again. The journal lines it printed say why; `sudo deploy/install.sh --rollback` in `~/carheadsup` tries the new one again (`--start-timeout 180` for a slow first start). |
 | Only a tiny ring in a corner | The HUD is blanked: hold the primary button, press B on a keyboard, or send `toggle-blank` from the companion's remote. |
 | Text reads backwards / upside down on the glass | *Projection*: `mirrorX`, `mirrorY`, *Panel rotation*. |
 | OBD never connects | `journalctl -u carheadsup` shows the reason. Ignition on? `/dev/rfcomm0` present (`systemctl status obd-rfcomm@<MAC>`)? Adapter paired *and* trusted? Another device (a phone app) connected to it? For USB: right `obd.serialPath` and `obd.baudRate`? Try `obd.protocol` = `"6"` (CAN 11-bit 500 kbit/s) instead of automatic on a modern car. |

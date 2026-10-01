@@ -113,6 +113,46 @@ describe('TranscriptFiles', () => {
     ]);
   });
 
+  it("deletes other sessions before the beginning of this one, whatever the files' times", async () => {
+    // A Pi without a real-time clock can start a boot at a time before that of an earlier
+    // drive's transcripts. By name, this session's first part (with the adapter's
+    // initialisation, the part that matters most) would then be the oldest file.
+    const { fs, clock, transcripts } = files({ maxFileBytes: 500, maxTotalBytes: 1500 });
+    for (const name of [
+      'obd-2026-12-01T00-00-00.000Z.jsonl',
+      'obd-2026-12-02T00-00-00.000Z.jsonl',
+    ]) {
+      fs.files.set(`${DIR}/${name}`, 'x'.repeat(450));
+    }
+    const sink = transcripts.createSink(HEADER);
+    for (let i = 0; i < 2; i += 1) {
+      sink.write({ t: i, rx: 'y'.repeat(200) });
+      await clock.advance(5000);
+    }
+    await sink.close();
+    expect([...fs.files.keys()].sort()).toEqual([
+      FILE,
+      `${DIR}/obd-2026-10-01T07-30-00.000Z.part2.jsonl`,
+      `${DIR}/obd-2026-12-02T00-00-00.000Z.jsonl`,
+    ]);
+  });
+
+  it("deletes this session's own earlier parts in order once nothing else is left", async () => {
+    const { fs, clock, transcripts } = files({ maxFileBytes: 400, maxTotalBytes: 800 });
+    const sink = transcripts.createSink(HEADER);
+    // Two entries fit in a part: eleven parts.
+    for (let i = 0; i < 22; i += 1) {
+      sink.write({ t: i, rx: 'z'.repeat(100) });
+      await clock.advance(5000);
+    }
+    await sink.close();
+    // part10 sorts before part2 by name, but is the newer one.
+    expect([...fs.files.keys()].sort()).toEqual([
+      `${DIR}/obd-2026-10-01T07-30-00.000Z.part10.jsonl`,
+      `${DIR}/obd-2026-10-01T07-30-00.000Z.part11.jsonl`,
+    ]);
+  });
+
   it('keeps line noise byte for byte (latin1 on the wire, UTF-8 in the file)', async () => {
     const temp = await makeTempDir();
     try {

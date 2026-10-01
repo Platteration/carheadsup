@@ -4,6 +4,8 @@
  * that sags while the engine cranks, shows up as slow starts, a low frame rate, random resets
  * and a corrupted SD card — with nothing pointing at the cause. So the server reads them every
  * few seconds, logs every change (a warning when it goes wrong), and reports them in /api/info.
+ * A supply that hovers at the threshold flips the flags every few seconds; it is logged once,
+ * and "fine again" only after {@link HEALTH_RECOVERY_READINGS} good readings in a row.
  *
  * Sources (each optional; a missing one reads as null):
  *  - `/sys/class/thermal/thermal_zone0/temp`: millidegrees Celsius;
@@ -25,6 +27,12 @@ export const HEALTH_INTERVAL_MS = 5000;
 export const SOC_HOT_C = 80;
 /** … until it is back below this. */
 export const SOC_COOL_C = 75;
+/**
+ * Under-voltage or a slowed-down CPU counts as over once it has been gone for this many
+ * readings in a row (30 s): until then a relapse is no news. Without it a flapping flag would put
+ * two lines a few seconds apart in the log for a whole drive, each warning flushed to the card.
+ */
+export const HEALTH_RECOVERY_READINGS = 6;
 
 const UNDER_VOLTAGE = 1 << 0;
 const THROTTLED_NOW = (1 << 1) | (1 << 2) | (1 << 3);
@@ -126,6 +134,40 @@ export interface SystemHealthOptions {
   logger: Logger;
 }
 
+/**
+ * A condition that is logged when it starts and when it is over — which it is only after
+ * `recoveryReadings` readings without it in a row. A reading of null (the source is gone)
+ * changes nothing.
+ */
+class Alarm {
+  private readonly recoveryReadings: number;
+  private active = false;
+  private clearReadings = 0;
+
+  constructor(recoveryReadings: number) {
+    this.recoveryReadings = Math.max(1, recoveryReadings);
+  }
+
+  /** 'raised' when the condition starts, 'cleared' when it is over, else null. */
+  update(now: boolean | null): 'raised' | 'cleared' | null {
+    if (now === true) {
+      this.clearReadings = 0;
+      if (this.active) return null;
+      this.active = true;
+      return 'raised';
+    }
+    if (now === false && this.active) {
+      this.clearReadings += 1;
+      if (this.clearReadings >= this.recoveryReadings) {
+        this.active = false;
+        this.clearReadings = 0;
+        return 'cleared';
+      }
+    }
+    return null;
+  }
+}
+
 /** Reads the health every few seconds, logs the changes and keeps the latest for /api/info. */
 export class SystemHealthMonitor {
   readonly name = 'system health';
@@ -137,6 +179,8 @@ export class SystemHealthMonitor {
   private hot = false;
   private underVoltageSeen = false;
   private throttledSeen = false;
+  private readonly supplyAlarm = new Alarm(HEALTH_RECOVERY_READINGS);
+  private readonly speedAlarm = new Alarm(HEALTH_RECOVERY_READINGS);
   private first = true;
 
   constructor(options: SystemHealthOptions) {
@@ -204,7 +248,6 @@ export class SystemHealthMonitor {
       throttledSeen: flags !== null ? (flags & THROTTLED_SEEN) !== 0 || this.throttledSeen : null,
     };
     const nothing = next.socTempC === null && next.underVoltage === null && next.throttled === null;
-    const previous = this.current;
     this.current = nothing ? null : next;
     if (nothing) return;
 
@@ -218,16 +261,18 @@ export class SystemHealthMonitor {
         );
       }
     }
-    if (next.underVoltage === true && previous?.underVoltage !== true) {
+    const supply = this.supplyAlarm.update(next.underVoltage);
+    if (supply === 'raised') {
       logger.warn(
         "System: under-voltage: the Pi's 5 V supply sags — expect slowdowns, resets and SD card damage; check the converter and its wiring",
       );
-    } else if (next.underVoltage === false && previous?.underVoltage === true) {
+    } else if (supply === 'cleared') {
       logger.info('System: the supply voltage is fine again');
     }
-    if (next.throttled === true && previous?.throttled !== true) {
+    const speed = this.speedAlarm.update(next.throttled);
+    if (speed === 'raised') {
       logger.warn(`System: the CPU is slowed down (heat or supply)${temp}`);
-    } else if (next.throttled === false && previous?.throttled === true) {
+    } else if (speed === 'cleared') {
       logger.info(`System: the CPU runs at full speed again${temp}`);
     }
     if (next.socTempC !== null) {

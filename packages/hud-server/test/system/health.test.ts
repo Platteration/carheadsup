@@ -2,7 +2,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { ApiInfo } from '@carheadsup/core';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SystemHealthMonitor, findHealthPaths } from '../../src/system/health.ts';
+import {
+  HEALTH_RECOVERY_READINGS,
+  SystemHealthMonitor,
+  findHealthPaths,
+} from '../../src/system/health.ts';
 import { makeTempDir, startTestServer, waitFor } from '../helpers.ts';
 import { FakeClock, memoryLogger } from '../sensors/fakes.ts';
 
@@ -92,9 +96,12 @@ describe('SystemHealthMonitor', () => {
     await health.check();
     await health.check();
     expect(logger.lines('warn')).toHaveLength(3);
-    // Back to normal, but 77 °C is not cool yet (hysteresis).
+    // Back to normal, but 77 °C is not cool yet (hysteresis); the supply and the CPU count as
+    // fine again once they have been for a while.
     await sys.set(THROTTLED, '50000');
     await sys.set(THERMAL, '77000');
+    for (let i = 1; i < HEALTH_RECOVERY_READINGS; i += 1) await health.check();
+    expect(logger.lines('info')).toHaveLength(1);
     await health.check();
     expect(logger.lines('info').slice(1)).toEqual([
       'System: the supply voltage is fine again',
@@ -115,6 +122,35 @@ describe('SystemHealthMonitor', () => {
       'the timed check',
     );
     expect(logger.lines('warn')).toHaveLength(3);
+    await health.stop();
+  });
+
+  it('does not flood the log while the supply hovers at the threshold', async () => {
+    // A weak converter under a changing load: the firmware's flags flip every few seconds. Each
+    // flip would be a warning written to the card at once.
+    const sys = await sysfs({ [THERMAL]: '60000', [THROTTLED]: '0' });
+    const { health, logger } = monitor(sys.root);
+    await health.start();
+    for (let i = 0; i < 20; i += 1) {
+      await sys.set(THROTTLED, i % 2 === 0 ? '50005' : '50000');
+      await health.check();
+    }
+    expect(logger.lines('warn')).toEqual([
+      "System: under-voltage: the Pi's 5 V supply sags — expect slowdowns, resets and SD card damage; check the converter and its wiring",
+      'System: the CPU is slowed down (heat or supply) (SoC 60 °C)',
+    ]);
+    expect(logger.lines('info')).toHaveLength(1);
+    // What /api/info reports stays the reading of the moment.
+    expect(health.snapshot()).toMatchObject({ underVoltage: false, throttled: false });
+    // Fine for long enough: said once.
+    for (let i = 0; i < HEALTH_RECOVERY_READINGS; i += 1) await health.check();
+    expect(logger.lines('info').slice(1)).toEqual([
+      'System: the supply voltage is fine again',
+      'System: the CPU runs at full speed again (SoC 60 °C)',
+    ]);
+    await sys.set(THROTTLED, '50005');
+    await health.check();
+    expect(logger.lines('warn')).toHaveLength(4);
     await health.stop();
   });
 

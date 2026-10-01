@@ -8,7 +8,7 @@
  * goes wrong (the OBD link lost, a page error on the HUD's display, an uncaught exception).
  */
 import * as fsPromises from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { Clock, Timers } from '@carheadsup/obd';
 import { LOG_LEVEL_RANK } from './logger.ts';
 import type { LogLevel, LogSink } from './logger.ts';
@@ -349,7 +349,7 @@ export class LogFiles {
       } finally {
         await handle.close();
       }
-      await this.prune();
+      await this.prune(basename(path));
       return path;
     } catch (err) {
       this.options.onProblem?.(`Log: cannot write the debug log ${path}: ${describe(err)}`);
@@ -357,13 +357,17 @@ export class LogFiles {
     }
   }
 
-  /** Delete all but the newest debug dumps. */
-  private async prune(): Promise<void> {
+  /**
+   * Delete all but the newest debug dumps — always keeping `written`, the one just written. The
+   * names carry the wall-clock time, which on a Pi without a real-time clock can be behind that
+   * of an earlier drive's dumps; by name alone the new dump would be the first to go.
+   */
+  private async prune(written: string): Promise<void> {
     const keep = Math.max(1, this.options.dumpsKept ?? DEBUG_DUMPS_KEPT);
-    const dumps = (await this.fs.readdir(this.dir))
-      .filter((name) => /^debug-.*\.log$/.test(name))
+    const others = (await this.fs.readdir(this.dir))
+      .filter((name) => name !== written && /^debug-.*\.log$/.test(name))
       .sort();
-    for (const name of dumps.slice(0, Math.max(0, dumps.length - keep))) {
+    for (const name of others.slice(0, Math.max(0, others.length - (keep - 1)))) {
       await this.fs.rm(join(this.dir, name), { force: true });
     }
   }

@@ -58,6 +58,7 @@ opt_prune=1
 opt_obd_mac=""
 opt_rollback=0
 opt_hardware_watchdog=1
+opt_hardware_watchdog_given=0
 opt_start_timeout=60
 NODE_BIN=""
 WORK_DIR=""
@@ -84,7 +85,8 @@ Options:
                    wait). After an update that does not answer in time, the previous version
                    is put back by itself.
   --rollback       Go back to the version before the last update (/opt/carheadsup.prev, with its
-                   systemd units); running it again goes forward again
+                   systemd units); running it again goes forward again. Keeps the kiosk and the
+                   hardware watchdog as installed, unless --no-kiosk or --no-hardware-watchdog
   -h, --help       Show this help
 EOF
 }
@@ -105,7 +107,10 @@ parse_args() {
         ;;
       --no-start) opt_start=0 ;;
       --no-prune) opt_prune=0 ;;
-      --no-hardware-watchdog) opt_hardware_watchdog=0 ;;
+      --no-hardware-watchdog)
+        opt_hardware_watchdog=0
+        opt_hardware_watchdog_given=1
+        ;;
       --rollback) opt_rollback=1 ;;
       --start-timeout)
         (($# >= 2)) || die "--start-timeout needs a number of seconds"
@@ -169,10 +174,7 @@ preflight() {
 
   if ((opt_rollback)); then
     [[ -d ${PREFIX}.prev ]] || die "there is no previous version to go back to (${PREFIX}.prev)"
-    # Keep the kiosk as it is installed, unless told otherwise.
-    if ((!opt_kiosk_given)) && [[ ! -e ${UNIT_DIR}/carheadsup-kiosk.service ]]; then
-      opt_kiosk=0
-    fi
+    keep_installed_choices "${UNIT_DIR}/carheadsup-kiosk.service" "$WATCHDOG_CONF"
   else
     [[ -d ${REPO_ROOT}/node_modules/@carheadsup ]] ||
       die "dependencies are missing: run 'npm ci' in ${REPO_ROOT} first"
@@ -188,6 +190,21 @@ preflight() {
       die "cage is not installed (sudo apt install cage), or run with --no-kiosk"
     command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1 ||
       die "Chromium is not installed (sudo apt install chromium-browser), or run with --no-kiosk"
+  fi
+}
+
+# A rollback keeps the kiosk and the hardware watchdog as they are installed — off when their
+# unit or drop-in is missing (an installation with --no-kiosk or --no-hardware-watchdog) —
+# unless its own command line says otherwise.
+#
+#   keep_installed_choices <kiosk unit file> <watchdog drop-in>
+keep_installed_choices() {
+  local kiosk_unit=$1 watchdog_conf=$2
+  if ((!opt_kiosk_given)) && [[ ! -e $kiosk_unit ]]; then
+    opt_kiosk=0
+  fi
+  if ((!opt_hardware_watchdog_given)) && [[ ! -e $watchdog_conf ]]; then
+    opt_hardware_watchdog=0
   fi
 }
 

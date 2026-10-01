@@ -5,7 +5,7 @@
  * 64 MiB in all. Lines are written to the card every 5 s, and when the session ends, so a power
  * cut loses a few seconds at most; a reader skips a torn last line.
  */
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { TranscriptEntry, TranscriptHeader, TranscriptSink } from '@carheadsup/obd';
 import type { Logger, Timers } from '@carheadsup/obd';
 import { LOG_SYNC_INTERVAL_MS, NODE_LOG_FS } from '../log-files.ts';
@@ -42,6 +42,19 @@ export function transcriptFileName(startedAt: number, part = 1): string {
   return `obd-${stamp.replace(/:/g, '-')}${part > 1 ? `.part${part}` : ''}.jsonl`;
 }
 
+const PART_SUFFIX = /(?:\.part(\d+))?\.jsonl$/;
+
+/** The session a transcript file belongs to: its name without the part and the extension. */
+function transcriptSession(name: string): string {
+  return name.replace(PART_SUFFIX, '');
+}
+
+/** The part number of a transcript file (1 for the first part, which has none in its name). */
+function transcriptPart(name: string): number {
+  const digits = PART_SUFFIX.exec(name)?.[1];
+  return digits === undefined ? 1 : Number(digits);
+}
+
 /** Makes the transcript files of the adapter sessions (see the module comment). */
 export class TranscriptFiles {
   readonly dir: string;
@@ -60,15 +73,23 @@ export class TranscriptFiles {
 
   /**
    * Delete the oldest transcripts (never `keep`, the file just started) until there is room for
-   * it to grow to its full size within the total.
+   * it to grow to its full size within the total: other sessions first, by name, then the
+   * earlier parts of `keep`'s own session, first part first. Names carry the wall-clock time,
+   * which on a Pi without a real-time clock can be behind an earlier drive's; by name alone this
+   * session's beginning — the adapter's initialisation — could go before older recordings.
    */
   async prune(keep: string): Promise<void> {
     const limit =
       (this.options.maxTotalBytes ?? MAX_TRANSCRIPT_TOTAL_BYTES) -
       (this.options.maxFileBytes ?? MAX_TRANSCRIPT_FILE_BYTES);
-    const names = (await this.fs.readdir(this.dir))
-      .filter((name) => /^obd-.*\.jsonl$/.test(name))
-      .sort();
+    const session = transcriptSession(basename(keep));
+    const all = (await this.fs.readdir(this.dir)).filter((name) => /^obd-.*\.jsonl$/.test(name));
+    const names = [
+      ...all.filter((name) => transcriptSession(name) !== session).sort(),
+      ...all
+        .filter((name) => transcriptSession(name) === session)
+        .sort((a, b) => transcriptPart(a) - transcriptPart(b)),
+    ];
     const sizes = await Promise.all(
       names.map(async (name) => {
         try {

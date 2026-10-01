@@ -227,6 +227,26 @@ describe('LogFiles', () => {
     ]);
   });
 
+  it('never deletes the debug log it just wrote, even when the clock went back', async () => {
+    // A Pi without a real-time clock starts each boot at an old time (the read-only root
+    // forgets the last one, and the ignition cuts the power before it is saved): the dumps of an
+    // earlier drive can carry later times than the one written now.
+    const { fs, logs } = files();
+    for (const name of [
+      'debug-2026-12-01T00-00-00.000Z.log',
+      'debug-2026-12-02T00-00-00.000Z.log',
+    ]) {
+      fs.files.set(`/data/logs/${name}`, 'from an earlier drive\n');
+    }
+    const path = await logs.dumpDebug('OBD link lost');
+    expect(path).toBe('/data/logs/debug-2026-10-01T07-30-00.000Z.log');
+    // Two kept in all: the one just written, and the newest-named of the others.
+    expect((await fs.readdir('/data/logs')).filter((n) => n.startsWith('debug-')).sort()).toEqual([
+      'debug-2026-10-01T07-30-00.000Z.log',
+      'debug-2026-12-02T00-00-00.000Z.log',
+    ]);
+  });
+
   it('reports a debug log it cannot write, without throwing', async () => {
     const { fs, logs, problems } = files();
     fs.failWith = 'ENOSPC';

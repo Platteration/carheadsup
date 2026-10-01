@@ -294,6 +294,45 @@ test_watchdog_conf() {
   fi
 }
 
+# rollback_choices <args>…: what `install.sh --rollback <args>` installs, given the kiosk unit
+# and the watchdog drop-in that exist in ${WORK}/installed: "kiosk=<0|1> watchdog=<0|1>".
+# The options are the sourced installer's, which shellcheck cannot follow.
+# shellcheck disable=SC2154
+rollback_choices() {
+  (
+    parse_args --rollback "$@"
+    keep_installed_choices "${WORK}/installed/carheadsup-kiosk.service" \
+      "${WORK}/installed/carheadsup-watchdog.conf"
+    printf 'kiosk=%s watchdog=%s' "$opt_kiosk" "$opt_hardware_watchdog"
+  ) 2>&1
+}
+
+# expect_choices <description> <expected> <args>…
+expect_choices() {
+  local description=$1 expected=$2 actual
+  shift 2
+  actual=$(rollback_choices "$@")
+  if [[ $actual == "$expected" ]]; then
+    pass "--rollback $description: ${actual}"
+  else
+    fail "--rollback ${description}: expected ${expected}, got ${actual}"
+  fi
+}
+
+test_rollback_keeps_choices() {
+  local dir="${WORK}/installed"
+  mkdir -p "$dir"
+  rm -f -- "${dir}/carheadsup-kiosk.service" "${dir}/carheadsup-watchdog.conf"
+  # Installed with --no-kiosk --no-hardware-watchdog: a rollback must not bring either back.
+  expect_choices "keeps the kiosk and the hardware watchdog off" "kiosk=0 watchdog=0"
+  touch "${dir}/carheadsup-kiosk.service" "${dir}/carheadsup-watchdog.conf"
+  expect_choices "keeps the kiosk and the hardware watchdog on" "kiosk=1 watchdog=1"
+  expect_choices "with --no-kiosk --no-hardware-watchdog: off" "kiosk=0 watchdog=0" \
+    --no-kiosk --no-hardware-watchdog
+  rm -f -- "${dir}/carheadsup-watchdog.conf"
+  expect_choices "keeps the kiosk on and the hardware watchdog off" "kiosk=1 watchdog=0"
+}
+
 test_swap_in
 test_swap_previous
 test_interrupted_swaps
@@ -301,6 +340,7 @@ test_hud_answers
 test_verify_started
 test_info_url
 test_watchdog_conf
+test_rollback_keeps_choices
 
 if ((failures > 0)); then
   printf '%d install.sh update test(s) failed\n' "$failures" >&2
