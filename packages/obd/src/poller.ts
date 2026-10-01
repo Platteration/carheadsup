@@ -882,6 +882,10 @@ export class ObdPoller {
     unanswered: Scheduled[],
     outcome: CycleOutcome,
   ): Promise<void> {
+    // Planned before the schedule was rebuilt — requests were just made smaller, or the custom
+    // PIDs changed — the batch may break the new rules (and would count as a failure under them):
+    // its PIDs are still due and are planned again next cycle.
+    if (batch.some((item) => !this.pidItems.includes(item))) return;
     for (const item of batch) item.dueAt = now + item.intervalMs;
     let result: Mode01Result;
     try {

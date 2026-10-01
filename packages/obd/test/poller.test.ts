@@ -690,6 +690,38 @@ describe('ObdPoller with adapters that cannot take multi-PID requests', () => {
     await running;
   });
 
+  it('steps down once, not again for the rest of the cycle planned before', async () => {
+    // Speed and rpm fit one frame and keep working; two batches of slow PIDs fail together every
+    // 5 s. The first one to fail a third time makes requests smaller; the second, planned with
+    // six PIDs before that, must not count as a failure of three-PID requests.
+    const engine: Record<number, number[]> = {
+      0x0a: [0x40],
+      0x0c: [0x1a, 0xf8],
+      0x0d: [0x32],
+      0x1f: [0x00, 0x3c],
+      0x21: [0x00, 0x00],
+      0x23: [0x00, 0x10],
+      0x31: [0x00, 0x20],
+      0x33: [0x65],
+      0x3c: [0x10, 0x00],
+      0x42: [0x30, 0x00],
+      0x52: [0x05],
+    };
+    const ctx = make({}, engine);
+    ctx.driver.singleFrameOnly = true;
+    await ctx.poller.discover();
+    expect(ctx.poller.pidsPerRequest).toBe(6); // the fast batch fits one frame
+    const running = ctx.poller.run();
+    await ctx.clock.advance(12_000);
+    expect(ctx.poller.pidsPerRequest).toBe(3);
+    // From then on every request fits one frame and is answered.
+    await ctx.clock.advance(6000);
+    expect(ctx.poller.pidsPerRequest).toBe(3);
+    expect(ctx.poller.latest('fuelPressure')?.at).toBeGreaterThan(ctx.clock.now() - 6000);
+    ctx.poller.stop();
+    await running;
+  });
+
   it('steps down when another ECU answers but a long answer loses its frames', async () => {
     // The transmission answers A4 in one frame while the engine's long answer is lost: the
     // result is incomplete rather than an error, and the engine's PIDs must not be backed off.
@@ -699,7 +731,7 @@ describe('ObdPoller with adapters that cannot take multi-PID requests', () => {
     await ctx.clock.advance(1000);
     ctx.driver.singleFrameOnly = true;
     await ctx.clock.advance(10_000);
-    expect(ctx.poller.pidsPerRequest).toBeLessThanOrEqual(3);
+    expect(ctx.poller.pidsPerRequest).toBe(3);
     const recent = ctx.driver.pollsOf(0x05).filter((c) => c.at > ctx.clock.now() - 3000);
     expect(recent.length).toBeGreaterThanOrEqual(2); // coolant was not backed off
     ctx.poller.stop();
