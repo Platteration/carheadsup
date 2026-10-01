@@ -485,11 +485,13 @@ export class Elm327Emulator implements Transport {
       const auto = s.protocol === '0' || s.protocol.startsWith('A');
       if (auto) {
         progress.push('SEARCHING...');
+        if (!this.ecuOnline) {
+          // Every protocol is tried before giving up, whichever comes first.
+          const failedSearch = (this.requestLatencyMs + this.searchLatencyMs) * 4;
+          return this.respondStaged(progress, ['UNABLE TO CONNECT'], failedSearch);
+        }
         // "A<n>" tries protocol n first: quick when it is the car's.
         if (s.protocol !== `A${this.busProtocol}`) extraDelay += this.searchLatencyMs;
-        if (!this.ecuOnline) {
-          return this.respondStaged(progress, ['UNABLE TO CONNECT'], extraDelay * 4);
-        }
         s.active = this.busProtocol;
       } else if (s.protocol === this.busProtocol) {
         s.active = this.busProtocol;

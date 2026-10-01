@@ -102,7 +102,7 @@ export function cloneAdapter(obd: Record<string, string[]>, extra: Record<string
     if (extraAnswer) return reply(...extraAnswer.map(shape));
     const handler = at[command];
     if (handler) return reply(...handler());
-    if (/^AT(SP|SH|CRA|AR|CP|ST)/.test(command)) return reply('OK');
+    if (/^AT(SP|TP|SH|CRA|AR|CP|ST)/.test(command)) return reply('OK');
     const answer = obd[command];
     if (answer) return reply(...answer.map(shape));
     if (/^[0-9A-F]+$/.test(command)) return reply('NO DATA');

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Elm327 } from '../src/elm327.ts';
 import { ElmError } from '../src/errors.ts';
-import { ScriptedTransport, cloneAdapter, flush, reply } from './helpers.ts';
+import { FakeClock, ScriptedTransport, cloneAdapter, flush, reply } from './helpers.ts';
 
 const FAST = { timeoutMs: 60, settleMs: 5, resetTimeoutMs: 200, searchTimeoutMs: 500 } as const;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,6 +72,7 @@ describe('Elm327.initialize', () => {
       headers: true,
       voltageSupported: true,
       maxPidsPerRequest: 6,
+      vehicleSignature: '7E8064100BE3FA813|7E906410098188010',
     });
   });
 
@@ -163,6 +164,106 @@ describe('Elm327.initialize', () => {
       protocol: 'ISO 9141-2',
     });
     await expect(elm.queryMode01([0x0d, 0x0c])).rejects.toThrow(RangeError);
+  });
+});
+
+describe('Elm327 time to data', () => {
+  it('starts the automatic search with the protocol the vehicle spoke last time', async () => {
+    const transport = cloneAdapter(CAN_OBD);
+    await transport.open();
+    const elm = new Elm327(transport, FAST);
+    await elm.initialize({ protocol: '0', preferredProtocol: '6' });
+    expect(transport.commands).toContain('ATSPA6');
+    expect(transport.commands).not.toContain('ATSP0');
+    expect(elm.info?.protocolId).toBe('6');
+  });
+
+  it('searches plainly when the adapter refuses AT SP A<n>, and ignores a fixed setting', async () => {
+    const refusing = cloneAdapter(CAN_OBD, { ATSPA6: ['?'] });
+    await new Elm327(refusing, FAST).initialize({ protocol: '0', preferredProtocol: '6' });
+    expect(refusing.commands.filter((c) => c.startsWith('ATSP'))).toEqual(['ATSPA6', 'ATSP0']);
+    const fixed = cloneAdapter(CAN_OBD);
+    await new Elm327(fixed, FAST).initialize({ protocol: '6', preferredProtocol: '3' });
+    expect(fixed.commands.filter((c) => c.startsWith('ATSP'))).toEqual(['ATSP6']);
+  });
+
+  it('tries the vehicle again without resetting the adapter', async () => {
+    let online = false;
+    const transport = cloneAdapter(CAN_OBD);
+    const handler = transport.handler;
+    transport.handler = (command) =>
+      command === '0100' && !online ? reply('SEARCHING...', 'UNABLE TO CONNECT') : handler(command);
+    const elm = new Elm327(transport, FAST);
+    expect((await errorOf(elm.initialize({ protocol: '0' }))).code).toBe('UNABLE_TO_CONNECT');
+    expect(elm.closed).toBe(false);
+    const before = transport.commands.length;
+    // A quick try of one protocol (AT TP: not stored, no search) while the vehicle is still off …
+    expect((await errorOf(elm.connectVehicle({ protocol: '6', tryOnly: true }))).code).toBe(
+      'UNABLE_TO_CONNECT',
+    );
+    online = true;
+    // … and the automatic search again once it answers.
+    const info = await elm.connectVehicle();
+    expect(info).toMatchObject({ adapter: 'ELM327 v1.5', protocolId: '6', headers: true });
+    expect(transport.commands.slice(before)).toEqual([
+      'ATTP6',
+      '0100',
+      'ATSP0',
+      '0100',
+      'ATDPN',
+      'ATDP',
+      'ATRV',
+    ]);
+    expect((await elm.queryMode01([0x0d, 0x0c])).values.speed).toBe(50);
+  });
+
+  it('refuses to connect to the vehicle before the adapter is set up', async () => {
+    const transport = cloneAdapter(CAN_OBD);
+    expect((await errorOf(new Elm327(transport, FAST).connectVehicle())).code).toBe('CLOSED');
+    expect(transport.commands).toEqual([]);
+  });
+
+  /** A K-line car whose bus went to sleep: "BUS INIT: ..." at once, the rest 2.5 s later. */
+  async function sleepingKLine(rest: string) {
+    const clock = new FakeClock(0);
+    const transport = cloneAdapter(
+      { '0100': ['48 6B 10 41 00 BE 3F B8 13 B9'] },
+      { ATDPN: ['3'], ATDP: ['ISO 9141-2'] },
+    );
+    const handler = transport.handler;
+    transport.handler = (command) => {
+      if (command !== '010D') return handler(command);
+      clock.setTimeout(() => transport.push(rest), 2500);
+      return 'BUS INIT: ...';
+    };
+    await transport.open();
+    const elm = new Elm327(transport, {
+      timeoutMs: 1000,
+      searchTimeoutMs: 20_000,
+      settleMs: 20,
+      timers: clock,
+    });
+    const initializing = elm.initialize({ protocol: '3' });
+    await clock.advance(5000);
+    await initializing;
+    return { clock, elm };
+  }
+
+  it('waits for a K-line bus initialisation instead of timing out', async () => {
+    // 48 6B 10 41 0D 32, checksum 43.
+    const { clock, elm } = await sleepingKLine('OK\r486B10410D3243\r\r>');
+    const query = elm.queryMode01([0x0d]);
+    await clock.advance(1500);
+    await clock.advance(1500);
+    expect((await query).values.speed).toBe(0x32);
+    expect(elm.closed).toBe(false);
+  });
+
+  it('reports a failed K-line bus initialisation as a silent vehicle, not a timeout', async () => {
+    const { clock, elm } = await sleepingKLine('ERROR\r\r>');
+    const query = errorOf(elm.queryMode01([0x0d]));
+    await clock.advance(3000);
+    expect((await query).code).toBe('BUS_INIT_ERROR');
   });
 });
 

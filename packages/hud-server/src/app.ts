@@ -32,6 +32,7 @@ import { createRequestHandler } from './http/server.ts';
 import { createStaticServer } from './http/static.ts';
 import { DEFAULT_RENDERER_DIR, HUD_VERSION } from './meta.ts';
 import { ObdLink } from './obd/obd-link.ts';
+import { OBD_CACHE_FILE, ObdProtocolFile } from './obd/protocol-cache.ts';
 import type { ObdServiceFactory } from './obd/obd-link.ts';
 import { createFrameSinks as defaultCreateFrameSinks } from './outputs/index.ts';
 import type { FrameSinkOptions } from './outputs/index.ts';
@@ -598,6 +599,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
       simulator: simulation?.vehicle ?? null,
       deps,
       onEvent: (event) => hudEngine.dispatch(event),
+      protocolCache: await ObdProtocolFile.load(join(dataDir, OBD_CACHE_FILE), logger),
       ...(options.createObdService ? { factory: options.createObdService } : {}),
     });
 

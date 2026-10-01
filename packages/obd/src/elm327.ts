@@ -83,6 +83,11 @@ export interface Elm327Info {
   voltageSupported: boolean;
   /** PIDs per service 01 request: 6 on CAN, 1 on legacy buses. */
   maxPidsPerRequest: number;
+  /**
+   * The vehicle's answer to `0100` (every ECU's first supported-PID bitmap, with headers): it
+   * tells whether a reconnect reached the same vehicle, whose discovered PIDs can be reused.
+   */
+  vehicleSignature: string;
 }
 
 export interface DtcReport {
@@ -135,7 +140,7 @@ export class Elm327 {
   private readonly settleMs: number;
 
   private readonly jobs: Job[] = [];
-  private current: { job: Job; timer: unknown } | null = null;
+  private current: { job: Job; timer: unknown; rearmed?: boolean } | null = null;
   private rx = '';
   /** Receives raw text while resynchronising or settling. */
   private watcher: ((chunk: string) => void) | null = null;
@@ -146,6 +151,15 @@ export class Elm327 {
   private lockTail: Promise<unknown> = Promise.resolve();
   private readonly unsubscribe: Array<() => void> = [];
   private _info: Elm327Info | null = null;
+  /** What `initialize` learnt about the adapter before connecting to the vehicle. */
+  private adapterSetup: {
+    version: string | null;
+    description: string | null;
+    stn: string | null;
+    headers: boolean;
+    /** The `AT SP` argument in use. */
+    setting: string;
+  } | null = null;
 
   constructor(transport: Transport, options: Elm327Options = {}) {
     this.transport = transport;
@@ -187,20 +201,32 @@ export class Elm327 {
   /**
    * Reset and configure the adapter, then connect to the vehicle:
    * ATZ, ATE0, ATL0, ATS0, ATH1, ATSP<protocol>, ATAT1, ATI / AT@1 / STI, 0100, ATDPN, ATDP, ATRV.
-   * Optional commands a clone rejects with "?" are skipped.
+   * Optional commands a clone rejects with "?" are skipped. With automatic search ("0") and a
+   * `preferredProtocol` (the one the vehicle spoke last time) the search starts with it
+   * (`ATSPA<id>`; plain `ATSP0` where the adapter refuses that).
+   *
+   * When this fails because the vehicle does not answer (ignition off, see `isVehicleSilence`),
+   * the adapter is set up: {@link connectVehicle} tries the vehicle again without a reset.
    *
    * @throws ElmError — e.g. UNABLE_TO_CONNECT / NO_RESPONSE when the vehicle does not answer.
    * @throws RangeError for an invalid protocol setting.
    */
-  initialize(options: { protocol: string }): Promise<Elm327Info> {
+  initialize(options: {
+    protocol: string;
+    preferredProtocol?: string | null;
+  }): Promise<Elm327Info> {
     let protocolSetting: string;
     try {
       protocolSetting = normalizeProtocolSetting(options.protocol);
     } catch (err) {
       return Promise.reject(err);
     }
+    const preferred = options.preferredProtocol
+      ? getProtocol(options.preferredProtocol)
+      : undefined;
     return this.exclusive(async () => {
       this._info = null;
+      this.adapterSetup = null;
       this.sideText = '';
       await this.settle(); // discard whatever the adapter printed when the link came up
 
@@ -209,40 +235,82 @@ export class Elm327 {
       await this.at('ATL0');
       await this.at('ATS0');
       const headers = (await this.at('ATH1')) !== null;
-      await this.at(`ATSP${protocolSetting}`, { required: true });
+      let setting = protocolSetting;
+      if (setting === '0' && preferred !== undefined) {
+        try {
+          await this.at(`ATSPA${preferred.id}`, { required: true });
+          setting = `A${preferred.id}`;
+        } catch (err) {
+          if (!isElmError(err, 'UNSUPPORTED')) throw err;
+          await this.at('ATSP0', { required: true });
+        }
+      } else {
+        await this.at(`ATSP${setting}`, { required: true });
+      }
       await this.at('ATAT1');
 
       const version = firstLine(await this.at('ATI')) ?? banner;
       const description = firstLine(await this.at('AT@1'));
       const stn = firstLine(await this.at('STI'));
-
-      const lines0100 = await this.request('0100', 'obd', this.searchTimeoutMs);
-      if (lines0100.length === 0) {
-        throw new ElmError('NO_RESPONSE', 'The vehicle did not answer (NO DATA to 0100)', {
-          command: '0100',
-        });
-      }
-
-      const protocol = await this.detectProtocol(protocolSetting, lines0100);
-      const effectiveHeaders = headers && this.headersVisible(lines0100, protocol.family);
-      const voltage = parseVoltage((await this.at('ATRV')) ?? []);
-
-      const info: Elm327Info = {
-        adapter: adapterLabel(version, stn),
-        version,
-        description,
-        stn,
-        protocolId: protocol.id,
-        protocol: protocol.name,
-        family: protocol.family,
-        headers: effectiveHeaders,
-        voltageSupported: voltage !== null,
-        maxPidsPerRequest: maxPidsPerRequest(protocol.family),
-      };
-      this._info = info;
-      this.logger.info(`OBD: ${info.adapter} connected via ${info.protocol}`);
-      return info;
+      this.adapterSetup = { version, description, stn, headers, setting };
+      return this.connect(setting);
     });
+  }
+
+  /**
+   * Try the vehicle again after {@link initialize} failed because it did not answer, without
+   * resetting the adapter: `0100` (with the search timeout), then the protocol and voltage
+   * checks. `protocol` is set first (an `AT SP` argument, default the one `initialize` used);
+   * with `tryOnly` it is set with `AT TP`, which the adapter does not store — a quick try of
+   * one fixed protocol, without the automatic search that takes seconds while the vehicle is off.
+   *
+   * @throws ElmError — e.g. UNABLE_TO_CONNECT / NO_RESPONSE while the vehicle still does not
+   * answer; anything else when the adapter is not set up (initialize failed earlier).
+   */
+  connectVehicle(options: { protocol?: string; tryOnly?: boolean } = {}): Promise<Elm327Info> {
+    return this.exclusive(async () => {
+      const setup = this.adapterSetup;
+      if (setup === null || this.failure) {
+        throw this.failure ?? new ElmError('CLOSED', 'The adapter is not initialised');
+      }
+      const setting =
+        options.protocol === undefined ? setup.setting : normalizeProtocolSetting(options.protocol);
+      await this.at(`AT${options.tryOnly ? 'TP' : 'SP'}${setting}`, { required: true });
+      return this.connect(setting);
+    });
+  }
+
+  /** Connect to the vehicle (`0100`) on a set-up adapter; see {@link initialize}. */
+  private async connect(setting: string): Promise<Elm327Info> {
+    const setup = this.adapterSetup;
+    if (setup === null) throw new ElmError('CLOSED', 'The adapter is not initialised');
+    const lines0100 = await this.request('0100', 'obd', this.searchTimeoutMs);
+    if (lines0100.length === 0) {
+      throw new ElmError('NO_RESPONSE', 'The vehicle did not answer (NO DATA to 0100)', {
+        command: '0100',
+      });
+    }
+
+    const protocol = await this.detectProtocol(setting, lines0100);
+    const effectiveHeaders = setup.headers && this.headersVisible(lines0100, protocol.family);
+    const voltage = parseVoltage((await this.at('ATRV')) ?? []);
+
+    const info: Elm327Info = {
+      adapter: adapterLabel(setup.version, setup.stn),
+      version: setup.version,
+      description: setup.description,
+      stn: setup.stn,
+      protocolId: protocol.id,
+      protocol: protocol.name,
+      family: protocol.family,
+      headers: effectiveHeaders,
+      voltageSupported: voltage !== null,
+      maxPidsPerRequest: maxPidsPerRequest(protocol.family),
+      vehicleSignature: lines0100.map((line) => line.replace(/\s+/g, '').toUpperCase()).join('|'),
+    };
+    this._info = info;
+    this.logger.info(`OBD: ${info.adapter} connected via ${info.protocol}`);
+    return info;
   }
 
   /** ATZ, retried once; returns the identification banner if one was printed. */
@@ -272,7 +340,8 @@ export class Elm327 {
   ): Promise<{ id: string; name: string; family: ProtocolFamily }> {
     const dpn = firstLine(await this.at('ATDPN'));
     const fromDpn = dpn ? getProtocol(dpn) : undefined;
-    const fromSetting = setting === '0' ? undefined : getProtocol(setting);
+    // Only a fixed protocol says what the bus is; "A6" may have ended up on any other.
+    const fromSetting = /^[1-9A-C]$/.test(setting) ? getProtocol(setting) : undefined;
     const known = fromDpn ?? fromSetting;
     const dp = firstLine(await this.at('ATDP'));
     const described = dp?.replace(/^AUTO,\s*/i, '').trim() || null;
@@ -713,7 +782,9 @@ export class Elm327 {
     if (prompt < 0) {
       if (this.rx.length > MAX_RESPONSE_CHARS) {
         this.fail(new ElmError('BUFFER_FULL', 'The adapter sent too much data without a prompt'));
+        return;
       }
+      this.extendWhileSearching(current);
       return;
     }
     const response = this.rx.slice(0, prompt);
@@ -725,6 +796,22 @@ export class Elm327 {
     current.job.resolve(response);
     if (rest.trim().length > 0) this.onUnsolicited(rest);
     this.pump();
+  }
+
+  /**
+   * "SEARCHING..." or "BUS INIT: ..." in a partial reply: the adapter is looking for the
+   * vehicle's protocol, or initialising a K-line bus (the 5-baud init alone takes over 2 s), on
+   * any request — the bus may have gone to sleep since the last one. Give the request the
+   * search timeout instead of failing it as a lost reply.
+   */
+  private extendWhileSearching(current: { job: Job; timer: unknown; rearmed?: boolean }): void {
+    if (current.rearmed || current.job.timeoutMs >= this.searchTimeoutMs) return;
+    if (!/SEARCHING|BUS INIT/i.test(this.rx)) return;
+    current.rearmed = true;
+    this.timers.clearTimeout(current.timer);
+    current.job.timeoutMs = this.searchTimeoutMs;
+    current.timer = this.timers.setTimeout(() => this.onTimeout(current.job), this.searchTimeoutMs);
+    this.logger.debug(`OBD: ${current.job.command}: the adapter is searching; waiting longer`);
   }
 
   private onUnsolicited(text: string): void {

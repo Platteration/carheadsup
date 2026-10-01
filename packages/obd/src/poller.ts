@@ -132,9 +132,27 @@ export const DEFAULT_POLLER_TUNING: Readonly<PollerTuning> = Object.freeze({
   maxReadDeferralMs: 300_000,
 });
 
+/** What discovery found: reused when reconnecting to the same vehicle. */
+export interface PollerDiscovery {
+  /** Supported service 01 PIDs (bitmap PIDs excluded). */
+  readonly supported: readonly number[];
+  /** PIDs per request after the multi-PID checks. */
+  readonly pidsPerRequest: number;
+  /** Whether multi-PID answers had to fit one frame. */
+  readonly singleFrame: boolean;
+  /** Whether the VIN has been read (or the vehicle reported none). */
+  readonly vinRead: boolean;
+}
+
 export interface PollerOptions {
   /** PIDs per service 01 request (6 on CAN, 1 on legacy protocols). Default 6. */
   maxPidsPerRequest?: number;
+  /**
+   * An earlier discovery on this vehicle (see {@link ObdPoller.discovery}): `discover` then
+   * skips the walk through the supported-PID bitmaps and the multi-PID probe, and the VIN is
+   * not read again — several seconds on a K-line bus.
+   */
+  discovered?: PollerDiscovery;
   /** Whether the adapter answers AT RV. Default true. */
   voltageSupported?: boolean;
   customPids?: readonly CustomPidConfig[];
@@ -243,11 +261,13 @@ export class ObdPoller {
   private voltageDueAt = 0;
   private dtcDueAt = 0;
   private lastDtcReadAt: number | null = null;
-  private vin: { attempts: number; dueAt: number; done: boolean } = {
+  private vin: { attempts: number; dueAt: number; done: boolean; read: boolean } = {
     attempts: 0,
     dueAt: 0,
     done: false,
+    read: false,
   };
+  private discovered: PollerDiscovery | null;
   private silent = false;
   private silentCycles = 0;
   private consecutiveErrors = 0;
@@ -273,6 +293,7 @@ export class ObdPoller {
     this.voltageSupported = options.voltageSupported ?? true;
     this.maxPids = Math.max(1, Math.floor(options.maxPidsPerRequest ?? 6));
     this.dtcIntervalMs = Math.max(1000, options.dtcIntervalMs ?? 30_000);
+    this.discovered = options.discovered ?? null;
     this.setCustomPids(options.customPids ?? []);
   }
 
@@ -287,6 +308,17 @@ export class ObdPoller {
    */
   get pidsPerRequest(): number {
     return this.maxPids;
+  }
+
+  /** What discovery found, or null before it ran (see {@link PollerOptions.discovered}). */
+  get discovery(): PollerDiscovery | null {
+    if (this.supported === null) return null;
+    return {
+      supported: [...this.supported],
+      pidsPerRequest: this.maxPids,
+      singleFrame: this.answerBudget !== null,
+      vinRead: this.vin.read,
+    };
   }
 
   /** The most recent sample of a signal, if any. */
@@ -330,6 +362,20 @@ export class ObdPoller {
    * @throws ElmError NO_RESPONSE when no ECU answers 0100.
    */
   async discover(): Promise<SignalId[]> {
+    const earlier = this.discovered;
+    if (earlier !== null) {
+      this.discovered = null;
+      this.supported = [...earlier.supported];
+      this.buildPidSchedule(this.supported);
+      if (earlier.singleFrame || earlier.pidsPerRequest < this.maxPids) {
+        this.setPidsPerRequest(earlier.pidsPerRequest, null);
+      }
+      if (earlier.vinRead) this.vin = { ...this.vin, done: true, read: true };
+      const signals = this.supportedSignals();
+      this.logger.info(`OBD: same vehicle as before; polling ${this.pidItems.length} PIDs`);
+      this.announceSupported(true);
+      return signals;
+    }
     const pids = new Set<number>();
     const visited = new Set<number>();
     let base: number | null = 0x00;
@@ -507,9 +553,10 @@ export class ObdPoller {
 
   /**
    * Make requests smaller: at most `pids` PIDs, and (below six) only as many as fit a one-frame
-   * answer. Logged and remembered for the link status.
+   * answer. Logged with `reason` (unless null: known from before) and remembered for the link
+   * status.
    */
-  private setPidsPerRequest(pids: number, reason: string): void {
+  private setPidsPerRequest(pids: number, reason: string | null): void {
     this.maxPids = Math.max(1, Math.min(this.maxPids, pids));
     this.answerBudget = SINGLE_FRAME_BYTES;
     // With one PID per request fewer PIDs stay in the fast tier (see `tierOf`).
@@ -519,9 +566,11 @@ export class ObdPoller {
       this.maxPids === 1
         ? 'Polling one PID per request (multi-PID requests fail)'
         : `Polling up to ${this.maxPids} PIDs per request (long answers fail)`;
-    this.logger.warn(
-      `OBD: ${reason}; polling ${this.maxPids === 1 ? 'one PID' : `up to ${this.maxPids} PIDs`} per request`,
-    );
+    if (reason !== null) {
+      this.logger.warn(
+        `OBD: ${reason}; polling ${this.maxPids === 1 ? 'one PID' : `up to ${this.maxPids} PIDs`} per request`,
+      );
+    }
   }
 
   /**
@@ -935,6 +984,7 @@ export class ObdPoller {
       const vin = await this.driver.readVin();
       this.consecutiveErrors = 0;
       this.vin.done = true;
+      this.vin.read = true;
       if (vin) this.emit({ type: 'obd/vin', vin, at: this.now() });
     } catch (err) {
       this.vin.done = this.vin.attempts >= this.tuning.vinAttempts;

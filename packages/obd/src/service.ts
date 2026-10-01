@@ -5,15 +5,27 @@
  * 'error' with a readable message, closes the link and reconnects after `reconnectDelayMs`,
  * doubling the delay after each consecutive failure up to 30 s (reset once connected).
  *
+ * Except when only the vehicle is silent (the adapter answers, the ECU does not: the HUD came
+ * up before the ignition, or restarted while it was off): then the link stays open and the
+ * vehicle is tried again every 3 s — `0100` only, no adapter reset, no growing delay (a failed
+ * search that took longer is followed at once) — so data flows within seconds of the ECU
+ * waking up. Those tries use the protocol the vehicle spoke last time (remembered through
+ * `deps.protocolCache`) with `AT TP`, which answers at once instead of searching every protocol
+ * for several seconds; every fifth is a full search in case the adapter now sits in another
+ * car. That protocol also starts the search on connecting (`AT SP A<n>`), and a reconnect
+ * within the process reuses the PIDs discovered before when the vehicle gives the same `0100`
+ * answer.
+ *
  * With `transport: 'simulator'` the link is an {@link Elm327Emulator} in front of a
  * {@link VehicleSimulator}. Pass `deps.simulator` to supply (and step) your own simulator, or
  * call {@link ObdService.getSimulator} to obtain the one the service creates — the service
  * then also steps it in real time while running.
  */
 import type { HudEvent, ObdConfig, ObdLinkState, ObdLinkStatus, SignalId } from '@carheadsup/core';
-import { Elm327, type Elm327Options } from './elm327.ts';
-import { ElmError } from './errors.ts';
-import { ObdPoller, type PollerTuning } from './poller.ts';
+import { Elm327, type Elm327Info, type Elm327Options } from './elm327.ts';
+import { ElmError, isElmError, isVehicleSilence } from './errors.ts';
+import { ObdPoller, type PollerDiscovery, type PollerTuning } from './poller.ts';
+import { getProtocol, normalizeProtocolSetting } from './protocols.ts';
 import {
   SILENT_LOGGER,
   SYSTEM_CLOCK,
@@ -48,6 +60,18 @@ export interface ObdServiceDeps {
   /** Driver tuning (reset/search timeouts); the per-command timeout comes from the config. */
   driver?: Omit<Elm327Options, 'timers' | 'logger' | 'timeoutMs'>;
   poller?: Partial<PollerTuning>;
+  /** Remembers the vehicle's protocol across restarts (the HUD server keeps it in a file). */
+  protocolCache?: ObdProtocolCache;
+  /** How often a silent vehicle is tried again on the open link. Default 3000 ms. */
+  vehicleRetryMs?: number;
+}
+
+/** Where the protocol each connection's vehicle spoke is remembered. */
+export interface ObdProtocolCache {
+  /** The protocol ("1"–"C") last negotiated over `connection`, or null. */
+  get(connection: string): string | null;
+  /** Remember it; called whenever a session connects. */
+  set(connection: string, protocolId: string): void;
 }
 
 export interface ClearDtcsOutcome {
@@ -57,6 +81,10 @@ export interface ClearDtcsOutcome {
 
 /** Longest reconnect delay. */
 export const MAX_RECONNECT_DELAY_MS = 30_000;
+/** A silent vehicle is tried again this often on the open link. */
+export const VEHICLE_RETRY_MS = 3000;
+/** Of the tries with the remembered protocol, every this many is a full search instead. */
+export const FULL_SEARCH_EVERY = 5;
 /** Samples older than this are not trusted for the clear-codes safety check. */
 const SAFETY_SAMPLE_MAX_AGE_MS = 5000;
 /**
@@ -95,6 +123,8 @@ export class ObdService {
   private transport: Transport | null = null;
   private driver: Elm327 | null = null;
   private poller: ObdPoller | null = null;
+  /** PIDs discovered in an earlier session, and which link and vehicle they belong to. */
+  private discovery: { key: string; found: PollerDiscovery } | null = null;
   /** Settles once every link closed so far has finished closing. */
   private closing: Promise<void> = Promise.resolve();
   private _status: ObdLinkStatus;
@@ -301,10 +331,22 @@ export class ObdService {
       logger: this.logger,
     });
     this.driver = driver;
-    const info = await driver.initialize({ protocol: config.protocol });
-    if (!this.running || this.restartRequested) return;
+    const connection = connectionKey(config);
+    const preferred = this.preferredProtocol(config, connection);
+    let info: Elm327Info | null;
+    try {
+      info = await driver.initialize({ protocol: config.protocol, preferredProtocol: preferred });
+    } catch (err) {
+      if (!isVehicleSilence(err) || driver.closed) throw err;
+      info = await this.waitForVehicle(driver, err, preferred);
+    }
+    if (info === null || !this.running || this.restartRequested) return;
+    if (getProtocol(info.protocolId) !== undefined) {
+      this.deps.protocolCache?.set(connection, info.protocolId);
+    }
 
     phase.current = 'discover';
+    const discoveryKey = `${connection}|${info.protocolId}|${info.vehicleSignature}`;
     const poller = new ObdPoller(
       driver,
       {
@@ -317,17 +359,83 @@ export class ObdService {
         timers: this.timers,
         logger: this.logger,
         tuning: this.deps.poller,
+        ...(this.discovery?.key === discoveryKey ? { discovered: this.discovery.found } : {}),
       },
       (event) => this.dispatch(event),
     );
     this.poller = poller;
     await poller.discover();
+    this.rememberDiscovery(discoveryKey, poller);
     if (!this.running || this.restartRequested) return;
 
     phase.current = 'poll';
     this.setState('connected', null, { adapter: info.adapter, protocol: info.protocol });
     onConnected();
-    await poller.run();
+    try {
+      await poller.run();
+    } finally {
+      // The VIN may have been read meanwhile: a reconnect need not read it again.
+      this.rememberDiscovery(discoveryKey, poller);
+    }
+  }
+
+  /**
+   * The protocol to start the automatic search with: the one this link's vehicle spoke last
+   * time. Null when the protocol is configured (or "A<n>": the driver chose already).
+   */
+  private preferredProtocol(config: ObdConfig, connection: string): string | null {
+    let setting: string;
+    try {
+      setting = normalizeProtocolSetting(config.protocol);
+    } catch {
+      return null; // initialize() reports the invalid setting
+    }
+    if (setting !== '0') return null;
+    const cached = this.deps.protocolCache?.get(connection) ?? null;
+    return cached !== null && getProtocol(cached) !== undefined ? cached : null;
+  }
+
+  /**
+   * The adapter answers but the vehicle does not (ignition off): keep the link and try the
+   * vehicle again every `vehicleRetryMs` until it answers (see the module comment). Resolves
+   * with the connection, or null when stopped or restarted meanwhile; rejects when something
+   * else goes wrong.
+   */
+  private async waitForVehicle(
+    driver: Elm327,
+    first: unknown,
+    preferred: string | null,
+  ): Promise<Elm327Info | null> {
+    this.setState('error', describeFailure(first, 'init', this.transport?.description));
+    this.logger.info('OBD: waiting for the vehicle to answer');
+    let quickTries = preferred !== null;
+    const retryMs = this.deps.vehicleRetryMs ?? VEHICLE_RETRY_MS;
+    let tried = this.now();
+    for (let attempt = 1; ; attempt++) {
+      // Tries start every `retryMs`; a full search that failed slowly is followed at once.
+      await this.sleeper.sleep(Math.max(0, tried + retryMs - this.now()));
+      if (!this.running || this.restartRequested) return null;
+      tried = this.now();
+      const quick = quickTries && attempt % FULL_SEARCH_EVERY !== 0;
+      try {
+        return await driver.connectVehicle(
+          quick && preferred !== null ? { protocol: preferred, tryOnly: true } : {},
+        );
+      } catch (err) {
+        if (quick && isElmError(err, 'UNSUPPORTED') && !driver.closed) {
+          this.logger.debug('OBD: the adapter does not know AT TP; searching instead');
+          quickTries = false;
+          continue;
+        }
+        if (!isVehicleSilence(err) || driver.closed) throw err;
+        this.logger.debug(`OBD: the vehicle still does not answer (${errorMessage(err)})`);
+      }
+    }
+  }
+
+  private rememberDiscovery(key: string, poller: ObdPoller): void {
+    const found = poller.discovery;
+    if (found !== null) this.discovery = { key, found };
   }
 
   private makeTransport(config: ObdConfig): Transport {
@@ -429,6 +537,18 @@ export class ObdService {
         this.logger.error(`OBD: event listener failed: ${errorMessage(err)}`);
       }
     }
+  }
+}
+
+/** Identifies the adapter link (not the protocol or timing settings). */
+function connectionKey(config: ObdConfig): string {
+  switch (config.transport) {
+    case 'serial':
+      return `serial:${config.serialPath}`;
+    case 'tcp':
+      return `tcp:${config.tcpHost}:${config.tcpPort}`;
+    default:
+      return config.transport;
   }
 }
 

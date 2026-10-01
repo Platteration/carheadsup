@@ -3,6 +3,7 @@ import type { HudConfig, HudEvent, HudState, ObdConfig, ObdLinkStatus } from '@c
 import { ObdService } from '@carheadsup/obd';
 import type { ClearDtcsOutcome, ObdServiceDeps, VehicleSimulator } from '@carheadsup/obd';
 import type { RuntimeDeps } from '../sources/types.ts';
+import type { ObdProtocolFile } from './protocol-cache.ts';
 
 /** The parts of ObdService the server uses (tests inject fakes). */
 export interface ObdServiceLike {
@@ -44,6 +45,8 @@ export interface ObdLinkOptions {
   /** Where the service's events go (the engine). */
   onEvent: (event: HudEvent) => void;
   factory?: ObdServiceFactory;
+  /** Remembers the vehicle's protocol across restarts (`<data dir>/obd-cache.json`). */
+  protocolCache?: ObdProtocolFile | null;
 }
 
 /**
@@ -53,16 +56,19 @@ export interface ObdLinkOptions {
 export class ObdLink {
   readonly service: ObdServiceLike;
   private readonly unsubscribe: () => void;
+  private readonly protocolCache: ObdProtocolFile | null;
   private clearing: Promise<ClearDtcsOutcome> | null = null;
 
   constructor(options: ObdLinkOptions) {
     const { deps } = options;
+    this.protocolCache = options.protocolCache ?? null;
     const serviceDeps: ObdServiceDeps = {
       now: deps.now,
       setTimeout: (callback, ms) => deps.timers.setTimeout(callback, ms),
       clearTimeout: (handle) => deps.timers.clearTimeout(handle),
       logger: deps.logger,
       ...(options.simulator ? { simulator: options.simulator } : {}),
+      ...(this.protocolCache ? { protocolCache: this.protocolCache } : {}),
     };
     this.service = (options.factory ?? createObdService)(options.config.obd, serviceDeps);
     this.unsubscribe = this.service.onEvent(options.onEvent);
@@ -81,6 +87,7 @@ export class ObdLink {
       await this.service.stop();
     } finally {
       this.unsubscribe();
+      await this.protocolCache?.flushed();
     }
   }
 

@@ -24,6 +24,28 @@ readable reason) is shown in the settings app, on the dashboard and by `GET /api
 before reconnecting starts at `obd.reconnectDelayMs` (3 s) and doubles after each consecutive
 failure, up to 30 s.
 
+**Waiting for the ignition.** When the adapter answers but the vehicle does not — the HUD came up
+on accessory power before the ignition, or restarted while it was off — the link is not closed:
+the state shows `error` ("is the ignition on?") and the vehicle is tried again every 3 s with
+`0100` alone, without resetting the adapter and without a growing delay, so data flows within
+seconds of the engine control unit waking up. The protocol the vehicle spoke last time is
+remembered per adapter link in `<data dir>/obd-cache.json`; with automatic search
+(`obd.protocol` `0`) the search starts with it (`AT SP A<n>`), and while the vehicle is silent
+it is tried alone with `AT TP <n>` (not stored in the adapter), which answers at once instead of
+searching every protocol for several seconds — every fifth try is a full search, in case the
+adapter now sits in another car. Measured against the emulator with a slow clone's timings
+(`ATZ` 1 s, a failing search 10 s): speed arrives 0.5–1.3 s after the ECU wakes up with the
+protocol remembered, 3–9 s on the very first start (it used to be 6.6–30 s).
+
+**Reconnecting** to the same vehicle within one run of the server (the same `0100` answer) reuses
+the PIDs discovered before and does not read the VIN again: after a Bluetooth drop mid-drive
+data comes back without the walk through the supported-PID bitmaps (1.5 s on a K-line car).
+
+A request whose answer begins with `SEARCHING...` or `BUS INIT: ...` — the adapter looking for
+the protocol, or initialising a K-line bus that went to sleep (the 5-baud init alone takes over
+2 s) — gets the search timeout instead of `obd.timeoutMs`, so it is not mistaken for a lost
+answer.
+
 Transports (`obd.transport`):
 
 - **`serial`** — a serial device: `/dev/rfcomm0` for a Bluetooth adapter bound with `rfcomm`
@@ -267,6 +289,7 @@ above, `batteryVoltage`, or the four `tirePressure*` signals.
 | --- | --- |
 | `The adapter did not respond to ATZ (check power and pairing)` | Nothing answers on the serial port: adapter unpowered, not paired, `/dev/rfcomm0` bound to the wrong MAC, or someone else connected to it. |
 | `No response from the vehicle (ignition off?)` | The adapter answers but the car does not: ignition off, or the wrong protocol fixed in `obd.protocol`. |
+| `The adapter is connected but the vehicle did not answer — is the ignition on?` | Shown while the HUD waits for the ignition; it keeps trying every 3 s and connects on its own. If it never does with the ignition on, fix `obd.protocol` or delete `obd-cache.json` from the data directory. |
 | `… polling one PID per request` / `… polling up to 3 PIDs per request` | The ECU ignores multi-PID requests, or the adapter cannot receive answers longer than one CAN frame (a clone without flow control). Harmless; updates are a little slower. |
 | *CHECK ENGINE – Lamp on – no code read* | The check-engine lamp is on but no confirmed code could be read: the adapter cannot receive the long trouble-code answer, a control unit keeps refusing, or the fault is in a module the generic services do not report. Read the codes with another tool. |
 | Connects, then drops every few seconds | Weak Bluetooth link (move the Pi closer, avoid metal between), or a clone that cannot keep up — raise `obd.timeoutMs`. |

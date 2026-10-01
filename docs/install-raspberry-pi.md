@@ -457,7 +457,7 @@ saved itself and on the phone's clock ([hardware.md](hardware.md#clock)).
    # e.g. a USB stick (this erases it): sudo mkfs.ext4 -L hud-data /dev/sda1
    sudo systemctl stop carheadsup
    sudo mkdir -p /mnt/hud-data && sudo mount LABEL=hud-data /mnt/hud-data
-   sudo cp -a /var/lib/carheadsup/. /mnt/hud-data/          # state.json, trips.jsonl, hud-id, tls.pem
+   sudo cp -a /var/lib/carheadsup/. /mnt/hud-data/          # state.json, trips.jsonl, hud-id, tls.pem, obd-cache.json
    sudo install -o carheadsup -g carheadsup -m 0600 /etc/carheadsup/config.json /mnt/hud-data/config.json
    sudo chown carheadsup:carheadsup /mnt/hud-data && sudo chmod 0700 /mnt/hud-data
    sudo umount /mnt/hud-data

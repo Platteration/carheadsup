@@ -61,14 +61,18 @@ export {
 export {
   DEFAULT_POLLER_TUNING,
   ObdPoller,
+  type PollerDiscovery,
   type PollerDriver,
   type PollerOptions,
   type PollerTuning,
 } from './poller.ts';
 export {
+  FULL_SEARCH_EVERY,
   MAX_RECONNECT_DELAY_MS,
   ObdService,
+  VEHICLE_RETRY_MS,
   type ClearDtcsOutcome,
+  type ObdProtocolCache,
   type ObdServiceDeps,
 } from './service.ts';
 

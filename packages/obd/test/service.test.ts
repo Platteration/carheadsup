@@ -134,7 +134,7 @@ describe('ObdService reconnection', () => {
     await service.stop();
   });
 
-  it('reports a silent vehicle (ignition off) as an error and keeps retrying', async () => {
+  it('reports a silent vehicle (ignition off) and keeps trying it on the open link', async () => {
     const { clock, service, links } = harness(
       { transport: 'simulator' },
       {
@@ -146,7 +146,186 @@ describe('ObdService reconnection', () => {
     await clock.advance(10_000);
     const error = links().find((l) => l.state === 'error');
     expect(error?.message).toContain('vehicle did not answer');
-    expect(links().filter((l) => l.state === 'connecting').length).toBeGreaterThanOrEqual(2);
+    // One connection: no reopening, no adapter reset, no growing delay.
+    expect(links().filter((l) => l.state === 'connecting')).toHaveLength(1);
+    const log = service.emulator?.commandLog ?? [];
+    expect(log.filter((c) => c === 'ATZ')).toHaveLength(1);
+    expect(log.filter((c) => c === '0100').length).toBeGreaterThanOrEqual(3);
+    await service.stop();
+  });
+});
+
+describe('ObdService time to data', () => {
+  /** The audit's slow clone: ATZ 1 s, a full protocol search 2.5 s (10 s when it fails). */
+  const SLOW = { latencyMs: 40, resetLatencyMs: 1000, searchLatencyMs: 2500 } as const;
+
+  function memoryCache(initial: Record<string, string> = {}) {
+    const saved = new Map(Object.entries(initial));
+    return {
+      saved,
+      cache: {
+        get: (connection: string) => saved.get(connection) ?? null,
+        set: (connection: string, id: string) => void saved.set(connection, id),
+      },
+    };
+  }
+
+  function firstSpeedAt(events: HudEvent[]): number | null {
+    for (const e of events) {
+      if (e.type === 'obd/samples' && e.samples.some((s) => s.signal === 'speed')) return e.at;
+    }
+    return null;
+  }
+
+  for (const offFor of [20_000, 45_000, 90_000, 150_000]) {
+    it(`delivers speed within 5 s of the ECU waking up (off for ${offFor / 1000} s)`, async () => {
+      const { cache } = memoryCache({ simulator: '6' });
+      const { clock, service, events, links } = harness(
+        { transport: 'simulator' },
+        {
+          simulator: new VehicleSimulator({ mode: 'manual' }),
+          emulator: { ...SLOW, ecuOnline: false },
+          driver: { resetTimeoutMs: 3000, searchTimeoutMs: 20_000, settleMs: 150 },
+          protocolCache: cache,
+        },
+      );
+      service.start();
+      await clock.advance(offFor);
+      service.emulator?.setEcuOnline(true);
+      const onlineAt = clock.now();
+      await clock.advance(10_000);
+      const first = firstSpeedAt(events);
+      expect(first).not.toBeNull();
+      expect((first ?? Infinity) - onlineAt).toBeLessThan(5000);
+      expect(links().filter((l) => l.state === 'connecting')).toHaveLength(1);
+      await service.stop();
+    });
+  }
+
+  it('without a remembered protocol searches every time, still without resetting', async () => {
+    const { clock, service, events } = harness(
+      { transport: 'simulator' },
+      {
+        simulator: new VehicleSimulator({ mode: 'manual' }),
+        emulator: { ...SLOW, ecuOnline: false },
+        driver: { resetTimeoutMs: 3000, searchTimeoutMs: 20_000, settleMs: 150 },
+      },
+    );
+    service.start();
+    await clock.advance(40_000);
+    const log = service.emulator?.commandLog ?? [];
+    expect(log.filter((c) => c === 'ATZ')).toHaveLength(1);
+    expect(log.some((c) => c.startsWith('ATTP'))).toBe(false);
+    service.emulator?.setEcuOnline(true);
+    const onlineAt = clock.now();
+    await clock.advance(20_000);
+    // A failing search takes 10 s here: within one search plus the retry delay.
+    expect((firstSpeedAt(events) ?? Infinity) - onlineAt).toBeLessThan(10_000 + 3000 + 3000);
+    await service.stop();
+  });
+
+  it('remembers the protocol, starts the search with it and searches fully every fifth try', async () => {
+    const { cache, saved } = memoryCache();
+    const sim = new VehicleSimulator({ mode: 'manual' });
+    const first = harness(
+      { transport: 'simulator' },
+      { simulator: sim, emulator: { latencyMs: 0 }, protocolCache: cache },
+    );
+    first.service.start();
+    await first.clock.advance(2000);
+    expect(first.service.status.state).toBe('connected');
+    expect(saved.get('simulator')).toBe('6');
+    expect(first.service.emulator?.commandLog).toContain('ATSP0');
+    await first.service.stop();
+
+    const second = harness(
+      { transport: 'simulator' },
+      { simulator: sim, emulator: { latencyMs: 0, ecuOnline: false }, protocolCache: cache },
+    );
+    second.service.start();
+    await second.clock.advance(3000 * 6 + 1000);
+    const log = second.service.emulator?.commandLog ?? [];
+    expect(log).toContain('ATSPA6');
+    const protocolCommands = log.filter((c) => /^AT(SP|TP)/.test(c));
+    expect(protocolCommands.slice(0, 7)).toEqual([
+      'ATSPA6', // initialize
+      'ATTP6',
+      'ATTP6',
+      'ATTP6',
+      'ATTP6',
+      'ATSPA6', // every fifth try: a full search
+      'ATTP6',
+    ]);
+    await second.service.stop();
+  });
+
+  it('searches instead when the adapter does not know AT TP', async () => {
+    const { cache } = memoryCache({ 'serial:/dev/rfcomm0': '6' });
+    let emulator: Elm327Emulator | null = null;
+    class NoTryProtocol extends Elm327Emulator {
+      override async write(data: string): Promise<void> {
+        if (data.startsWith('ATTP')) {
+          // Like a clone that answers "?" to a command it lacks.
+          await super.write('ATXX\r');
+          return;
+        }
+        await super.write(data);
+      }
+    }
+    const { clock, service } = harness(
+      {},
+      {
+        createTransport: () => {
+          emulator = new NoTryProtocol(new VehicleSimulator({ mode: 'manual' }), {
+            latencyMs: 0,
+            ecuOnline: false,
+          });
+          return emulator;
+        },
+        protocolCache: cache,
+      },
+    );
+    service.start();
+    await clock.advance(10_000);
+    const log = (emulator as Elm327Emulator | null)?.commandLog ?? [];
+    expect(log.filter((c) => c === 'ATXX')).toHaveLength(1);
+    expect(log.filter((c) => c === 'ATSPA6').length).toBeGreaterThanOrEqual(2);
+    (emulator as Elm327Emulator | null)?.setEcuOnline(true);
+    await clock.advance(4000);
+    expect(service.status.state).toBe('connected');
+    await service.stop();
+  });
+
+  it('reuses the discovered PIDs and the VIN after reconnecting to the same vehicle', async () => {
+    const sim = new VehicleSimulator({ mode: 'manual', engineTempC: 90 });
+    let created = 0;
+    let latest: Elm327Emulator | null = null;
+    const { clock, service, events } = harness(
+      {},
+      {
+        createTransport: () => {
+          created += 1;
+          latest = new Elm327Emulator(sim, { latencyMs: 0 });
+          return latest;
+        },
+      },
+    );
+    service.start();
+    await clock.advance(2000);
+    const firstLog = [...((latest as Elm327Emulator | null)?.commandLog ?? [])];
+    expect(firstLog.filter((c) => /^01(20|40|60|80|A0)$/.test(c)).length).toBeGreaterThan(0);
+    expect(firstLog).toContain('0902');
+    (latest as Elm327Emulator | null)?.injectFault('disconnect');
+    await clock.advance(5000);
+    expect(created).toBe(2);
+    expect(service.status.state).toBe('connected');
+    const secondLog = (latest as Elm327Emulator | null)?.commandLog ?? [];
+    // No bitmap walk past 0100, no VIN read: straight to polling.
+    expect(secondLog.filter((c) => /^01(20|40|60|80|A0)$/.test(c))).toEqual([]);
+    expect(secondLog).not.toContain('0902');
+    const supported = events.filter((e) => e.type === 'obd/supported');
+    expect(supported).toHaveLength(2);
+    expect(supported[1]).toEqual({ ...supported[0], at: expect.any(Number) });
     await service.stop();
   });
 });
