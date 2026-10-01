@@ -7,7 +7,7 @@ import { maintenanceStatus } from '../maintenance/maintenance.ts';
 import { updateTrip } from '../trip/trip.ts';
 import type { HudConfig } from '../types/config.ts';
 import type { MaintenanceItemStatus } from '../types/records.ts';
-import type { HudState } from '../types/state.ts';
+import type { GeoPoint, HudState } from '../types/state.ts';
 import { updateFuel } from '../vehicle/fuel.ts';
 import { updateGear } from '../vehicle/gear.ts';
 import {
@@ -102,20 +102,49 @@ export function advanceTrip(state: HudState, config: HudConfig): HudState['trip'
 }
 
 /**
+ * Where night mode takes the sun from, best first: the phone's location (live this session), the
+ * phone's last location from an earlier session (rounded), the configured fallback location, the
+ * system time zone's principal city. Null when none is known.
+ */
+export function sunLocation(state: HudState, config: HudConfig): GeoPoint | null {
+  const { env } = state;
+  return (
+    env.location ??
+    env.lastLocation ??
+    config.sensors.fallbackLocation ??
+    env.timeZone?.location ??
+    null
+  );
+}
+
+/** The local wall-clock time as hours since midnight (0 ≤ h < 24); null without a time zone. */
+export function localHour(state: HudState): number | null {
+  const zone = state.env.timeZone;
+  if (zone === null) return null;
+  const local = wallNow(state) + zone.utcOffsetMin * 60_000;
+  if (!Number.isFinite(local)) return null;
+  const msOfDay = ((local % DAY_MS) + DAY_MS) % DAY_MS;
+  return msOfDay / HOUR_MS;
+}
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
  * Advance auto-brightness / night mode: a light-sensor reading counts while ≤ 5 s old; the sun
- * elevation (at the wall-clock time) comes from the phone's location, else the configured
- * fallback location.
+ * elevation (at the wall-clock time) comes from `sunLocation`; the local time (for
+ * `nightHours`, when there is no location at all) from the system time zone.
  */
 export function advanceBrightness(state: HudState, config: HudConfig): BrightnessState {
   const { env, now } = state;
   const lux =
     env.lux !== null && env.luxAt !== null && now - env.luxAt <= LUX_FRESH_MS ? env.lux : null;
-  const location = env.location ?? config.sensors.fallbackLocation;
+  const location = sunLocation(state, config);
   const sun =
     location === null ? null : sunElevationDeg(location.lat, location.lon, wallNow(state));
   return updateBrightness(
     env.brightness,
-    { at: now, lux, sunElevationDeg: sun },
+    { at: now, lux, sunElevationDeg: sun, localHour: localHour(state) },
     config.display.brightness,
   );
 }

@@ -3,7 +3,7 @@ import type { HudConfig } from './config.ts';
 import type { Hazard, NavInfo, RoadInfo } from './nav.ts';
 import type { CallInfo, MediaInfo, MessageInfo } from './phone.ts';
 import type { SignalId } from './signals.ts';
-import type { PairingEndpoint } from './state.ts';
+import type { PairingEndpoint, TimeZoneInfo } from './state.ts';
 import type { ObdLinkState } from './vehicle.ts';
 
 /** Driver inputs, from GPIO buttons, a gesture sensor, the keyboard, or the phone. */
@@ -49,6 +49,11 @@ export type HudEvent =
    */
   | { type: 'clock/sync'; wallOffsetMs: number; trusted?: boolean; at: number }
   | { type: 'config'; config: HudConfig; at: number }
+  /**
+   * The system time zone (local time offset and, where known, the zone's principal location).
+   * The server sends it on start and whenever the offset changes (daylight saving).
+   */
+  | { type: 'clock/zone'; zone: TimeZoneInfo; at: number }
 
   // OBD-II
   | {

@@ -121,6 +121,12 @@ into happy-dom. What covers what:
 - **hud-server** — the REST API, auth, static files, both WebSockets, stores, sensors (with fake
   I²C buses, fake `gpiomon` and real UDP sockets on port 0), the engine; `smoke.test.ts` runs
   the complete server with the real simulation and sockets, and `main.test.ts` spawns the CLI.
+  The time zone → location table (`src/sensors/zone-locations.ts`) is generated from the tz
+  database: `node packages/hud-server/src/tools/generate-zone-locations.ts [/usr/share/zoneinfo]`
+  rewrites it, and a test compares it with the machine's `zone1970.tab` and `zone.tab`.
+- **hud-renderer browser checks** — `test/hud/browser/*.browser.test.ts` render frames in headless
+  Chromium (same lookup as the end-to-end tests below; skipped without one): alerts never
+  clipped, and daylight readability (the outline of over-limit digits, the blink depth).
 - **hud-renderer** — widgets, overlays, projection maths, the feed's staleness handling, the
   settings app against an in-memory mock server, the developer console.
 - **companion-android** — `cd companion-android && ./gradlew :protocol:test` (JDK only). Its

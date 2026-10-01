@@ -26,6 +26,16 @@
   color: var(--c-critical);
 }
 
+/*
+ * By day the red has about a quarter of the white's luminance on the glass, so over the limit the
+ * digits would turn dim exactly when they matter: outline them in the primary colour (the stroke
+ * is painted under the fill, so half of it shows around the red). At night the red alone is plain.
+ */
+.hud:not(.hud--night) .hud-speed--over .hud-speed__value {
+  -webkit-text-stroke: calc(var(--u) * 1) var(--c-primary);
+  paint-order: stroke fill;
+}
+
 .hud-speed__meta {
   display: flex;
   align-items: center;

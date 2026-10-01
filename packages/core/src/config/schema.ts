@@ -316,6 +316,7 @@ const brightnessSchema = withRules(
     nightEnterLux: num(0, 100_000),
     nightExitLux: num(0, 100_000),
     nightSunElevationDeg: num(-18, 10),
+    nightHours: z.object({ start: num(0, 24), end: num(0, 24) }).nullable(),
   }),
   [
     {

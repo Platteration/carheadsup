@@ -184,13 +184,16 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
         [10_000, 0.85],
         [100_000, 1],
       ],
-      riseTimeMs: 3000,
+      // Quick enough that a tunnel exit into sunshine is readable within about 1.5 s.
+      riseTimeMs: 800,
       fallTimeMs: 400,
       nightMode: 'sensor',
       nightEnterLux: 50,
       nightExitLux: 150,
       // Between sunset and the end of civil twilight (−6°).
       nightSunElevationDeg: -4,
+      // Only when no location at all is known (see BrightnessConfig.nightHours).
+      nightHours: { start: 19, end: 7 },
     },
     layout: {
       preset: 'standard',

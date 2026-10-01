@@ -50,12 +50,47 @@ export interface MediaState {
   trackChangedAt: number;
 }
 
+/** A place on Earth, degrees (latitude north, longitude east). */
+export interface GeoPoint {
+  lat: number;
+  lon: number;
+}
+
+/**
+ * The time zone the HUD's system clock is set to, as the server reads it (`clock/zone`). It gives
+ * the local time — and, through the zone's principal city, a rough idea of where on Earth the
+ * car is — for night mode before (or without) the phone's location.
+ */
+export interface TimeZoneInfo {
+  /** IANA name, e.g. "Europe/Berlin"; null when unknown. */
+  name: string | null;
+  /** Local time − UTC, minutes, at the time of the event (daylight saving included). */
+  utcOffsetMin: number;
+  /**
+   * The zone's principal location (tz database `zone1970.tab` / `zone.tab`): within a few hundred
+   * kilometres for most zones, good enough for sunset and sunrise. Null for zones without one
+   * (UTC, Etc/GMT+5).
+   */
+  location: GeoPoint | null;
+}
+
 export interface EnvironmentState {
   lux: number | null;
   luxAt: number | null;
   location: { lat: number; lon: number; at: number } | null;
+  /**
+   * The phone's last location rounded to {@link LAST_LOCATION_STEP_DEG} (about 11 km): kept
+   * across restarts (`PersistedState.lastLocation`), so night mode knows the sun before the
+   * phone connects.
+   */
+  lastLocation: GeoPoint | null;
+  /** The system time zone (`clock/zone`); null until the server reports it. */
+  timeZone: TimeZoneInfo | null;
   brightness: BrightnessState;
 }
+
+/** `EnvironmentState.lastLocation` is rounded to multiples of this (degrees). */
+export const LAST_LOCATION_STEP_DEG = 0.1;
 
 /**
  * Where phones reach this HUD, as the pairing page's QR code tells them (see

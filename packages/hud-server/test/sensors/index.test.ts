@@ -42,7 +42,13 @@ describe('createSensorSources', () => {
     const openI2c = vi.fn<I2cOpener>();
     const spawn = fakeSpawn();
     const udp = fakeUdpFactory();
-    const sources = createSensorSources(config(), { openI2c, spawn, createUdpSocket: udp.factory });
+    const timeZone = { name: () => 'Europe/Berlin', utcOffsetMin: () => 120 };
+    const sources = createSensorSources(config(), {
+      openI2c,
+      spawn,
+      createUdpSocket: udp.factory,
+      timeZone,
+    });
     expect(sources.map((s) => s.name)).toEqual([
       'light-sensor',
       'gesture-sensor',
@@ -50,6 +56,7 @@ describe('createSensorSources', () => {
       'can-buttons',
       'swc-buttons',
       'adas-udp',
+      'time-zone',
     ]);
     const { ctx, events } = recordingContext(clock);
     for (const source of sources) await source.start(ctx);
@@ -59,7 +66,8 @@ describe('createSensorSources', () => {
     expect(openI2c).not.toHaveBeenCalled();
     expect(spawn.children).toEqual([]);
     expect(udp.sockets).toEqual([]);
-    expect(events).toEqual([]);
+    // Only the time zone, which is always known.
+    expect(events.map((e) => e.type)).toEqual(['clock/zone']);
     for (const source of sources) await source.stop();
     expect(clock.pendingTimers).toBe(0);
   });

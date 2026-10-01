@@ -221,8 +221,10 @@ sun-based night mode and day-based service reminders still need a real-time cloc
 - **Pi 5 with the RTC battery**: works out of the box. For the official rechargeable battery,
   enable charging with `dtparam=rtc_bbat_vchg=3000000` (never with a non-rechargeable cell).
 
-Set the time zone too (`sudo raspi-config` → *Localisation Options*), since the HUD shows local
-time.
+Set the time zone too (`sudo raspi-config` → *Localisation Options*, or
+`sudo timedatectl set-timezone Region/City`), since the HUD shows local time — and, without a
+light sensor, takes its city as a rough location for night mode until the phone sends its own.
+Left at UTC, night mode can only go by the clock (`display.brightness.nightHours`).
 
 ## Sensors, buttons and wiring
 
@@ -245,8 +247,10 @@ by the glare shield, not seeing the HUD's own light, and not facing the sun thro
 window. If it sits behind tinted glass or a cover, raise `sensors.lightSensorGain` (the factor the
 readings are multiplied by) until the automatic brightness matches what you need by day and by
 night; the brightness curve itself is in [configuration.md](configuration.md#displaybrightness).
-Without a sensor the HUD falls back to the sun's elevation, computed from the phone's GPS or
-`sensors.fallbackLocation`.
+Without a sensor the HUD falls back to the sun's elevation, computed from the phone's GPS (live,
+or remembered from the last drive), `sensors.fallbackLocation` or the system time zone's city,
+and by day it then runs at full brightness
+([details](configuration.md#displaybrightness)). Without a sensor, also set the time zone (below).
 
 ### Gesture sensor
 

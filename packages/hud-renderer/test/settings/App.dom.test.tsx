@@ -123,6 +123,29 @@ describe('settings app', () => {
     expect(hud.config.display.trafficRevealM).toBe(5000);
   });
 
+  it('edits the night hours used when no location is known, and switches them off', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    const display = section(root, 'display');
+    const from = field(display, 'Night from').querySelector('input')!;
+    expect(from.value).toBe('19');
+    expect(field(display, 'Day from').querySelector('input')!.value).toBe('7');
+    await type(from, '20.5');
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => text(saveBar(root)) === 'Saved');
+    expect(patches(hud)).toEqual([{ display: { brightness: { nightHours: { start: 20.5 } } } }]);
+    expect(hud.config.display.brightness.nightHours).toEqual({ start: 20.5, end: 7 });
+    const toggle = field(display, 'Go by the clock').querySelector<HTMLInputElement>('input')!;
+    expect(toggle.checked).toBe(true);
+    await check(toggle, false);
+    expect(() => field(display, 'Night from')).toThrow();
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => patches(hud).length === 2);
+    expect(patches(hud)[1]).toEqual({ display: { brightness: { nightHours: null } } });
+    expect(hud.config.display.brightness.nightHours).toBeNull();
+  });
+
   it('converts display units back to canonical ones when saving', async () => {
     const hud = new MockHud();
     hud.config.units = { ...hud.config.units, system: 'imperial', temperature: 'F' };

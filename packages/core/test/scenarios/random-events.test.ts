@@ -203,7 +203,7 @@ function eventStream(seed: number): (at: number) => HudEvent {
       };
     }
     if (roll < 0.6) return { type: 'tick', at };
-    const kind = Math.floor(rand() * 25);
+    const kind = Math.floor(rand() * 26);
     switch (kind) {
       case 0:
         return {
@@ -361,6 +361,19 @@ function eventStream(seed: number): (at: number) => HudEvent {
         return chance(rand, 0.5)
           ? { type: 'pairing/show', at }
           : { type: 'input', action: 'next-page', at };
+      case 24:
+        // The system time zone, with or without a location (or junk).
+        return {
+          type: 'clock/zone',
+          zone: {
+            name: pick(rand, ['Europe/Berlin', 'Etc/UTC', null, '']),
+            utcOffsetMin: pick(rand, [0, 120, -300, 345, Number.NaN, 5000]),
+            location: chance(rand, 0.5)
+              ? null
+              : { lat: between(rand, -95, 95), lon: between(rand, -185, 185) },
+          },
+          at,
+        };
       default:
         return { type: 'config', config: pick(rand, CONFIGS), at };
     }

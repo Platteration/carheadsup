@@ -98,12 +98,13 @@ describe('DEFAULT_CONFIG', () => {
       manualLevel: 0.8,
       minLevel: 0.08,
       maxLevel: 1,
-      riseTimeMs: 3000,
+      riseTimeMs: 800,
       fallTimeMs: 400,
       nightMode: 'sensor',
       nightEnterLux: 50,
       nightExitLux: 150,
       nightSunElevationDeg: -4,
+      nightHours: { start: 19, end: 7 },
     });
     expect(b.curve[0]?.[0]).toBeLessThanOrEqual(1);
     expect(b.curve.at(-1)?.[0]).toBeGreaterThanOrEqual(100_000);
@@ -351,6 +352,11 @@ describe('parseConfig', () => {
       'sensors.fallbackLocation',
       { lat: 100, lon: 0 },
       'sensors.fallbackLocation.lat: expected number <= 90',
+    ],
+    [
+      'display.brightness.nightHours',
+      { start: 25, end: 7 },
+      'display.brightness.nightHours.start: expected number <= 24',
     ],
     ['sensors.adasUdpPort', 70000, 'sensors.adasUdpPort: expected number <= 65535'],
     [
@@ -925,6 +931,17 @@ describe('mergeConfig', () => {
     const cleared = mergeConfig(set.config, { sensors: { fallbackLocation: null } });
     expect(cleared.errors).toEqual([]);
     expect(cleared.config.sensors.fallbackLocation).toBeNull();
+  });
+
+  it('switches the night-hours fallback off and on again', () => {
+    const off = mergeConfig(DEFAULT_CONFIG, { display: { brightness: { nightHours: null } } });
+    expect(off.errors).toEqual([]);
+    expect(off.config.display.brightness.nightHours).toBeNull();
+    const on = mergeConfig(off.config, {
+      display: { brightness: { nightHours: { start: 20.5, end: 6 } } },
+    });
+    expect(on.errors).toEqual([]);
+    expect(on.config.display.brightness.nightHours).toEqual({ start: 20.5, end: 6 });
   });
 
   it('rejects a partial object where the base value is null', () => {

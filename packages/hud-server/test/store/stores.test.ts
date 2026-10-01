@@ -357,6 +357,21 @@ describe('PersistStore', () => {
     expect(parsePersistedState({ odometerCalibration: null })?.errors).toEqual([]);
   });
 
+  it('round-trips the phone’s last location and drops an invalid one', async () => {
+    const store = new PersistStore(join(dir, 'state.json'), logger);
+    const lastLocation = { lat: 52.5, lon: 13.4 };
+    await store.save({ ...sample, lastLocation });
+    expect(await store.load()).toEqual({ ...sample, lastLocation });
+    expect(parsePersistedState({ lastLocation: null })?.errors).toEqual([]);
+    expect(parsePersistedState({ lastLocation: { lat: 91, lon: 0 } })).toEqual({
+      state: EMPTY_PERSISTED_STATE,
+      errors: ['lastLocation: invalid'],
+    });
+    expect(parsePersistedState({ lastLocation: 'Berlin' })?.errors).toEqual([
+      'lastLocation: invalid',
+    ]);
+  });
+
   it('recovers from a corrupt file via the backup and moves the corrupt one aside', async () => {
     const store = new PersistStore(join(dir, 'state.json'), logger);
     await store.save(sample);

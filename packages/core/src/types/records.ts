@@ -1,5 +1,6 @@
 import type { ActiveTrip } from '../trip/trip.ts';
 import type { GearAnchor } from '../vehicle/gear.ts';
+import type { GeoPoint } from './state.ts';
 
 /**
  * A completed trip, persisted on the HUD and synced to the phone. Times are wall-clock epoch ms
@@ -137,4 +138,9 @@ export interface PersistedState {
    * (`extractPersisted` leaves it out); absent in files written before it existed.
    */
   lastWallMs?: number | null;
+  /**
+   * The phone's last location, rounded to about 11 km (`EnvironmentState.lastLocation`), for
+   * night mode before the phone connects. Absent in files written before it existed.
+   */
+  lastLocation?: GeoPoint | null;
 }

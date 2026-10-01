@@ -4,32 +4,12 @@
  * here — every alert banner and collision cue actually visible on the panel, never clipped away
  * by the fixed-height top zone — only exists in a browser.
  */
-import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import type { AlertFrame, HudFrame } from '@carheadsup/core';
-import { chromium } from '@playwright/test';
 import type { Browser, Page } from '@playwright/test';
-import { createServer } from 'vite';
-import type { ViteDevServer } from 'vite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SAMPLE_FRAMES } from '../../../src/hud/fixtures.ts';
 import { planAlerts, visibleAlerts } from '../../../src/hud/layout.ts';
-
-function findChromium(): string | null {
-  let bundled: string | null = null;
-  try {
-    bundled = chromium.executablePath();
-  } catch {
-    bundled = null;
-  }
-  for (const candidate of [process.env['PW_CHROMIUM'], '/opt/pw-browsers/chromium', bundled]) {
-    if (candidate && existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-const executablePath = findChromium();
-const rendererRoot = fileURLToPath(new URL('../../../', import.meta.url));
+import { executablePath, startHarness, type Harness } from './chromium.ts';
 
 const PANELS = [
   [800, 480],
@@ -118,26 +98,17 @@ const SCENES: Record<string, HudFrame> = {
   },
 };
 
-let server: ViteDevServer | null = null;
+let harness: Harness | null = null;
 let browser: Browser | null = null;
-let base = '';
 
 beforeAll(async () => {
   if (executablePath === null) return;
-  server = await createServer({
-    root: rendererRoot,
-    configFile: `${rendererRoot}vite.config.ts`,
-    logLevel: 'error',
-    server: { host: '127.0.0.1', port: 0 },
-  });
-  await server.listen();
-  base = server.resolvedUrls?.local[0] ?? '';
-  browser = await chromium.launch({ executablePath });
+  harness = await startHarness();
+  browser = harness.browser;
 }, 60_000);
 
 afterAll(async () => {
-  await browser?.close();
-  await server?.close();
+  await harness?.close();
 });
 
 interface Blocked {
@@ -198,7 +169,7 @@ describe.skipIf(executablePath === null)('HUD layout in Chromium', () => {
       const errors: string[] = [];
       page.on('pageerror', (err) => errors.push(err.message));
       try {
-        await page.goto(`${base}test/hud/browser/harness.html`);
+        await page.goto(harness!.url);
         await page.waitForFunction(() => typeof window.renderHud === 'function');
         await page.evaluate(() => document.fonts.ready);
         for (const [name, frame] of Object.entries(SCENES)) {

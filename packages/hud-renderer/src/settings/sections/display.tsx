@@ -1,14 +1,22 @@
-import type { HudConfig, NightModeSource, SpeedLimitSignStyle } from '@carheadsup/core';
+import type {
+  BrightnessConfig,
+  DayHours,
+  HudConfig,
+  NightModeSource,
+  SpeedLimitSignStyle,
+} from '@carheadsup/core';
 import type { Scope } from '../model/scope.ts';
-import { DEGREES, LUX, PERCENT, SECONDS_FROM_MS } from '../model/units.ts';
+import { DEGREES, LUX, PERCENT, SECONDS_FROM_MS, plainUnit } from '../model/units.ts';
 import { Card, Section } from '../ui/common.tsx';
 import {
   FieldGrid,
   FieldGroup,
+  FieldShell,
   NumberField,
   SegmentedField,
   SelectField,
   SliderField,
+  Switch,
 } from '../ui/fields.tsx';
 import type { Option } from '../ui/fields.tsx';
 import { useForm } from '../ui/form-context.ts';
@@ -22,7 +30,7 @@ const NIGHT_SOURCES: ReadonlyArray<Option<NightModeSource>> = [
   {
     value: 'sun',
     label: 'Sunset / sunrise',
-    hint: 'Follows the sun at the phone’s location (or the fallback location).',
+    hint: 'Follows the sun at the phone’s location (else its last one, the fallback location or the time zone’s main city).',
   },
   { value: 'always', label: 'Always on', hint: 'Warm, dim palette all the time.' },
   { value: 'never', label: 'Never', hint: 'Day palette all the time.' },
@@ -32,6 +40,48 @@ const SIGN_STYLES: ReadonlyArray<Option<SpeedLimitSignStyle>> = [
   { value: 'vienna', label: 'Red ring', hint: 'Europe and most of the world.' },
   { value: 'mutcd', label: 'US rectangle', hint: 'United States and Canada.' },
 ];
+
+/** Hours of the local day; 19.5 is 19:30. */
+const HOUR_OF_DAY = plainUnit('h', 1);
+const DEFAULT_NIGHT_HOURS: DayHours = { start: 19, end: 7 };
+
+/** The last-resort night window, for when no location at all is known. */
+function NightHours({ brightness }: { brightness: Scope<BrightnessConfig> }) {
+  const hours = brightness.value.nightHours;
+  return (
+    <>
+      <FieldShell
+        label="Go by the clock when no location is known"
+        hint="Without a light reading, the phone’s location, a fallback location or a time zone with a location, night comes on during these hours of the local day."
+        dirty={brightness.dirty('nightHours')}
+        inline
+      >
+        <Switch
+          checked={hours !== null}
+          label="Go by the clock when no location is known"
+          onChange={(on) => brightness.set('nightHours', on ? { ...DEFAULT_NIGHT_HOURS } : null)}
+        />
+      </FieldShell>
+      {hours !== null && (
+        <FieldGrid>
+          <NumberField
+            scope={brightness.child('nightHours') as Scope<DayHours>}
+            k="start"
+            label="Night from"
+            unit={HOUR_OF_DAY}
+          />
+          <NumberField
+            scope={brightness.child('nightHours') as Scope<DayHours>}
+            k="end"
+            label="Day from"
+            unit={HOUR_OF_DAY}
+            hint="19.5 is 19:30."
+          />
+        </FieldGrid>
+      )}
+    </>
+  );
+}
 
 const MAX_ALERTS: ReadonlyArray<Option<number>> = [1, 2, 3, 4, 5].map((n) => ({
   value: n,
@@ -106,7 +156,7 @@ export function DisplaySection({ root }: { root: Scope<HudConfig> }) {
                 label="Brightening"
                 unit={SECONDS_FROM_MS}
                 integer
-                hint="Slow, so passing shadows do not flicker."
+                hint="Quick, so leaving a tunnel the HUD is readable within a second or two."
               />
               <NumberField
                 scope={brightness}
@@ -143,6 +193,9 @@ export function DisplaySection({ root }: { root: Scope<HudConfig> }) {
               signed
               hint="0° is the horizon; −6° is the end of civil twilight."
             />
+          )}
+          {(b.nightMode === 'sun' || b.nightMode === 'sensor') && (
+            <NightHours brightness={brightness} />
           )}
         </FieldGroup>
       </Card>

@@ -1,6 +1,7 @@
 import { evaluateAlerts } from '../alerts/engine.ts';
 import { createBrightnessState } from '../display/brightness.ts';
 import { createContextState } from '../display/context.ts';
+import { parseGeoPoint, roundLocation } from '../display/location.ts';
 import { updateShiftFlash } from '../display/shift-light.ts';
 import {
   createMaintenanceState,
@@ -18,7 +19,7 @@ import {
 import type { HudConfig } from '../types/config.ts';
 import type { HudEvent } from '../types/events.ts';
 import type { PersistedState } from '../types/records.ts';
-import type { HudState } from '../types/state.ts';
+import type { HudState, TimeZoneInfo } from '../types/state.ts';
 import { roundTo } from '../units.ts';
 import { createFuelState } from '../vehicle/fuel.ts';
 import { createGearState } from '../vehicle/gear.ts';
@@ -77,8 +78,9 @@ export type PersistedStateWithTrip = Omit<PersistedState, 'activeTrip'> & {
  * (so powering down at ignition off does not lose it: the first tick after a longer power-down
  * completes it, a short blip continues it, and one saved "in the future" of this start's clock
  * is completed — see `resumeTripState`); the OBD link is 'disconnected' and everything else is
- * empty. Maintenance status and alerts are derived immediately, so the first frame is consistent
- * with the persisted data.
+ * empty. Maintenance status, brightness and night mode (from the remembered phone location or the
+ * fallback location, when there is one) and alerts are derived immediately, so the first frame is
+ * consistent with the persisted data.
  *
  * `wallOffsetMs` (default 0: engine time starts at the wall clock) converts the saved trip's
  * wall-clock times to engine time. `clockTrusted` (default true) is `ClockState.trusted` at the
@@ -93,6 +95,7 @@ export function createInitialState(
   options?: { simulated?: boolean; wallOffsetMs?: number; clockTrusted?: boolean },
 ): HudState {
   const odometerKm = validKm(persisted.odometerKm);
+  const lastLocation = parseGeoPoint(persisted.lastLocation);
   const offset = options?.wallOffsetMs;
   const wallOffsetMs = offset !== undefined && Number.isFinite(offset) ? offset : 0;
   const trusted = options?.clockTrusted ?? true;
@@ -163,6 +166,8 @@ export function createInitialState(
       lux: null,
       luxAt: null,
       location: null,
+      lastLocation: lastLocation === null ? null : roundLocation(lastLocation),
+      timeZone: null,
       brightness: createBrightnessState(config.display.brightness),
     },
     alerts: [],
@@ -176,7 +181,11 @@ export function createInitialState(
       lastInputAt: null,
     },
   };
-  const withStatus: HudState = { ...state, maintenance: refreshMaintenance(state, config) };
+  const withStatus: HudState = {
+    ...state,
+    maintenance: refreshMaintenance(state, config),
+    env: { ...state.env, brightness: advanceBrightness(state, config) },
+  };
   return { ...withStatus, alerts: evaluateAlerts(withStatus, config) };
 }
 
@@ -236,6 +245,8 @@ function apply(state: HudState, event: HudEvent, config: HudConfig): HudState {
       return applyTick(state, config);
     case 'clock/sync':
       return applyClockSync(state, event.wallOffsetMs, event.trusted, config);
+    case 'clock/zone':
+      return applyTimeZone(state, event.zone, config);
     case 'config':
       return applyConfig(state, event.config, config);
 
@@ -361,6 +372,24 @@ function applyClockSync(
 }
 
 /**
+ * The system time zone (local time and a rough location): re-derive night mode and the level at
+ * once. An invalid offset or location is dropped (the offset makes the whole report unusable).
+ */
+function applyTimeZone(state: HudState, zone: TimeZoneInfo, config: HudConfig): HudState {
+  const offset = zone.utcOffsetMin;
+  if (typeof offset !== 'number' || !Number.isFinite(offset) || Math.abs(offset) > 18 * 60) {
+    return state;
+  }
+  const timeZone: TimeZoneInfo = {
+    name: typeof zone.name === 'string' && zone.name !== '' ? zone.name : null,
+    utcOffsetMin: offset,
+    location: parseGeoPoint(zone.location),
+  };
+  const zoned: HudState = { ...state, env: { ...state.env, timeZone } };
+  return { ...zoned, env: { ...zoned.env, brightness: advanceBrightness(zoned, config) } };
+}
+
+/**
  * A new config: re-derive what depends on it (maintenance schedule, brightness mode/curve). Gear
  * ratios learned for another kind of transmission are forgotten with their numbering anchor
  * (numbering is anchored differently), which also persists the reset.
@@ -455,5 +484,6 @@ export function extractPersisted(state: HudState): PersistedState {
     maintenanceRecords: state.maintenance.records.map((r) => ({ ...r })),
     activeTrip: extractActiveTrip(state),
     tripSeq: state.trip.lastSeq,
+    lastLocation: state.env.lastLocation === null ? null : { ...state.env.lastLocation },
   };
 }

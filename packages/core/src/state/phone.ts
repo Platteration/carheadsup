@@ -1,6 +1,7 @@
 import type { HudEvent } from '../types/events.ts';
 import type { CallInfo, MediaInfo, MessageInfo, PhoneLinkStatus } from '../types/phone.ts';
 import type { HudState, MediaState, TrackedHazard } from '../types/state.ts';
+import { parseGeoPoint, roundLocation, sameGeoPoint } from '../display/location.ts';
 import { MAX_MESSAGES } from './selectors.ts';
 
 /** Reducer handlers for companion-app events (phone link, nav, road, media, calls, messages). */
@@ -143,10 +144,19 @@ export function applyMessage(state: HudState, message: MessageInfo): HudState {
   return { ...state, messages };
 }
 
+/**
+ * The phone's location (for the sun). Also remembered, rounded to about 11 km, as
+ * `lastLocation`, which survives restarts; it keeps its identity while the rounded value stays
+ * the same, so only a real change asks for a write.
+ */
 export function applyLocation(state: HudState, event: EventOf<'location/update'>): HudState {
-  const { lat, lon } = event;
-  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
-    return state;
-  }
-  return { ...state, env: { ...state.env, location: { lat, lon, at: state.now } } };
+  const point = parseGeoPoint({ lat: event.lat, lon: event.lon });
+  if (point === null) return state;
+  const rounded = roundLocation(point);
+  const prev = state.env.lastLocation;
+  const lastLocation = sameGeoPoint(prev, rounded) ? prev : rounded;
+  return {
+    ...state,
+    env: { ...state.env, location: { ...point, at: state.now }, lastLocation },
+  };
 }

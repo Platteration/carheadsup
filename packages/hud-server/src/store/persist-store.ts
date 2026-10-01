@@ -2,6 +2,7 @@ import { rename } from 'node:fs/promises';
 import {
   EMPTY_PERSISTED_STATE,
   parseGearAnchor,
+  parseGeoPoint,
   restoreOdometerCalibration,
 } from '@carheadsup/core';
 import type { MaintenanceRecord, PersistedState, PersistedStateWithTrip } from '@carheadsup/core';
@@ -79,6 +80,11 @@ export function parsePersistedState(
   if (finiteNonNegative(wall) && wall <= MAX_EPOCH_MS) state.lastWallMs = wall;
   else if (wall !== null && wall !== undefined) errors.push('lastWallMs: invalid');
 
+  const location = value['lastLocation'];
+  const parsedLocation = parseGeoPoint(location);
+  if (parsedLocation !== null) state.lastLocation = parsedLocation;
+  else if (location !== null && location !== undefined) errors.push('lastLocation: invalid');
+
   const records = value['maintenanceRecords'];
   if (Array.isArray(records)) {
     records.forEach((record: unknown, index) => {
@@ -109,8 +115,9 @@ function emptyState(): PersistedState {
 /**
  * `state.json`: the odometer and how its estimate is kept in line with the dash, learned gear
  * ratios and their numbering anchor, long-run consumption, service records (dated on the wall
- * clock), the trip in progress (with wall-clock times), the last trip's sequence number and the
- * wall time of the write (the next start's clock floor).
+ * clock), the trip in progress (with wall-clock times), the last trip's sequence number, the
+ * wall time of the write (the next start's clock floor) and the phone's last location (rounded
+ * to about 11 km, for night mode).
  *
  * Every save keeps the previous file as `state.json.bak` before the new one takes its place
  * (both steps atomic, see `writeFileAtomic`), so there is always a complete earlier copy.

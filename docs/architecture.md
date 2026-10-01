@@ -40,7 +40,7 @@ flowchart LR
   subgraph sources["Inputs"]
     obd["OBD service<br/>obd/link, obd/samples,<br/>obd/dtcs, obd/vin"]
     phone["phone channel<br/>nav, road, hazards, media,<br/>call, message, location"]
-    sensors["sensors<br/>sensor/light, adas/*"]
+    sensors["sensors<br/>sensor/light, adas/*,<br/>clock/zone"]
     input["buttons, gestures, steering wheel,<br/>keyboard, phone remote<br/>input"]
     clock["engine timer<br/>tick (100 ms),<br/>clock/sync"]
     api["REST API<br/>config, maintenance/done,<br/>odometer/set"]
@@ -132,6 +132,13 @@ So there are two clocks:
   in `state.json`; and the times in REST responses (`/api/diagnostics` also carries the HUD's
   `now`, so the settings app ages samples on the HUD's clock, whatever the phone's says). A sync
   re-derives maintenance status and night mode at once.
+- **The time zone** arrives as `{ type: 'clock/zone', zone: { name, utcOffsetMin, location } }`
+  from the server's time-zone source (`hud-server/src/sensors/time-zone.ts`) on start and
+  whenever the offset changes (daylight saving, checked every minute). The core uses it only for
+  night mode: the zone's principal city (`location`, from a table generated from the tz
+  database) stands in for the car's position until the phone sends one, and the local time
+  (`utcOffsetMin`) decides `display.brightness.nightHours` when no location is known at all.
+  The clock widget is formatted by the kiosk, in the same system time zone.
 
 A trip that network time corrects mid-drive therefore goes on, and its record carries the
 corrected start time. The trip in progress is saved with wall-clock times, since engine time
@@ -356,7 +363,7 @@ default `~/.local/share/carheadsup`, and its `sim` subdirectory with `--sim`) ho
 | File | Contents | Written |
 | --- | --- | --- |
 | `config.json` | The configuration (unless `--config` points elsewhere). Pretty-printed and hand-editable; if the server has to correct it on load, the original is kept as `config.json.bak`. A new file gets a random pairing token (24 letters and digits, about 139 bits), so a new HUD is never open to every phone; an existing file never gets one. | When missing at start; on every change from the API |
-| `state.json` | Odometer (and, for cars that do not report it, the last dash reading entered and the learned speed-to-distance scale), learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, the trip in progress (`PersistedState.activeTrip`, with wall-clock times), the last trip's sequence number (`tripSeq`) and the HUD's wall clock at the write (`lastWallMs`, the next start's [floor](#engine-time-and-the-wall-clock)). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
+| `state.json` | Odometer (and, for cars that do not report it, the last dash reading entered and the learned speed-to-distance scale), learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, the trip in progress (`PersistedState.activeTrip`, with wall-clock times), the last trip's sequence number (`tripSeq`), the HUD's wall clock at the write (`lastWallMs`, the next start's [floor](#engine-time-and-the-wall-clock)) and the phone's last location rounded to about 11 km (`lastLocation`, for night mode before the phone connects). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
 | `trips.jsonl` | One completed trip per line, oldest first; at most 5,000 trips (the oldest are dropped). | Appended when a trip ends |
 | `hud-id` | The HUD's identity on the phone link (22 base64url characters), which paired phones pin. A corrupt file is moved to `hud-id.corrupt` and replaced; phones then report a different HUD until paired again. | Once, on the first start |
 | `obd-cache.json` | The OBD protocol each adapter link's vehicle spoke last (`{"protocols": {"serial:/dev/rfcomm0": "6"}}`), so the next start finds the vehicle sooner (see [obd.md](obd.md#connection)). Only a hint: a missing or damaged file means a slower first connect. | When a session connects with another protocol than remembered |

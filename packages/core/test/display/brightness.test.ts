@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  NIGHT_ENTER_DWELL_MS,
   createBrightnessState,
+  inDayHours,
   luxToLevel,
   updateBrightness,
 } from '../../src/display/brightness.ts';
 import type { BrightnessInput, BrightnessState } from '../../src/display/brightness.ts';
+import { DEFAULT_CONFIG } from '../../src/config/config.ts';
 import type { BrightnessConfig } from '../../src/types/config.ts';
 
 const CONFIG: BrightnessConfig = {
@@ -26,16 +29,19 @@ const CONFIG: BrightnessConfig = {
   nightEnterLux: 50,
   nightExitLux: 150,
   nightSunElevationDeg: -4,
+  nightHours: { start: 19, end: 7 },
 };
 
 const sample = (
   at: number,
   lux: number | null,
   sunElevationDeg: number | null = null,
+  localHour: number | null = null,
 ): BrightnessInput => ({
   at,
   lux,
   sunElevationDeg,
+  localHour,
 });
 
 function feed(
@@ -85,10 +91,12 @@ describe('luxToLevel', () => {
 describe('createBrightnessState', () => {
   it('starts auto mode at the daytime fallback level, not night', () => {
     expect(createBrightnessState(CONFIG)).toEqual({
-      level: 0.8,
+      level: 1,
       night: false,
       updatedAt: null,
       target: null,
+      darkSince: null,
+      luxSeen: false,
     });
   });
 
@@ -99,6 +107,34 @@ describe('createBrightnessState', () => {
   it('starts at night only when night mode is forced', () => {
     expect(createBrightnessState({ ...CONFIG, nightMode: 'always' }).night).toBe(true);
     expect(createBrightnessState({ ...CONFIG, nightMode: 'sun' }).night).toBe(false);
+  });
+});
+
+describe('inDayHours', () => {
+  it('handles windows across midnight', () => {
+    const hours = { start: 19, end: 7 };
+    expect([18.99, 19, 23.5, 0, 6.99, 7, 12].map((h) => inDayHours(h, hours))).toEqual([
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+    ]);
+  });
+
+  it('handles windows within a day, and treats start = end as empty', () => {
+    const hours = { start: 1.5, end: 5 };
+    expect([1.49, 1.5, 4.99, 5].map((h) => inDayHours(h, hours))).toEqual([
+      false,
+      true,
+      true,
+      false,
+    ]);
+    expect(inDayHours(3, { start: 3, end: 3 })).toBe(false);
+    expect(inDayHours(23, { start: 20, end: 24 })).toBe(true);
+    expect(inDayHours(0, { start: 0, end: 6 })).toBe(true);
   });
 });
 
@@ -159,9 +195,9 @@ describe('updateBrightness', () => {
       );
     });
 
-    it('falls back to the sun without a lux reading', () => {
+    it('falls back to the sun without a lux reading (full level by day)', () => {
       const day = updateBrightness(createBrightnessState(CONFIG), sample(0, null, 30), CONFIG);
-      expect(day.level).toBeCloseTo(0.8, 12);
+      expect(day.level).toBe(1);
       const night = updateBrightness(createBrightnessState(CONFIG), sample(0, null, -10), CONFIG);
       expect(night.level).toBeCloseTo(0.16, 12);
     });
@@ -171,6 +207,51 @@ describe('updateBrightness', () => {
       expect(
         updateBrightness(createBrightnessState(config), sample(0, null, -10), config).level,
       ).toBe(0.55);
+    });
+
+    it('falls back to nightHours with neither lux nor sun, and starts from its verdict', () => {
+      const night = updateBrightness(
+        createBrightnessState(CONFIG),
+        sample(0, null, null, 22),
+        CONFIG,
+      );
+      expect(night).toMatchObject({ night: true, level: 0.16, target: 0.16, updatedAt: 0 });
+      const day = updateBrightness(
+        createBrightnessState(CONFIG),
+        sample(0, null, null, 12),
+        CONFIG,
+      );
+      expect(day).toMatchObject({ night: false, level: 1 });
+      // Evening comes: the night level fades in with the fall time constant.
+      const evening = updateBrightness(day, sample(400, null, null, 19), CONFIG);
+      expect(evening.night).toBe(true);
+      expect(evening.level).toBeCloseTo(0.16 + 0.84 * Math.exp(-1), 12);
+    });
+
+    it('prefers the sun over nightHours', () => {
+      const s = updateBrightness(createBrightnessState(CONFIG), sample(0, null, 30, 22), CONFIG);
+      expect(s).toMatchObject({ night: false, level: 1 });
+      const t = updateBrightness(createBrightnessState(CONFIG), sample(0, null, -10, 12), CONFIG);
+      expect(t).toMatchObject({ night: true, level: 0.16 });
+    });
+
+    it('holds when nightHours is off and nothing else is known', () => {
+      const config = { ...CONFIG, nightHours: null };
+      const s = updateBrightness(createBrightnessState(config), sample(0, null, null, 22), config);
+      expect(s).toEqual(createBrightnessState(config));
+    });
+
+    it('reaches 80 % within 1.5 s of leaving a dark tunnel into sunshine (default config)', () => {
+      const config = DEFAULT_CONFIG.display.brightness;
+      let s = updateBrightness(createBrightnessState(config), sample(0, 2), config);
+      for (let at = 100; at <= 30_000; at += 100) s = updateBrightness(s, sample(at, 2), config);
+      expect(s.night).toBe(true);
+      expect(s.level).toBeLessThan(0.15);
+      for (let at = 30_100; at <= 31_500; at += 100) {
+        s = updateBrightness(s, sample(at, 50_000), config);
+      }
+      expect(s.night).toBe(false);
+      expect(s.level).toBeGreaterThanOrEqual(0.8);
     });
 
     it('holds the last level with neither lux nor sun, but respects a narrowed range', () => {
@@ -183,6 +264,20 @@ describe('updateBrightness', () => {
         maxLevel: 0.6,
       });
       expect(narrowed.level).toBe(0.6);
+    });
+
+    it('snaps to the light sensor’s first reading after a sun or clock guess', () => {
+      const guessed = updateBrightness(createBrightnessState(CONFIG), sample(0, null, 30), CONFIG);
+      expect(guessed).toMatchObject({ level: 1, night: false, luxSeen: false });
+      // The sensor comes up in a dark garage at noon.
+      const first = updateBrightness(guessed, sample(300, 1, 30), CONFIG);
+      expect(first).toMatchObject({ level: 0.08, night: true, luxSeen: true });
+      // Afterwards it smooths as usual, also when the sensor drops out and comes back.
+      const stale = updateBrightness(first, sample(10_000, null, 30), CONFIG);
+      expect(stale.level).toBeGreaterThan(0.08);
+      expect(stale.level).toBeLessThan(1);
+      const back = updateBrightness(stale, sample(10_100, 1, 30), CONFIG);
+      expect(back.level).toBeGreaterThan(0.08);
     });
 
     it('snaps on the first real sample even after holding', () => {
@@ -226,26 +321,73 @@ describe('updateBrightness', () => {
 
   describe('night mode', () => {
     it("'sensor' uses lux with hysteresis", () => {
+      const dwell = NIGHT_ENTER_DWELL_MS;
       const states = feed(createBrightnessState(CONFIG), [
         sample(0, 100),
-        sample(1, 50),
-        sample(2, 49),
-        sample(3, 100),
-        sample(4, 150),
-        sample(5, 151),
-        sample(6, 100),
+        sample(1000, 50),
+        sample(2000, 49),
+        sample(2000 + dwell, 49),
+        sample(5000, 100),
+        sample(6000, 150),
+        sample(7000, 151),
+        sample(8000, 100),
       ]);
-      expect(states.map((s) => s.night)).toEqual([false, false, true, true, true, false, false]);
+      expect(states.map((s) => s.night)).toEqual([
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false,
+        false,
+      ]);
     });
 
-    it("'sensor' falls back to the sun, then holds, without lux", () => {
+    it("'sensor' needs NIGHT_ENTER_DWELL_MS of darkness before night, but dims at once", () => {
+      const states = feed(settled(10_000), [
+        sample(1000, 5), // under a bridge
+        sample(1000 + NIGHT_ENTER_DWELL_MS - 1, 5),
+        sample(2600, 10_000), // out again: the dark spell is over
+        sample(3000, 5),
+        sample(3000 + NIGHT_ENTER_DWELL_MS - 1, 5),
+        sample(3000 + NIGHT_ENTER_DWELL_MS, 5), // a tunnel
+      ]);
+      expect(states.map((s) => s.night)).toEqual([false, false, false, false, false, true]);
+      expect(states.map((s) => s.darkSince)).toEqual([1000, 1000, null, 3000, 3000, null]);
+      expect(states[1]?.level).toBeLessThan(0.15);
+    });
+
+    it("'sensor' goes to night at once on the very first reading in the dark", () => {
+      const s = updateBrightness(createBrightnessState(CONFIG), sample(0, 3), CONFIG);
+      expect(s.night).toBe(true);
+    });
+
+    it("'sensor' falls back to the sun, then nightHours, then holds, without lux", () => {
       const states = feed(createBrightnessState(CONFIG), [
         sample(0, null, -10),
         sample(1, null, null),
         sample(2, null, 5),
         sample(3, null, null),
+        sample(4, null, null, 23),
+        sample(5, null, null, null),
       ]);
-      expect(states.map((s) => s.night)).toEqual([true, true, false, false]);
+      expect(states.map((s) => s.night)).toEqual([true, true, false, false, true, true]);
+    });
+
+    it("'sun' uses nightHours without a sun elevation", () => {
+      const config = { ...CONFIG, nightMode: 'sun' as const };
+      const states = feed(
+        createBrightnessState(config),
+        [
+          sample(0, 5, null, 18.9),
+          sample(1, 5, null, 19),
+          sample(2, 5, null, 6.99),
+          sample(3, 5, null, 7),
+        ],
+        config,
+      );
+      expect(states.map((s) => s.night)).toEqual([false, true, true, false]);
     });
 
     it("'sun' switches at nightSunElevationDeg and holds when unknown", () => {

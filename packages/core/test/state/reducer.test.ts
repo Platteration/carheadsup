@@ -979,7 +979,7 @@ describe('tick', () => {
     h.tick(T0 + 6000);
     h.idle(T0 + 30_000);
     expect(h.state.env.brightness.night).toBe(false);
-    expect(h.state.env.brightness.target).toBeCloseTo(0.8);
+    expect(h.state.env.brightness.target).toBe(1);
   });
 
   it('prefers the phone location over the fallback location for the sun', () => {
@@ -994,6 +994,95 @@ describe('tick', () => {
     h.send({ type: 'location/update', lat: 21.3, lon: -157.9, accuracyM: 10, at: T0 + 2000 });
     h.tick(T0 + 3000);
     expect(h.state.env.brightness.night).toBe(true);
+  });
+
+  describe('night mode without a light sensor or a phone', () => {
+    const NO_LOCATION_ZONE = (utcOffsetMin: number) => ({
+      name: 'Etc/GMT-10',
+      utcOffsetMin,
+      location: null,
+    });
+
+    it('goes to night by the local time (nightHours) within one tick', () => {
+      // 12:00 UTC is 22:00 at UTC+10; the zone has no location, so only the clock is known.
+      const h = new Harness();
+      expect(h.state.env.brightness.level).toBe(1);
+      h.send({ type: 'clock/zone', zone: NO_LOCATION_ZONE(600), at: T0 });
+      h.tick(T0 + 100);
+      expect(h.state.env.brightness.night).toBe(true);
+      expect(h.state.env.brightness.level).toBeLessThanOrEqual(0.2);
+      expect(h.frame().theme).toEqual({ night: true, brightness: h.state.env.brightness.level });
+      // 12:00 at UTC+0: daytime.
+      const noon = new Harness();
+      noon.send({ type: 'clock/zone', zone: NO_LOCATION_ZONE(0), at: T0 });
+      expect(noon.state.env.brightness).toMatchObject({ night: false, level: 1 });
+    });
+
+    it('follows the sun at the time zone’s principal city', () => {
+      // 22:00 UTC is midnight in Berlin (summer time).
+      const h = new Harness(makeConfig(), persisted(), T0 + 10 * 3_600_000);
+      h.send({
+        type: 'clock/zone',
+        zone: { name: 'Europe/Berlin', utcOffsetMin: 120, location: { lat: 52.5, lon: 13.4 } },
+        at: h.now,
+      });
+      expect(h.state.env.brightness.night).toBe(true);
+      expect(h.state.env.timeZone?.name).toBe('Europe/Berlin');
+    });
+
+    it('ignores a time zone report with an impossible offset', () => {
+      const h = new Harness();
+      const before = h.state;
+      h.send({ type: 'clock/zone', zone: NO_LOCATION_ZONE(Number.NaN), at: T0 });
+      h.send({ type: 'clock/zone', zone: NO_LOCATION_ZONE(24 * 60), at: T0 });
+      expect(h.state.env).toBe(before.env);
+    });
+
+    it('remembers the phone’s location, rounded, across a restart', () => {
+      const h = new Harness();
+      // Honolulu: 12:00 UTC is 02:00 local.
+      h.send({ type: 'location/update', lat: 21.3069, lon: -157.8583, accuracyM: 10, at: T0 });
+      expect(h.state.env.lastLocation).toEqual({ lat: 21.3, lon: -157.9 });
+      expect(h.lastEffects).toEqual([{ type: 'persist' }]);
+      // Moving within the same rounded cell asks for no write.
+      h.send({ type: 'location/update', lat: 21.31, lon: -157.86, accuracyM: 10, at: T0 + 1000 });
+      expect(h.lastEffects).toEqual([]);
+      const saved = extractPersisted(h.state);
+      expect(saved.lastLocation).toEqual({ lat: 21.3, lon: -157.9 });
+
+      // Next start, before the phone connects (and with a Berlin system time zone, which
+      // the remembered location beats): night in Honolulu from the first tick.
+      const next = new Harness(makeConfig(), persisted(saved), T0 + 60_000);
+      next.send({
+        type: 'clock/zone',
+        zone: { name: 'Europe/Berlin', utcOffsetMin: 120, location: { lat: 52.5, lon: 13.4 } },
+        at: next.now,
+      });
+      next.tick(next.now + 100);
+      expect(next.state.env.brightness.night).toBe(true);
+    });
+
+    it('ranks the configured fallback location above the time zone’s city', () => {
+      // At 12:00 UTC it is night in Honolulu (fallback) and day in Berlin (time zone).
+      const h = new Harness(
+        makeConfig({ sensors: { fallbackLocation: { lat: 21.3, lon: -157.9 } } }),
+      );
+      h.send({
+        type: 'clock/zone',
+        zone: { name: 'Europe/Berlin', utcOffsetMin: 120, location: { lat: 52.5, lon: 13.4 } },
+        at: T0,
+      });
+      expect(h.state.env.brightness.night).toBe(true);
+    });
+
+    it('drops an invalid persisted location', () => {
+      const h = new Harness(makeConfig(), {
+        ...persisted(),
+        lastLocation: { lat: 95, lon: 0 },
+      });
+      expect(h.state.env.lastLocation).toBeNull();
+      expect(extractPersisted(h.state).lastLocation).toBeNull();
+    });
   });
 
   it('ends the trip after the engine has been off long enough', () => {

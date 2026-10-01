@@ -4,6 +4,7 @@ import type { HudEvent } from '../types/events.ts';
 import type { MaintenanceItemStatus, MaintenanceRecord } from '../types/records.ts';
 import type { HudState } from '../types/state.ts';
 import type { GearAnchor } from '../vehicle/gear.ts';
+import { sameGeoPoint } from '../display/location.ts';
 import { callControls } from './selectors.ts';
 
 /**
@@ -13,10 +14,11 @@ import { callControls } from './selectors.ts';
  *    never while the phone is disconnected
  *  - trip.completedCount increased → trip/completed with trip.lastCompleted
  *  - a maintenance item changed into 'due-soon' or 'overdue' → maintenance/due
- *  - odometer crossed a whole km, learned gear ratios or their numbering anchor changed, or a
- *    service was recorded → persist (as does an explicit odometer/set, and a clock/sync that
- *    moved the wall clock while a trip is in progress: its saved times are wall-clock times, and
- *    a trip resumed after a restart may have been split)
+ *  - odometer crossed a whole km, learned gear ratios or their numbering anchor changed, a
+ *    service was recorded, or the phone's rounded last location moved → persist (as does an
+ *    explicit odometer/set, and a clock/sync that moved the wall clock while a trip is in
+ *    progress: its saved times are wall-clock times, and a trip resumed after a restart may have
+ *    been split)
  * Effects are listed in that order; at most one of each type.
  */
 export function deriveEffects(
@@ -74,6 +76,7 @@ function shouldPersist(prev: HudState, next: HudState, event: HudEvent): boolean
   if (crossedWholeKm(prev.odometer.km, next.odometer.km)) return true;
   if (!sameNumbers(prev.gear.learnedRatios, next.gear.learnedRatios)) return true;
   if (!sameAnchor(prev.gear.anchor, next.gear.anchor)) return true;
+  if (!sameGeoPoint(prev.env.lastLocation, next.env.lastLocation)) return true;
   return !sameRecords(prev.maintenance.records, next.maintenance.records);
 }
 

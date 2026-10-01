@@ -558,6 +558,26 @@ describe('HudEngine persistence', () => {
     expect(outputs.saved).toHaveLength(1);
   });
 
+  it('writes the phone’s rounded location, and night mode uses it on the next start', async () => {
+    const { engine, outputs } = makeEngine({
+      config: { display: { brightness: { nightMode: 'sun' } } },
+    });
+    engine.start();
+    // Honolulu: 08:00 UTC is 22:00 there.
+    engine.dispatch({ type: 'location/update', lat: 21.3069, lon: -157.8583, accuracyM: 8, at: 0 });
+    await vi.advanceTimersByTimeAsync(PERSIST_WAIT_MS);
+    expect(outputs.saved.at(-1)?.lastLocation).toEqual({ lat: 21.3, lon: -157.9 });
+    await engine.stop();
+
+    const next = makeEngine({
+      config: { display: { brightness: { nightMode: 'sun' } } },
+      persisted: outputs.saved.at(-1) ?? {},
+    });
+    next.engine.start();
+    expect(next.engine.frame.theme.night).toBe(true);
+    await next.engine.stop();
+  });
+
   it('writes service records when maintenance is marked done', async () => {
     const { engine, outputs } = makeEngine({ persisted: { odometerKm: 5000 } });
     engine.dispatch({ type: 'maintenance/done', itemId: 'oil', odometerKm: null, at: 0 });

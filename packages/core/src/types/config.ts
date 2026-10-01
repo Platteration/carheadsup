@@ -179,6 +179,15 @@ export interface ProjectionConfig {
 
 export type NightModeSource = 'sensor' | 'sun' | 'always' | 'never';
 
+/**
+ * A window of the local day, in hours since midnight (0–24, fractions allowed: 19.5 = 19:30).
+ * It runs across midnight when `start` is after `end` (19 → 7); `start` = `end` is empty.
+ */
+export interface DayHours {
+  start: number;
+  end: number;
+}
+
 export interface BrightnessConfig {
   mode: 'auto' | 'manual';
   /** Used when mode is 'manual' (0–1). */
@@ -187,7 +196,7 @@ export interface BrightnessConfig {
   maxLevel: number;
   /** Piecewise-linear lux → level curve, sorted by lux; interpolated on log10(lux). */
   curve: Array<[lux: number, level: number]>;
-  /** Time constant when getting brighter (slow, avoids flicker under trees). */
+  /** Time constant when getting brighter (a tunnel exit must not stay washed out). */
   riseTimeMs: number;
   /** Time constant when getting darker (fast, e.g. entering a tunnel). */
   fallTimeMs: number;
@@ -197,6 +206,13 @@ export interface BrightnessConfig {
   nightExitLux: number;
   /** Sun mode: night when the sun is below this elevation (degrees). */
   nightSunElevationDeg: number;
+  /**
+   * Last resort for `sun` and `sensor` night modes and for the level without a light reading,
+   * when not even a rough location is known (no phone location yet or ever, no fallback
+   * location, a system time zone without one): night during these local hours. Null: hold
+   * the last level and palette instead.
+   */
+  nightHours: DayHours | null;
 }
 
 export type SpeedLimitSignStyle = 'vienna' | 'mutcd';

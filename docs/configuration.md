@@ -163,12 +163,13 @@ Projection changes reach the HUD page at once (the `display` message), without r
 | `display.brightness.minLevel` | `0.08` | 0–1 | Floor of the automatic level. |
 | `display.brightness.maxLevel` | `1` | 0–1 | Ceiling of the automatic level. |
 | `display.brightness.curve` | see below | 1–32 points | `[lux, level]` pairs with strictly increasing lux; interpolated on log₁₀(lux). Not in the settings app: edit it by hand or with `PATCH /api/config`. |
-| `display.brightness.riseTimeMs` | `3000` | 0–600000 | Smoothing time constant when getting brighter (slow: no flicker under trees). |
+| `display.brightness.riseTimeMs` | `800` | 0–600000 | Smoothing time constant when getting brighter (quick: out of a tunnel into sunshine the HUD reaches 80 % within about 1.5 s). |
 | `display.brightness.fallTimeMs` | `400` | 0–600000 | Time constant when getting darker (fast: tunnels). |
-| `display.brightness.nightMode` | `"sensor"` | `sensor`, `sun`, `always`, `never` | Source of the night palette. `sensor` falls back to the sun when there is no light reading. |
-| `display.brightness.nightEnterLux` | `50` | 0–100000 | `sensor`: night below this… |
+| `display.brightness.nightMode` | `"sensor"` | `sensor`, `sun`, `always`, `never` | Source of the night palette. `sensor` falls back to the sun when there is no light reading, `sun` and `sensor` to `nightHours` when no location is known at all. |
+| `display.brightness.nightEnterLux` | `50` | 0–100000 | `sensor`: night once the light has stayed below this for 1.5 s (an underpass or a bridge's shadow does not switch the palette; the level dims at once)… |
 | `display.brightness.nightExitLux` | `150` | 0–100000 | …and day again above this (hysteresis). |
 | `display.brightness.nightSunElevationDeg` | `-4` | −18–10 | `sun`: night while the sun is below this elevation (degrees). |
+| `display.brightness.nightHours` | `{ "start": 19, "end": 7 }` | `null` or hours 0–24 | Last resort, when there is no light reading and no location at all (see below): night during these hours of the local day (`start` after `end` runs across midnight; 19.5 is 19:30). `null`: keep the last level and palette instead. |
 
 The default curve runs from a dark road to direct sun on the windshield:
 
@@ -177,9 +178,22 @@ The default curve runs from a dark road to direct sun on the windshield:
 ```
 
 In `auto` mode the level follows the light sensor through the curve, clamped to
-`minLevel`–`maxLevel` and smoothed. Without a fresh reading it follows the sun instead (day:
-80 % of `maxLevel`, night: twice `minLevel`), using the phone's last GPS position or
-`sensors.fallbackLocation`; with neither it keeps the last level. The driver's
+`minLevel`–`maxLevel` and smoothed; the sensor's first reading after a start applies at once.
+Without a fresh reading it follows the sun instead (day: `maxLevel`, night: twice `minLevel`),
+taken at the first location known of:
+
+1. the phone's GPS position, while the phone sends one;
+2. the phone's last position from an earlier drive (rounded to 0.1°, about 11 km, and kept in
+   `state.json`), so night mode is right from the first frame, before the phone connects;
+3. `sensors.fallbackLocation`;
+4. the principal city of the HUD's system time zone (from the tz database's `zone1970.tab` and
+   `zone.tab`; e.g. Berlin for `Europe/Berlin`) — a few hundred kilometres off at worst, which
+   moves sunset by minutes. The server logs which zone it found at start-up.
+
+With none of these (the system time zone is UTC or another zone without a city), it goes by the
+local time against `nightHours`, and with that off it keeps the last level. So set the system
+time zone (`sudo timedatectl set-timezone Europe/Berlin`); the server warns at start-up when it
+has no location and nothing else tells day from night. The driver's
 brightness-up/down input trims the result by ±0.1 per step (at most ±0.5), and the final value
 never drops below 0.05. It is applied to the display's Linux backlight device when it has one
 (through a 2.2 gamma; the page is then drawn at full brightness, so the content is not dimmed
@@ -346,7 +360,7 @@ instead of guessing one from an earlier service.
 | `sensors.swcButtons.fullScaleV` | `4.096` | `6.144`, `4.096`, `2.048`, `1.024`, `0.512`, `0.256` | Input range in ± volts (programmable gain 2/3, 1, 2, 4, 8, 16). ±4.096 V for a ladder pulled up to 3.3 V. The idle range and every window must lie within it. |
 | `sensors.swcButtons.idle` | `{ "minV": 3, "maxV": 3.6 }` | 0–6.144 V, `minV < maxV` | The voltage with no button pressed. |
 | `sensors.swcButtons.windows` | `[]` | ≤ 16 | One per button: `{ "minV", "maxV", "action", "longPressAction" }` — volts (`minV < maxV`, ends included) and actions as for the CAN rules. Windows must not overlap each other or the idle range; leave gaps. A button counts once three readings in a row (60 ms) fall into its window, and is released by three readings anywhere else. A button already held when the HUD starts is ignored until released. To find the voltages, see [calibrating](hardware.md#resistor-ladder-an-ads1115-on-the-button-wire). |
-| `sensors.fallbackLocation` | `null` | `{ "lat": …, "lon": … }` | Location for sun-based brightness and night mode when the phone has not sent one. |
+| `sensors.fallbackLocation` | `null` | `{ "lat": …, "lon": … }` | Location for sun-based brightness and night mode when the phone has not sent one, this drive or an earlier one; it is preferred to the time zone's city ([details](#displaybrightness)). |
 | `sensors.adasUdpPort` | `null` | 1–65535 | UDP port for an [ADAS module](protocol.md#adas-udp-feed); `null` = off. Which devices may send to it: `adasAllowedSenders`, below. |
 | `sensors.adasAllowedSenders` | `[]` | ≤ 32 IPv4 / IPv6 addresses | The addresses the ADAS feed accepts datagrams from, e.g. `["10.42.0.50"]` — give the module a fixed address first. The feed listens on IPv4 only, so list the module's IPv4 address (IPv6 entries are valid but match nothing today). Addresses only: no host names, prefixes (`/24`), ports or `%zone` suffixes; each address once. Compared in canonical form, so `::ffff:10.42.0.50` is `10.42.0.50` and IPv6 case and zero-compression do not matter. Datagrams from anyone else are dropped and counted in a log warning (at most every 10 s). **Empty = any device on the car's network**, which can then raise or hide collision warnings; the HUD logs a warning when the feed starts that way and the settings app shows one. A change applies at once without reopening the port; removing an address that is sending ends its link immediately. Filtering by source address keeps out other devices on the Wi-Fi, not an attacker who forges the module's address — see the [trust note](protocol.md#adas-udp-feed). |
 

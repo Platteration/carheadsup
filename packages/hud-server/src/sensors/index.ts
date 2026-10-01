@@ -9,6 +9,7 @@ import { openI2cBus, type I2cOpener } from './i2c.ts';
 import { LightSensorSource } from './light/source.ts';
 import { defaultSpawn, type SpawnFn } from './process.ts';
 import { SwcButtonSource } from './swc/source.ts';
+import { TimeZoneSource, type TimeZoneProbe } from './time-zone.ts';
 
 export { AdasUdpSource } from './adas-udp.ts';
 export { CanButtonSource } from './can/source.ts';
@@ -16,6 +17,7 @@ export { GestureSensorSource } from './gesture/source.ts';
 export { GpioButtonSource } from './gpio/source.ts';
 export { LightSensorSource } from './light/source.ts';
 export { SwcButtonSource } from './swc/source.ts';
+export { TimeZoneSource } from './time-zone.ts';
 
 /**
  * Hardware seams, all optional (defaults: the `i2c-bus` package loaded lazily,
@@ -30,11 +32,14 @@ export interface SensorIo {
   adasBindAddress?: string;
   /** Delay before a failed I2C device is re-initialised (default 10 s). */
   i2cRetryMs?: number;
+  /** The system time zone (default: the one Node runs in). */
+  timeZone?: TimeZoneProbe;
 }
 
 /**
  * Hardware input sources enabled by `config.sensors`: ambient light sensor, gesture sensor,
- * GPIO buttons, steering-wheel buttons (CAN bus and resistor ladder), ADAS UDP feed. Sources
+ * GPIO buttons, steering-wheel buttons (CAN bus and resistor ladder), ADAS UDP feed — and the
+ * system time zone (local time and a rough location for night mode), always on. Sources
  * whose hardware is absent log once and stay idle rather than failing the HUD.
  *
  * One source per kind is always returned — a kind that is disabled ('none', no button lines,
@@ -56,5 +61,6 @@ export function createSensorSources(config: HudConfig, io: SensorIo = {}): Event
       createSocket: io.createUdpSocket ?? defaultUdpSocketFactory,
       bindAddress: io.adasBindAddress,
     }),
+    new TimeZoneSource(config, io.timeZone),
   ];
 }
