@@ -132,6 +132,11 @@ export const PHONE_TIME_MIN_MS = Date.UTC(2024, 0, 1);
 export const PHONE_TIME_TOLERANCE_MS = 2000;
 /** Samples whose estimated delay is longer than this are too uncertain to use. */
 export const PHONE_TIME_MAX_DELAY_MS = 10_000;
+/**
+ * The system clock moving against the monotonic clock by more than this between two readings
+ * was set (stepped), not jitter: see {@link WallClock}.
+ */
+export const SYSTEM_STEP_TOLERANCE_MS = 1000;
 
 /**
  * The HUD's wall clock: the system clock, corrected where it is known to be wrong. The HUD never
@@ -147,19 +152,33 @@ export const PHONE_TIME_MAX_DELAY_MS = 10_000;
  * - The paired phone's clock ({@link phoneTime}) is right whenever the system clock is not
  *   synchronised: the phone has network time. Its readings set the correction (trusted) when
  *   they disagree by more than {@link PHONE_TIME_TOLERANCE_MS}, and confirm it otherwise.
+ * - While it follows the saved time or the phone, a step of the system clock (measured against
+ *   the monotonic clock: network time arriving before {@link setSynchronized} is told, or someone
+ *   setting the clock) does not move the wall clock — adding it to the correction would put the
+ *   wall clock off by the whole step, years on a Pi that restored an old time. The correction
+ *   absorbs it instead; and a system clock set at or past the saved time is taken as it is,
+ *   trusted, as at start-up. Following the system clock, the wall clock follows its steps.
  *
  * Pure (no I/O, browser-safe): the server tells it about network time and the phone.
  */
 export class WallClock {
-  private readonly system: Clock;
+  private readonly systemClock: Clock;
+  private readonly monotonic: Clock;
   private correction = 0;
   private trustedNow = true;
   private synchronised = false;
   private sourceNow: WallClockSource = 'system';
+  /** System clock − monotonic clock at the last reading (null before the first). */
+  private systemBase: number | null = null;
 
-  /** @param system the system clock, epoch ms. */
-  constructor(system: Clock) {
-    this.system = system;
+  /**
+   * @param system the system clock, epoch ms.
+   * @param monotonic a monotonic ms counter to tell steps of the system clock by; default
+   *   `system` without its backward steps (only backward steps are told then).
+   */
+  constructor(system: Clock, monotonic: Clock = monotonicView(system)) {
+    this.systemClock = system;
+    this.monotonic = monotonic;
   }
 
   /** The wall clock now, epoch ms (non-finite when the system clock reads non-finite). */
@@ -237,5 +256,31 @@ export class WallClock {
     this.trustedNow = true;
     this.sourceNow = 'phone';
     return 'set';
+  }
+
+  /**
+   * Read the system clock. While the wall clock follows the saved time or the phone, a step of
+   * the system clock since the last reading is taken out of the correction (see the class).
+   */
+  private system(): number {
+    const system = this.systemClock();
+    const mono = this.monotonic();
+    if (!Number.isFinite(system) || !Number.isFinite(mono)) return system;
+    const base = system - mono;
+    const previous = this.systemBase;
+    this.systemBase = base;
+    if (previous === null || (this.sourceNow !== 'saved' && this.sourceNow !== 'phone')) {
+      return system;
+    }
+    const step = Math.round(base - previous);
+    if (Math.abs(step) <= SYSTEM_STEP_TOLERANCE_MS) return system;
+    this.correction -= step;
+    if (this.sourceNow === 'saved' && this.correction <= 0) {
+      // Set at or past the time the HUD last saved: no reason for doubt, as at start-up.
+      this.correction = 0;
+      this.trustedNow = true;
+      this.sourceNow = 'system';
+    }
+    return system;
   }
 }

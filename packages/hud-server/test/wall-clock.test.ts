@@ -91,6 +91,50 @@ describe('the HUD wall clock on a Pi without network time', () => {
     await waitFor(() => Math.abs(hudWall(t) - Date.now()) < 2000, 2000, 'the phone time');
   });
 
+  it('does not jump when network time sets the system clock before the HUD notices', async () => {
+    // The Pi restored a time 200 days ago; timesyncd will set it, and its flag is looked at only
+    // every 30 s.
+    const system = { offsetMs: -200 * DAY };
+    const t = await start({
+      now: () => Date.now() + system.offsetMs,
+      monotonic: () => performance.now(),
+      files: { 'state.json': JSON.stringify({ lastWallMs: Date.now() - 100 * DAY }) },
+    });
+    const engine = t.server.engine;
+    const { socket } = await connectTestPhone(t.phoneBase, { time: Date.now() });
+    closers.push(() => socket.close());
+    await waitFor(() => engine.state.clock.trusted, 2000, 'a trusted clock');
+    expect(Math.abs(hudWall(t) - Date.now())).toBeLessThan(2000);
+    const logged = t.logger.text('info').length;
+
+    system.offsetMs = 0;
+    engine.dispatch({ type: 'tick', at: 0 });
+    // Not 200 days ahead: the step is not added to the phone's correction.
+    expect(Math.abs(hudWall(t) - Date.now())).toBeLessThan(2000);
+    expect(t.logger.text('info').slice(logged)).not.toContain('moved');
+    engine.dispatch({ type: 'odometer/set', odometerKm: 1000, at: 0 });
+    await engine.flushPersistence();
+    const file = JSON.parse(
+      await readFile(join(t.dataDir, 'state.json'), 'utf8'),
+    ) as PersistedState;
+    expect(Math.abs((file.lastWallMs ?? 0) - Date.now())).toBeLessThan(5000);
+  });
+
+  it('takes the system clock as it is once it is set past the saved time', async () => {
+    const system = { offsetMs: -200 * DAY };
+    const t = await start({
+      now: () => Date.now() + system.offsetMs,
+      monotonic: () => performance.now(),
+      files: { 'state.json': JSON.stringify({ lastWallMs: Date.now() - 100 * DAY }) },
+    });
+    const engine = t.server.engine;
+    expect(engine.state.clock.trusted).toBe(false);
+    system.offsetMs = 0;
+    engine.dispatch({ type: 'tick', at: 0 });
+    expect(engine.state.clock.trusted).toBe(true);
+    expect(Math.abs(hudWall(t) - Date.now())).toBeLessThan(2000);
+  });
+
   it('takes neither the saved time nor the phone’s once the system clock has network time', async () => {
     const system = Date.now();
     const t = await start({

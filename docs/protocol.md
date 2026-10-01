@@ -473,6 +473,10 @@ clock (`WallClock`, `hud-server/src/clock.ts`; it never sets the system clock):
   hidden, a trip in progress before the restart waits up to 3 minutes for the real time to tell
   whether the break was long, and services recorded meanwhile are dated again
   ([details](architecture.md#engine-time-and-the-wall-clock)).
+- While the HUD follows the phone or its saved time, the system clock being set (network time
+  arriving before the 30 s check sees it, measured against a monotonic clock) does not move the
+  HUD's clock — the step is not added on top of the correction. A system clock set at or past
+  the saved time is taken as it is, trusted, as at start-up.
 
 ### HUD → phone
 

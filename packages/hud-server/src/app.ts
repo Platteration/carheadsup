@@ -205,10 +205,11 @@ export function createHudServer(options: HudServerOptions): HudServer {
   const stopTimeoutMs = tuning.stopTimeoutMs ?? STOP_STEP_TIMEOUT_MS;
 
   // The HUD's wall clock: the system clock, corrected from the phone while it is not
-  // synchronised, and never earlier at start-up than the time the HUD last saved.
-  const wallClock = new WallClock(now);
+  // synchronised, and never earlier at start-up than the time the HUD last saved. The monotonic
+  // clock tells it when the system clock is set meanwhile.
   const monotonic =
     options.monotonic ?? (options.now === undefined ? SYSTEM_MONOTONIC : monotonicView(now));
+  const wallClock = new WallClock(now, monotonic);
   const clockSynchronized = options.clockSynchronized ?? (() => systemClockSynchronized());
   let clockCheckTimer: unknown = null;
 

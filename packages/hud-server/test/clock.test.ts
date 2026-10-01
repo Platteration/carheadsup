@@ -165,6 +165,70 @@ describe('WallClock', () => {
     expect(clock).toMatchObject({ trusted: false, correctionMs: 1000 });
   });
 
+  describe('a step of the system clock (network time arriving before the HUD notices)', () => {
+    /** A system clock that can be stepped, and the monotonic clock it runs on. */
+    const steppable = (at = T0) => {
+      const c = { mono: 0, step: 0 };
+      const clock = new WallClock(
+        () => at + c.mono + c.step,
+        () => c.mono,
+      );
+      return { c, clock };
+    };
+
+    it('does not move a wall clock that follows the phone', () => {
+      const { c, clock } = steppable();
+      clock.startFrom(T0 + 40 * DAY);
+      const real = T0 + 200 * DAY;
+      expect(clock.phoneTime({ phoneMs: real, delayMs: 0 })).toBe('set');
+      c.mono += 10_000;
+      expect(clock.now()).toBe(real + 10_000);
+      // timesyncd steps the system clock to the real time; its flag is not looked at yet.
+      c.step = 200 * DAY;
+      expect(clock.now()).toBe(real + 10_000);
+      c.mono += 5000;
+      expect(clock.now()).toBe(real + 15_000);
+      expect(clock).toMatchObject({ trusted: true, source: 'phone', correctionMs: 0 });
+      // The phone agrees, and network time then changes nothing either.
+      expect(clock.phoneTime({ phoneMs: real + 15_000, delayMs: 0 })).toBe('confirmed');
+      expect(clock.setSynchronized(true)).toBe(true);
+      expect(clock.now()).toBe(real + 15_000);
+    });
+
+    it('takes a system clock set past the saved time as it is, trusted', () => {
+      const { c, clock } = steppable();
+      const saved = T0 + 40 * DAY;
+      clock.startFrom(saved);
+      c.mono += 10_000;
+      expect(clock.now()).toBe(saved + 10_000);
+      c.step = 200 * DAY;
+      expect(clock.now()).toBe(T0 + 200 * DAY + 10_000);
+      expect(clock).toMatchObject({ trusted: true, source: 'system', correctionMs: 0 });
+    });
+
+    it('keeps counting from the saved time when the system clock is set to before it', () => {
+      const { c, clock } = steppable();
+      const saved = T0 + 40 * DAY;
+      clock.startFrom(saved);
+      c.mono += 10_000;
+      c.step = 10 * DAY;
+      expect(clock.now()).toBe(saved + 10_000);
+      c.step = -DAY;
+      c.mono += 1000;
+      expect(clock.now()).toBe(saved + 11_000);
+      expect(clock).toMatchObject({ trusted: false, source: 'saved' });
+    });
+
+    it('follows the system clock it has no reason to doubt', () => {
+      const { c, clock } = steppable();
+      c.step = 3 * DAY;
+      expect(clock.now()).toBe(T0 + 3 * DAY);
+      c.step = -60_000;
+      expect(clock.now()).toBe(T0 - 60_000);
+      expect(clock).toMatchObject({ trusted: true, source: 'system', correctionMs: 0 });
+    });
+  });
+
   it('defers to network time: no correction, no phone, no saved time', () => {
     const { clock } = systemClock();
     clock.startFrom(T0 + DAY);
