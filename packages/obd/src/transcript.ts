@@ -13,7 +13,8 @@
  *
  * `t` is milliseconds since the link opened; `tx` is what the HUD wrote, `rx` one chunk exactly as
  * it arrived (chunks are not merged: where the link splits a line matters), and `close` the end
- * of the link (the error, or null when the HUD closed it). Text is latin1, as on the wire.
+ * of the link (the error, or null when the HUD closed it). Text is latin1, as on the wire (one
+ * character per byte; the file itself is UTF-8, so read it as UTF-8).
  */
 import type { Clock, Timers } from './runtime.ts';
 import { TransportEvents, type Transport } from './transport.ts';

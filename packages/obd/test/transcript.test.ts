@@ -324,7 +324,7 @@ describe('the committed transcripts', () => {
 
   it('emulator-can-chunked.jsonl: answers split across chunks still decode', async () => {
     const transcript = parseTranscript(
-      await readFile(file('emulator-can-chunked.jsonl'), 'latin1'),
+      await readFile(file('emulator-can-chunked.jsonl'), 'utf8'),
     );
     // Some answers really are split mid-line.
     expect(

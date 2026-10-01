@@ -113,6 +113,27 @@ describe('TranscriptFiles', () => {
     ]);
   });
 
+  it('keeps line noise byte for byte (latin1 on the wire, UTF-8 in the file)', async () => {
+    const temp = await makeTempDir();
+    try {
+      const clock = new FakeClock(0);
+      const transcripts = new TranscriptFiles({
+        dir: temp.dir,
+        timers: clock,
+        logger: memoryLogger(),
+      });
+      const sink = transcripts.createSink(HEADER);
+      const noise = '\u00ff\u0080\u0000>\r';
+      sink.write({ t: 1, rx: noise });
+      await sink.close();
+      const [name] = await readdir(temp.dir);
+      const read = parseTranscript(await readFile(join(temp.dir, name ?? ''), 'utf8'));
+      expect(read.entries).toEqual([{ t: 1, rx: noise }]);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
   it('gives up on a session it cannot write, saying so once', async () => {
     const { fs, clock, logger, transcripts } = files();
     fs.failWith = 'EROFS';
@@ -192,7 +213,7 @@ describe('recording on the HUD', () => {
     const dir = join(dataDir, 'obd-transcripts');
     const names = await readdir(dir);
     expect(names).toHaveLength(1);
-    const transcript = parseTranscript(await readFile(join(dir, names[0] ?? ''), 'latin1'));
+    const transcript = parseTranscript(await readFile(join(dir, names[0] ?? ''), 'utf8'));
     expect(transcript.header.transport).toBe(`tcp 127.0.0.1:${adapter.port}`);
     expect(transcript.entries[0]).toMatchObject({ tx: 'ATZ\r' });
     expect(transcript.entries.at(-1)).toMatchObject({ close: null });

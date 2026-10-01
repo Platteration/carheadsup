@@ -64,7 +64,7 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const transcript = parseTranscript(await readFile(file, 'latin1'));
+  const transcript = parseTranscript(await readFile(file, 'utf8'));
   const debug = (...args: unknown[]): void => {
     process.stderr.write(`${args.map(String).join(' ')}\n`);
   };
