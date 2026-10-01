@@ -184,19 +184,25 @@ describe('nav', () => {
     approach: null,
   };
 
-  it('uses the phone app icon only for unknown maneuvers', () => {
+  it('uses the phone app icon only for unknown maneuvers, as a mask in the accent colour', () => {
     const png =
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
-    expect(render({ ...base, iconPng: png })).toContain(`src="data:image/png;base64,${png}"`);
+    const html = render({ ...base, iconPng: png });
+    // A mask, not an <img>: its own colours never reach the windshield.
+    expect(html).not.toContain('<img');
+    expect(html).toContain('class="hud-nav__png"');
+    expect(html).toContain(`--hud-nav-icon:url(&quot;data:image/png;base64,${png}&quot;)`);
     const known = render({ ...base, maneuver: { type: 'left' }, iconPng: png });
-    expect(known).not.toContain('<img');
+    expect(known).not.toContain('hud-nav__png');
     expect(known).toContain('data-maneuver="left"');
   });
 
   it('falls back to the drawn icon when the PNG is not plain base64', () => {
-    const html = render({ ...base, iconPng: 'javascript:alert(1)' });
-    expect(html).not.toContain('<img');
-    expect(html).toContain('data-maneuver="unknown"');
+    for (const iconPng of ['javascript:alert(1)', 'QUJD")', "QUJD');background:url(x"]) {
+      const html = render({ ...base, iconPng });
+      expect(html).not.toContain('hud-nav__png');
+      expect(html).toContain('data-maneuver="unknown"');
+    }
   });
 
   it('splits the distance so the unit is typeset smaller', () => {

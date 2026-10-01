@@ -328,7 +328,7 @@ the user confirms it).
 | `then` | A maneuver that follows right after this one, or null. |
 | `lanes` | Up to 16 lanes, left to right: `{ "directions": [...], "recommended": true, "activeDirection": "slight-right" }`. Directions: `straight`, `slight-left`, `left`, `sharp-left`, `slight-right`, `right`, `sharp-right`, `uturn-left`, `uturn-right`, `merge-left`, `merge-right`. |
 | `etaEpochMs`, `remainingDistanceM`, `remainingSeconds` | ≥ 0. |
-| `iconPng` | Base64 PNG of the nav app's arrow, ≤ 44 KiB of base64 (a 32 KiB PNG); drawn when `maneuver.type` is `unknown`. |
+| `iconPng` | Base64 PNG of the nav app's arrow, ≤ 44 KiB of base64 (a 32 KiB PNG); drawn when `maneuver.type` is `unknown`, as a mask in the HUD's accent colour — so the companion sends it white where the arrow is and transparent elsewhere (its `IconMask`), not in the app's colours. |
 
 A roundabout: `"maneuver": { "type": "roundabout-ccw", "roundaboutExit": 2, "roundaboutAngle": 180 }`.
 Lanes for a right exit on a four-lane road:
@@ -640,7 +640,8 @@ Points a renderer of its own must know (the full contract is `types/frame.ts`):
 - `widgets` holds only what is to be drawn now, most important first within a zone; a widget
   whose data is stale or irrelevant is simply absent.
 - The nav widget's `iconPng` is non-null only when `maneuver.type` is `unknown`: draw the phone's
-  icon then, and the HUD's own arrow for every known maneuver. `maneuver.instruction` is null
+  icon then — as a mask (its alpha) filled with the accent colour, like the HUD's own arrows, never
+  in its own colours — and the HUD's own arrow for every known maneuver. `maneuver.instruction` is null
   while the car moves.
 - `diagnostics` is non-null in the `parked` context, and in the `stopped` context once the
   driver opened the dashboard with `next-page` / `prev-page` (until `secondary` or driving off

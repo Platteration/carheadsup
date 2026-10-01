@@ -1,11 +1,15 @@
 package dev.carheadsup.companion
 
 import android.app.Application
+import android.app.UiModeManager
+import android.content.res.Configuration
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.format.DateFormat
 import android.util.Log
 import dev.carheadsup.companion.calls.CallMonitor
+import dev.carheadsup.companion.data.NavCaptureStore
 import dev.carheadsup.companion.data.SettingsStore
 import dev.carheadsup.companion.data.TripStore
 import dev.carheadsup.companion.hud.HudApi
@@ -27,12 +31,15 @@ import dev.carheadsup.protocol.HudToPhone
 import dev.carheadsup.protocol.HudTripCompleted
 import dev.carheadsup.protocol.HudTrips
 import dev.carheadsup.protocol.HudWelcome
+import dev.carheadsup.protocol.PhoneNav
 import dev.carheadsup.protocol.api.DisplayUnits
 import dev.carheadsup.protocol.api.FuelEconomyUnit
 import dev.carheadsup.protocol.api.TripFormatter
 import dev.carheadsup.protocol.api.UnitSystem
 import dev.carheadsup.protocol.auth.HudPin
 import dev.carheadsup.protocol.hazards.HazardAggregator
+import dev.carheadsup.protocol.nav.NavNotificationContent
+import dev.carheadsup.protocol.nav.NavParseStats
 import dev.carheadsup.protocol.traffic.TomTomTraffic
 import dev.carheadsup.protocol.traffic.TrafficState
 import dev.carheadsup.protocol.traffic.TrafficStatus
@@ -41,6 +48,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.io.File
@@ -48,6 +56,13 @@ import java.time.ZoneId
 import java.util.Currency
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+
+/** What the phone knows about Google Maps' guidance and Android Auto (the Status screen). */
+data class NavStatus(
+    val stats: NavParseStats = NavParseStats(),
+    /** Since when Android Auto has been projecting (`SystemClock.elapsedRealtime`), or null. */
+    val projectingSinceMs: Long? = null,
+)
 
 /**
  * The app's long-lived objects, shared by the activity, the connection service and the
@@ -77,6 +92,18 @@ class AppGraph(private val app: Application) {
 
     /** True while the system has our notification listener bound (notification access granted). */
     val listenerConnected = MutableStateFlow(false)
+
+    private val navStatusState = MutableStateFlow(NavStatus())
+
+    /** How well Maps' guidance is understood, and whether Android Auto projects. */
+    val navStatus: StateFlow<NavStatus> = navStatusState
+
+    /** The capture of Maps' notifications (Setup), when switched on. */
+    val navCapture = NavCaptureStore(File(app.filesDir, "nav-capture.jsonl"))
+
+    /** Android Auto's ongoing notification is up (set by the notification listener). */
+    @Volatile
+    var androidAutoNotification: Boolean = false
 
     val localNetwork = LocalNetwork(app)
 
@@ -186,6 +213,24 @@ class AppGraph(private val app: Application) {
     fun releaseMessageReader() {
         reader?.shutdown()
         reader = null
+    }
+
+    /** What the parser made of a Maps notification ([result], null: nothing) at [nowMs]. */
+    fun onNavParsed(content: NavNotificationContent, result: PhoneNav?, nowMs: Long) {
+        navStatusState.update { it.copy(stats = it.stats.record(content, result, nowMs)) }
+    }
+
+    /**
+     * Look again whether Android Auto projects: its ongoing notification, or the phone in car
+     * mode. Called by the notification listener and when the app comes to the foreground.
+     */
+    fun refreshProjection() {
+        val carMode = app.getSystemService(UiModeManager::class.java)?.currentModeType == Configuration.UI_MODE_TYPE_CAR
+        val projecting = androidAutoNotification || carMode
+        val now = SystemClock.elapsedRealtime()
+        navStatusState.update { status ->
+            status.copy(projectingSinceMs = if (projecting) status.projectingSinceMs ?: now else null)
+        }
     }
 
     fun formatter(): TripFormatter =

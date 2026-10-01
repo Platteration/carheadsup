@@ -1,0 +1,316 @@
+[
+  {
+    "name": "turn with distance, street and full summary (US)",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "500 ft",
+      "text": "Turn right onto Main St",
+      "subText": "12 min · 5.2 mi · 10:12 AM ETA",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "right",
+      "roundaboutExit": null,
+      "distanceM": 152.4,
+      "street": "Main St",
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": 720.0,
+      "remainingDistanceM": 8368.588800000001,
+      "etaEpochMs": 1790183520000
+    }
+  },
+  {
+    "name": "bare street with direction keeps the street; the maneuver is Maps' icon (UK format)",
+    "locale": "en-GB",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "100 yd",
+      "text": "High St towards Abingdon",
+      "subText": "13 min · 4.6 mi · 10:13 ETA",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": null,
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "unknown",
+      "roundaboutExit": null,
+      "distanceM": 91.44,
+      "street": "High St",
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": 780.0,
+      "remainingDistanceM": 7402.9824,
+      "etaEpochMs": 1790183580000
+    }
+  },
+  {
+    "name": "instruction in the title when there is no distance",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "Head north on Mission St",
+      "text": "toward 16th St",
+      "subText": "25 min · 9.8 km · 10:25 ETA",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "straight",
+      "roundaboutExit": null,
+      "distanceM": null,
+      "street": "Mission St",
+      "currentStreet": "Mission St",
+      "then": null,
+      "remainingSeconds": 1500.0,
+      "remainingDistanceM": 9800.0,
+      "etaEpochMs": 1790184300000
+    }
+  },
+  {
+    "name": "distance and instruction in the title (lock-screen style)",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "300 m - Turn left onto Elm St",
+      "text": null,
+      "subText": "5 min · 2 km · 10:05 ETA",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "left",
+      "roundaboutExit": null,
+      "distanceM": 300.0,
+      "street": "Elm St",
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": 300.0,
+      "remainingDistanceM": 2000.0,
+      "etaEpochMs": 1790183100000
+    }
+  },
+  {
+    "name": "roundabout exit and a follow-up from the expanded text",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "250 m",
+      "text": null,
+      "subText": "4 min · 1.9 km · 10:04 ETA",
+      "bigText": "At the roundabout, take the 2nd exit onto the A40\nThen turn left onto Oxford Rd",
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "roundabout-ccw",
+      "roundaboutExit": 2,
+      "distanceM": 250.0,
+      "street": "A40",
+      "currentStreet": null,
+      "then": "left",
+      "remainingSeconds": 240.0,
+      "remainingDistanceM": 1900.0,
+      "etaEpochMs": 1790183040000
+    }
+  },
+  {
+    "name": "rerouting keeps guidance without a street",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "Rerouting…",
+      "text": null,
+      "subText": null,
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "unknown",
+      "roundaboutExit": null,
+      "distanceM": null,
+      "street": null,
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": null,
+      "remainingDistanceM": null,
+      "etaEpochMs": null
+    }
+  },
+  {
+    "name": "arrival on the right",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "150 ft",
+      "text": "Your destination is on the right",
+      "subText": "1 min · 150 ft · 10:01 AM ETA",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "arrive-right",
+      "roundaboutExit": null,
+      "distanceM": 45.72,
+      "street": null,
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": 60.0,
+      "remainingDistanceM": 45.72,
+      "etaEpochMs": 1790182860000
+    }
+  },
+  {
+    "name": "Android 16 live-update chip supplies the distance",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "Turn left onto Oak Ave",
+      "text": "toward Park",
+      "subText": "3 min · 1 km · 10:03 ETA",
+      "bigText": null,
+      "shortCriticalText": "400 m",
+      "category": null,
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "left",
+      "roundaboutExit": null,
+      "distanceM": 400.0,
+      "street": "Oak Ave",
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": 180.0,
+      "remainingDistanceM": 1000.0,
+      "etaEpochMs": 1790182980000
+    }
+  },
+  {
+    "name": "remaining time derived from the ETA",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "1 km",
+      "text": "Continue onto I-80 E",
+      "subText": "12 km · 10:30 ETA",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": null,
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "straight",
+      "roundaboutExit": null,
+      "distanceM": 1000.0,
+      "street": "I-80 E",
+      "currentStreet": "I-80 E",
+      "then": null,
+      "remainingSeconds": 1800.0,
+      "remainingDistanceM": 12000.0,
+      "etaEpochMs": 1790184600000
+    }
+  },
+  {
+    "name": "an inline then-clause is the next maneuver",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "200 m",
+      "text": "Turn left, then keep right",
+      "subText": "5 min · 2.0 km · 10:05 ETA",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "left",
+      "roundaboutExit": null,
+      "distanceM": 200.0,
+      "street": null,
+      "currentStreet": null,
+      "then": "keep-right",
+      "remainingSeconds": 300.0,
+      "remainingDistanceM": 2000.0,
+      "etaEpochMs": 1790183100000
+    }
+  },
+  {
+    "name": "left-hand traffic: the roundabout runs clockwise",
+    "locale": "en-GB",
+    "zone": "Europe/London",
+    "capturedAtMs": 1790154000000,
+    "drivingSide": "left",
+    "notification": {
+      "title": "100 yd",
+      "text": "At the roundabout, take the 1st exit onto the A34",
+      "subText": "2 min · 0.5 mi · 10:02 ETA",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "roundabout-cw",
+      "roundaboutExit": 1,
+      "distanceM": 91.44,
+      "street": "A34",
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": 120.0,
+      "remainingDistanceM": 804.672,
+      "etaEpochMs": 1790154120000
+    }
+  },
+  {
+    "name": "location sharing is not navigation",
+    "locale": "en-US",
+    "zone": "America/Los_Angeles",
+    "capturedAtMs": 1790182800000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "Location sharing",
+      "text": "You're sharing your real-time location with Alice",
+      "subText": null,
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "location_sharing",
+      "isOngoing": true
+    },
+    "expected": null
+  }
+]

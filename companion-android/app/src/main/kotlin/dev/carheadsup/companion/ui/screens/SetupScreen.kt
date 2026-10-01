@@ -1,6 +1,9 @@
 package dev.carheadsup.companion.ui.screens
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.text.format.DateFormat
 import android.util.Log
@@ -28,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -45,6 +49,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.carheadsup.companion.BuildConfig
 import dev.carheadsup.companion.R
 import dev.carheadsup.companion.data.CompanionSettings
+import dev.carheadsup.companion.ui.FileExportBridge
 import dev.carheadsup.companion.ui.HudPage
 import dev.carheadsup.companion.ui.MainViewModel
 import dev.carheadsup.companion.ui.Permissions
@@ -55,12 +60,18 @@ import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.HudPin
 import dev.carheadsup.protocol.auth.PairingCode
 import dev.carheadsup.protocol.link.HudEndpoint
+import dev.carheadsup.protocol.nav.NavCaptureLog
 import dev.carheadsup.protocol.pairing.PairingScan
 import dev.carheadsup.protocol.pairing.PairingUri
 import dev.carheadsup.protocol.traffic.TomTomTraffic
 import dev.carheadsup.protocol.traffic.TrafficState
 import dev.carheadsup.protocol.traffic.TrafficStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 
 /** HUD address, pairing, privacy toggles, traffic and the entry to the HUD's own settings app. */
 @Composable
@@ -240,6 +251,8 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (HudPage) -> Unit) 
             if (page == null) Text(stringResource(R.string.hud_address_unknown), color = StatusColors.warning)
         }
 
+        SectionCard(stringResource(R.string.section_debugging)) { NavCapture(viewModel, settings) }
+
         Text(
             stringResource(R.string.about_version, BuildConfig.VERSION_NAME),
             style = MaterialTheme.typography.bodySmall,
@@ -249,6 +262,61 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (HudPage) -> Unit) 
 }
 
 private const val TAG = "SetupScreen"
+
+/**
+ * The capture of Google Maps' navigation notifications, for parser test cases: on/off, export
+ * (to Downloads, as a test case file) and delete.
+ */
+@Composable
+private fun NavCapture(viewModel: MainViewModel, settings: CompanionSettings) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var message by remember { mutableStateOf<Int?>(null) }
+    ToggleRow(
+        title = stringResource(R.string.setting_nav_capture),
+        description = stringResource(R.string.setting_nav_capture_description, NavCaptureLog.MAX_CASES),
+        checked = settings.navCapture,
+        onChange = { value -> viewModel.updateSettings { it.copy(navCapture = value) } },
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = {
+            val activity = context.findActivity() ?: return@OutlinedButton
+            scope.launch {
+                val text = viewModel.navCaptureExport()
+                message =
+                    if (text == null) {
+                        R.string.nav_capture_empty
+                    } else {
+                        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(Date())
+                        val name = "carheadsup-nav-$stamp.json"
+                        val result =
+                            withContext(Dispatchers.IO) {
+                                FileExportBridge(activity).saveFile(text, name, "application/json")
+                            }
+                        if (result == "failed") R.string.nav_capture_failed else null
+                    }
+            }
+        }) { Text(stringResource(R.string.action_export_nav_capture)) }
+        TextButton(onClick = {
+            viewModel.deleteNavCapture()
+            message = R.string.nav_capture_deleted
+        }) { Text(stringResource(R.string.action_delete_nav_capture)) }
+    }
+    message?.let {
+        Text(
+            stringResource(it),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** The activity behind a composition's context, if any. */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 /**
  * Pairing by the QR code on the HUD: the camera permission is asked for only now, the scanner

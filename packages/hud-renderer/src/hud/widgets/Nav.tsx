@@ -5,7 +5,8 @@ import { Num, Unit, WidgetRoot } from './parts.tsx';
 
 /**
  * Only accept what the phone protocol allows for `iconPng` (plain base64) and build the data URL
- * ourselves, so the string can never smuggle another URL scheme into the <img>.
+ * ourselves, so the string can never smuggle another URL scheme (or a quote that ends the CSS
+ * `url()`) into the page.
  */
 export function pngDataUrl(base64: string | null): string | null {
   if (!base64) return null;
@@ -17,6 +18,11 @@ export function pngDataUrl(base64: string | null): string | null {
 /**
  * Turn-by-turn: maneuver arrow, distance countdown, next street and an optional "then" arrow.
  * When the maneuver is imminent everything grows and an approach bar fills towards the turn.
+ *
+ * For a maneuver the HUD cannot draw itself, the phone's copy of the nav app's arrow is shown —
+ * as a mask (the companion sends it white where the arrow is), filled with the HUD's accent
+ * colour like the HUD's own arrows: the app's colours could be invisible (dark: black is
+ * transparent on the windshield) or a bright square (a solid tile), and ignore the night palette.
  */
 export function Nav({ w }: { w: NavWidget }) {
   const png = w.maneuver.type === 'unknown' ? pngDataUrl(w.iconPng) : null;
@@ -26,7 +32,7 @@ export function Nav({ w }: { w: NavWidget }) {
       <div class="hud-nav">
         <div class="hud-nav__icon">
           {png ? (
-            <img class="hud-nav__png" src={png} alt="" />
+            <span class="hud-nav__png" style={{ '--hud-nav-icon': `url("${png}")` }} />
           ) : (
             <ManeuverIcon maneuver={w.maneuver} class="hud-nav__arrow" />
           )}

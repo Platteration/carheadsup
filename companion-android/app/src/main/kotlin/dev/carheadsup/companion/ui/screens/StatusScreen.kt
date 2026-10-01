@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.carheadsup.companion.NavStatus
 import dev.carheadsup.companion.R
 import dev.carheadsup.companion.hud.LinkStatus
 import dev.carheadsup.companion.ui.MainViewModel
@@ -41,6 +42,7 @@ import dev.carheadsup.companion.ui.theme.StatusColors
 import dev.carheadsup.protocol.HudErrorCode
 import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.TrustProblem
+import dev.carheadsup.protocol.nav.AndroidAuto
 
 /** Connection status, service control and the permission checklist. */
 @Composable
@@ -49,6 +51,7 @@ fun StatusScreen(viewModel: MainViewModel) {
     val status by viewModel.linkStatus.collectAsStateWithLifecycle()
     val running by viewModel.serviceRunning.collectAsStateWithLifecycle()
     val permissions by viewModel.permissions.collectAsStateWithLifecycle()
+    val navStatus by viewModel.navStatus.collectAsStateWithLifecycle()
     var startRefused by remember { mutableStateOf(false) }
     var denied by remember { mutableStateOf(emptySet<PermissionGroup>()) }
     var pendingGroup by remember { mutableStateOf<PermissionGroup?>(null) }
@@ -88,6 +91,8 @@ fun StatusScreen(viewModel: MainViewModel) {
                 }
             }
         }
+
+        SectionCard(stringResource(R.string.section_navigation)) { NavigationSummary(navStatus) }
 
         SectionCard(stringResource(R.string.section_permissions)) {
             PermissionRow(
@@ -259,6 +264,35 @@ private fun ConnectionSummary(status: LinkStatus, serviceRunning: Boolean) {
             ),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * How well Google Maps' guidance is understood, and — while Android Auto projects without the
+ * phone's Maps guiding — why the HUD shows no arrows.
+ */
+@Composable
+private fun NavigationSummary(status: NavStatus) {
+    val now = rememberElapsedRealtime()
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val stats = status.stats
+    if (AndroidAuto.noticeDue(status.projectingSinceMs, stats.lastGuidanceAtMs, now)) {
+        Text(stringResource(R.string.nav_android_auto), color = StatusColors.warning)
+    }
+    if (stats.total == 0) {
+        Text(stringResource(R.string.nav_none_yet), style = MaterialTheme.typography.bodySmall, color = muted)
+        return
+    }
+    Text(
+        stringResource(R.string.nav_stats, stats.understood, stats.unknownManeuver, stats.notUnderstood),
+        color = if (stats.notUnderstood > 0) StatusColors.warning else MaterialTheme.colorScheme.onSurface,
+    )
+    if (stats.notUnderstood > 0) {
+        Text(
+            stringResource(R.string.nav_not_understood_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = muted,
         )
     }
 }

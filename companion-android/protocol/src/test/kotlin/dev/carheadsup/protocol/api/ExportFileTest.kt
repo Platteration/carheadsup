@@ -35,5 +35,7 @@ class ExportFileTest {
         assertEquals("text/csv", ExportFile.safeMimeType(" Text/CSV; charset=utf-8"))
         assertEquals("text/plain", ExportFile.safeMimeType("application/vnd.android.package-archive"))
         assertEquals("text/plain", ExportFile.safeMimeType(""))
+        assertEquals("application/json", ExportFile.safeMimeType("application/json"))
+        assertEquals("text/plain", ExportFile.safeMimeType("application/javascript"))
     }
 }

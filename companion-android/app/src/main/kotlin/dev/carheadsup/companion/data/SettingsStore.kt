@@ -46,6 +46,11 @@ data class CompanionSettings(
     /** The user wants the HUD connection service running (restored after app restarts). */
     val serviceEnabled: Boolean = false,
     /**
+     * Keep Google Maps' navigation notifications for a parser test case file (a debugging aid:
+     * they hold the streets and destination of the drive, so it is off unless switched on).
+     */
+    val navCapture: Boolean = false,
+    /**
      * The HUD this phone is paired with — its id and TLS certificate: pinned at the first
      * verified connection with a pairing token (or confirmed by the user for a HUD without one).
      * Only applies with that token.
@@ -105,6 +110,7 @@ class SettingsStore(context: Context) {
             trafficEnabled = prefs.getBoolean(KEY_TRAFFIC, defaults.trafficEnabled),
             trafficApiKey = prefs.getString(KEY_TRAFFIC_KEY, defaults.trafficApiKey).orEmpty(),
             serviceEnabled = prefs.getBoolean(KEY_SERVICE, defaults.serviceEnabled),
+            navCapture = prefs.getBoolean(KEY_NAV_CAPTURE, defaults.navCapture),
             hudPin = readPin(),
         )
     }
@@ -145,6 +151,7 @@ class SettingsStore(context: Context) {
             putBoolean(KEY_TRAFFIC, settings.trafficEnabled)
             putString(KEY_TRAFFIC_KEY, settings.trafficApiKey)
             putBoolean(KEY_SERVICE, settings.serviceEnabled)
+            putBoolean(KEY_NAV_CAPTURE, settings.navCapture)
             putString(KEY_PIN_HUD_ID, settings.hudPin?.hudId)
             putString(KEY_PIN_TOKEN, settings.hudPin?.tokenFingerprint)
             putString(KEY_PIN_CERTIFICATE, settings.hudPin?.certFingerprint)
@@ -164,6 +171,7 @@ class SettingsStore(context: Context) {
         const val KEY_TRAFFIC = "traffic_enabled"
         const val KEY_TRAFFIC_KEY = "tomtom_api_key"
         const val KEY_SERVICE = "service_enabled"
+        const val KEY_NAV_CAPTURE = "nav_capture"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_PIN_HUD_ID = "paired_hud_id"
         const val KEY_PIN_TOKEN = "paired_token_fingerprint"

@@ -70,7 +70,10 @@ export interface PhoneNav {
   etaEpochMs?: number | null;
   remainingDistanceM?: number | null;
   remainingSeconds?: number | null;
-  /** Base64 PNG (≤ 32 KiB) of the nav app's maneuver icon. */
+  /**
+   * Base64 PNG (≤ 32 KiB) of the nav app's maneuver icon, as a mask: white where the arrow is,
+   * transparent elsewhere (the renderer fills it with the HUD's accent colour).
+   */
   iconPng?: string | null;
 }
 

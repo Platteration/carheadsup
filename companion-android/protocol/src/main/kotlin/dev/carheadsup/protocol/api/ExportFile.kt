@@ -2,8 +2,8 @@ package dev.carheadsup.protocol.api
 
 /**
  * Checks for files the HUD's settings page asks the app to save (the trips CSV, through the
- * WebView bridge): the page supplies the name and type, so neither may point anywhere else or
- * pose as something other than text.
+ * WebView bridge) and the app's own exports (the navigation capture): the page supplies the name
+ * and type, so neither may point anywhere else or pose as something other than text.
  */
 public object ExportFile {
     /** Largest file saved (UTF-16 characters); a trip log of thousands of trips is far smaller. */
@@ -13,7 +13,7 @@ public object ExportFile {
     public const val FALLBACK_NAME: String = "carheadsup-export.txt"
 
     private val UNSAFE = Regex("[^A-Za-z0-9._-]")
-    private val TYPES = setOf("text/csv", "text/plain")
+    private val TYPES = setOf("text/csv", "text/plain", "application/json")
 
     /**
      * [requested] reduced to letters, digits, `.`, `-` and `_` (anything else becomes `_`), without
@@ -28,7 +28,10 @@ public object ExportFile {
         return cleaned.take(MAX_NAME_CHARS - extension.length) + extension
     }
 
-    /** The media type without parameters when it is `text/csv` or `text/plain`, else `text/plain`. */
+    /**
+     * The media type without parameters when it is `text/csv`, `text/plain` or `application/json`
+     * (the navigation capture), else `text/plain`.
+     */
     public fun safeMimeType(requested: String): String =
         requested.substringBefore(';').trim().lowercase().takeIf { it in TYPES } ?: "text/plain"
 }

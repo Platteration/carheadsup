@@ -248,11 +248,26 @@ All language knowledge is data: one `NavLanguage` per language with the maneuver
 (turn, keep, exit, roundabout …, each mapped to a `ManeuverKind`), the patterns that extract the
 street, the words for "then", distance units and ETA formats.
 
-1. Capture real notifications from Maps in that language (title, text, sub-text) for as many
-   maneuver kinds as you can.
-2. Add a `NavLanguage` (copy `GERMAN` as a template) and list it in `NavLanguages.ALL`.
-3. Add the captured examples as cases to `GoogleMapsNotificationParserTest` and run
-   `./gradlew :protocol:test`.
+1. Capture real notifications from Maps in that language, for as many maneuver kinds as you can:
+   on a phone set to that language, switch on *Setup → Debugging → Capture navigation
+   notifications* in the companion, drive (or simulate a route in Maps) with guidance on, then
+   *Export*. The file lands in *Downloads* (`carheadsup-nav-<time>.json`); it keeps the last 200
+   notifications that differ in more than their numbers, Google Maps' only. It shows the streets
+   and destination of the drive: delete what you do not want to share, and *Delete* the capture
+   on the phone afterwards. (Without the app: `adb shell dumpsys notification --noredact` prints
+   the same fields — `android.title`, `android.text`, `android.subText`, `android.bigText`.)
+2. Each case in the file holds the notification, the phone's language, time zone and driving
+   side, and in `expected` what the parser made of it — `null` for nothing. Correct `expected` to
+   what Maps showed (the maneuver, the distance in metres, the street, the ETA as epoch ms) and
+   give each case a `name`; drop duplicates.
+3. Add a `NavLanguage` (copy `GERMAN` as a template) and list it in `NavLanguages.ALL`.
+4. Put the file into `companion-android/protocol/src/test/resources/nav/` (e.g.
+   `google-maps-fr.json`): `NavFixtureTest` replays every case there through the parser as the
+   app runs it. Run `./gradlew :protocol:test`. Finer points (a single word, a tricky ETA) can
+   still go into `GoogleMapsNotificationParserTest`.
 
 Instructions the parser does not understand still yield the distance, the ETA and Maps' own
-arrow icon, so a partial language is already useful.
+arrow icon, so a partial language is already useful. The companion's *Status* screen counts the
+updates it understood, showed with Maps' arrow, and did not understand, and a notification it
+does not understand is logged (`adb logcat -s NavNotificationListener`) with the phone's
+language and the lengths of its texts — never the texts.

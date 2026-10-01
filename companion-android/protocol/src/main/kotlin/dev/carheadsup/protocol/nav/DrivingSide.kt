@@ -1,13 +1,19 @@
 package dev.carheadsup.protocol.nav
 
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import java.util.Locale
 
 /**
  * Which side of the road traffic keeps to. It decides the direction of roundabouts and U-turns
  * and the default side of motorway exits, ramps and merges when the instruction does not say.
  */
+@Serializable
 public enum class DrivingSide {
+    @SerialName("right")
     RIGHT,
+
+    @SerialName("left")
     LEFT,
     ;
 

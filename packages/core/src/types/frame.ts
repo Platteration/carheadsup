@@ -79,8 +79,9 @@ export interface NavWidget extends WidgetBase {
   street: string | null;
   then: Maneuver | null;
   /**
-   * The nav app's maneuver icon (base64 PNG) to draw instead of a built-in arrow. Only set
-   * when `maneuver.type` is 'unknown': known maneuvers are drawn by the renderer.
+   * The nav app's maneuver icon (base64 PNG) to draw instead of a built-in arrow — as a mask in
+   * the accent colour (its alpha), never in its own colours. Only set when `maneuver.type` is
+   * 'unknown': known maneuvers are drawn by the renderer.
    */
   iconPng: string | null;
   /** Maneuver is close (≈ < 200 m / 0.1 mi) — emphasise and count down. */

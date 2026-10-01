@@ -70,7 +70,11 @@ notification and sends it to the HUD.
 
 - **Turn arrow and distance countdown** (dead-reckoned with the car's own speed between phone
   updates), the next street, a "then…" follow-up maneuver, **ETA** and remaining time and distance.
-  When the maneuver cannot be classified, Maps' own arrow icon is shown.
+  When the maneuver cannot be classified, Maps' own arrow icon is shown — redrawn by the HUD in
+  its own colour, since Maps' colours could be invisible or a bright square on the windshield.
+  Google Maps in English and German is understood; the companion's *Status* screen shows how many
+  updates it understood, and its capture (*Setup → Debugging*) turns misunderstood ones into
+  parser test cases ([how](docs/development.md#how-to-add-a-navigation-language)).
 - **Lane guidance** is drawn when the source provides it. Google Maps' notification does not, so
   with Google Maps there are no lane arrows.
 - **Speed limit from OpenStreetMap** (looked up by the phone), with the speed turning red once you
@@ -82,9 +86,11 @@ notification and sends it to the HUD.
   10 km ahead in the direction of travel, on your side of the road. On the highway the HUD shows
   traffic from 3 km, cameras and other hazards from 1 km. Google Maps does not expose its traffic
   data, and OpenStreetMap has none, hence TomTom.
-- **Android Auto caveat**: while the phone projects to the car's screen with Android Auto, Maps
-  runs guidance in the projected session and the phone-side notification is typically missing or
-  reduced, so the HUD gets little or no guidance. Run Maps on the phone instead.
+- **Not supported: navigation from Android Auto.** While the phone projects to the car's screen
+  with Android Auto, Maps runs guidance in the projected session, the phone-side notification is
+  typically missing or reduced, and no other app can read Android Auto's guidance — so the HUD
+  gets little or none. The companion notices the projection and says so on its *Status* screen.
+  For guidance on the HUD, navigate with Google Maps on the phone without Android Auto.
 
 ### Phone and media
 

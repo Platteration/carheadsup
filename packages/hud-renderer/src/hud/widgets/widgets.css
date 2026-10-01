@@ -196,6 +196,13 @@
   object-fit: contain;
 }
 
+/* The nav app's own arrow as a mask (white where the arrow is), in the HUD's accent colour. */
+.hud-nav__png {
+  background-color: currentColor;
+  -webkit-mask: var(--hud-nav-icon) center / contain no-repeat;
+  mask: var(--hud-nav-icon) center / contain no-repeat;
+}
+
 .hud-nav__main {
   grid-area: main;
   display: flex;

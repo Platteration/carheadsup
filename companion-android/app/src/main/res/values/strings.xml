@@ -19,6 +19,8 @@
     <string name="section_hud_settings">HUD settings</string>
     <string name="section_maintenance">Maintenance</string>
     <string name="section_trips">Trips</string>
+    <string name="section_navigation">Navigation</string>
+    <string name="section_debugging">Debugging</string>
 
     <!-- Link status -->
     <string name="status_stopped">Not running</string>
@@ -173,6 +175,19 @@
     <string name="hud_settings_certificate_changed">Not opened: the HUD presented certificate %1$s, not the paired %2$s, so nothing was sent to it. If you reset or replaced the HUD, forget it in the app and pair again.</string>
     <string name="hud_settings_certificate_unreadable">Not opened: the HUD\'s certificate could not be checked, so nothing was sent to it.</string>
     <string name="about_version">carheadsup companion %1$s</string>
+
+    <!-- Navigation (Status) and the capture of Maps' notifications (Setup) -->
+    <string name="nav_none_yet">No guidance from Google Maps yet: start navigation in Google Maps on the phone.</string>
+    <string name="nav_stats">Google Maps guidance: %1$d understood, %2$d shown with Maps' own arrow, %3$d not understood</string>
+    <string name="nav_not_understood_hint">Maps guidance the app does not understand (another language, or a new Maps version) shows no arrow on the HUD. Capturing it in Setup → Debugging makes a test case for the parser.</string>
+    <string name="nav_android_auto">Android Auto is projecting: no app can read Android Auto's guidance, so the HUD shows no turn arrows. For guidance on the HUD, navigate with Google Maps on the phone without Android Auto.</string>
+    <string name="setting_nav_capture">Capture navigation notifications</string>
+    <string name="setting_nav_capture_description">Keeps the last %1$d different Google Maps navigation notifications on the phone, to make parser test cases when guidance is not understood. They show the streets and destination of your drives: export only what you are happy to share, and delete it afterwards. Only Google Maps' notifications are kept.</string>
+    <string name="action_export_nav_capture">Export</string>
+    <string name="action_delete_nav_capture">Delete</string>
+    <string name="nav_capture_empty">Nothing captured yet.</string>
+    <string name="nav_capture_failed">Could not save the capture.</string>
+    <string name="nav_capture_deleted">Capture deleted.</string>
 
     <!-- Notifications -->
     <string name="channel_link">HUD connection</string>

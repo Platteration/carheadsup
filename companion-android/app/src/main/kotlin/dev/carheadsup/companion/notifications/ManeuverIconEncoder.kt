@@ -7,6 +7,7 @@ import android.graphics.drawable.Icon
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import dev.carheadsup.protocol.WireLimits
+import dev.carheadsup.protocol.nav.IconMask
 import java.io.ByteArrayOutputStream
 import java.util.Base64
 import kotlin.math.max
@@ -16,10 +17,12 @@ import kotlin.math.roundToInt
  * Encodes the navigation app's maneuver icon (the notification's large icon) as a base64 PNG for
  * `PhoneNav.iconPng`, which the HUD draws when it cannot name the maneuver itself.
  *
- * The icon is rendered at most [MAX_EDGE_PX] on its long edge and downscaled until the PNG fits
- * the protocol's 32 KiB budget. Google Maps re-posts the same arrow every second, so the last
- * result is cached by pixel content and re-used without compressing again. Not thread-safe:
- * confine to the listener's worker thread.
+ * The icon is rendered at most [MAX_EDGE_PX] on its long edge, turned into a white mask of the
+ * arrow ([IconMask]: the HUD colours it itself — the app's colours could be invisible or a bright
+ * square on the windshield; no mask, no icon) and downscaled until the PNG fits the protocol's
+ * 32 KiB budget. Google Maps re-posts the same arrow every second, so the last result is cached
+ * by pixel content and re-used without encoding again. Not thread-safe: confine to the
+ * listener's worker thread.
  */
 internal class ManeuverIconEncoder(private val context: Context) {
     private var lastPixelsHash: Int? = null
@@ -49,15 +52,17 @@ internal class ManeuverIconEncoder(private val context: Context) {
             try {
                 drawable.setBounds(0, 0, width, height)
                 drawable.draw(Canvas(bitmap))
+                val pixels = IntArray(width * height)
+                bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
                 if (first) {
-                    val pixels = IntArray(width * height)
-                    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
                     val hash = 31 * pixels.contentHashCode() + width
                     if (hash == lastPixelsHash) return lastEncoded
                     lastPixelsHash = hash
                     lastEncoded = null
                     first = false
                 }
+                val mask = IconMask.apply(pixels, width, height) ?: return null
+                bitmap.setPixels(mask, 0, width, 0, 0, width, height)
                 val bytes = ByteArrayOutputStream().use { out ->
                     bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
                     out.toByteArray()

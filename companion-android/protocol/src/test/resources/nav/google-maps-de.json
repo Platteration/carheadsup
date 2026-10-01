@@ -1,0 +1,110 @@
+[
+  {
+    "name": "full German notification with decimal comma and arrival marker",
+    "locale": "de-DE",
+    "zone": "Europe/Berlin",
+    "capturedAtMs": 1790150400000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "1,2 km",
+      "text": "Rechts abbiegen auf Hauptstraße",
+      "subText": "1 Std. 5 Min. · 84,5 km · Ankunft 11:05",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "right",
+      "roundaboutExit": null,
+      "distanceM": 1200.0,
+      "street": "Hauptstraße",
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": 3900.0,
+      "remainingDistanceM": 84500.0,
+      "etaEpochMs": 1790154300000
+    }
+  },
+  {
+    "name": "German bare street toward a city",
+    "locale": "de-DE",
+    "zone": "Europe/Berlin",
+    "capturedAtMs": 1790150400000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "800 m",
+      "text": "B27 Richtung Stuttgart",
+      "subText": "20 Min. · 25 km · 10:20 Ankunft",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": null,
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "unknown",
+      "roundaboutExit": null,
+      "distanceM": 800.0,
+      "street": "B27",
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": 1200.0,
+      "remainingDistanceM": 25000.0,
+      "etaEpochMs": 1790151600000
+    }
+  },
+  {
+    "name": "German sharp right with 1.500 m",
+    "locale": "de-DE",
+    "zone": "Europe/Berlin",
+    "capturedAtMs": 1790150400000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "1.500 m",
+      "text": "Scharf rechts abbiegen",
+      "subText": null,
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": null,
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "sharp-right",
+      "roundaboutExit": null,
+      "distanceM": 1500.0,
+      "street": null,
+      "currentStreet": null,
+      "then": null,
+      "remainingSeconds": null,
+      "remainingDistanceM": null,
+      "etaEpochMs": null
+    }
+  },
+  {
+    "name": "German inline follow-up",
+    "locale": "de-DE",
+    "zone": "Europe/Berlin",
+    "capturedAtMs": 1790150400000,
+    "drivingSide": "right",
+    "notification": {
+      "title": "200 m",
+      "text": "Links abbiegen, dann rechts halten",
+      "subText": "5 Min. · 2,0 km · Ankunft 10:05",
+      "bigText": null,
+      "shortCriticalText": null,
+      "category": "navigation",
+      "isOngoing": true
+    },
+    "expected": {
+      "maneuver": "left",
+      "roundaboutExit": null,
+      "distanceM": 200.0,
+      "street": null,
+      "currentStreet": null,
+      "then": "keep-right",
+      "remainingSeconds": 300.0,
+      "remainingDistanceM": 2000.0,
+      "etaEpochMs": 1790150700000
+    }
+  }
+]

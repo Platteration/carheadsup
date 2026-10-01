@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.carheadsup.companion.CompanionApp
+import dev.carheadsup.companion.NavStatus
 import dev.carheadsup.companion.data.CompanionSettings
 import dev.carheadsup.companion.hud.HudApiException
 import dev.carheadsup.companion.hud.LinkStatus
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 
@@ -78,6 +80,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val units: StateFlow<DisplayUnits> = graph.units
     val discovered: StateFlow<HudAdvertisement?> = graph.discovery.advertisement
     val trafficStatus: StateFlow<TrafficStatus> = graph.trafficStatus
+    val navStatus: StateFlow<NavStatus> = graph.navStatus
 
     /** Trip and maintenance formatting in the current units. */
     val formatter: StateFlow<TripFormatter> =
@@ -100,6 +103,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshPermissions() {
         permissionState.value = Permissions.state(getApplication())
         HudConnectionService.refresh(getApplication())
+        graph.refreshProjection()
+    }
+
+    /** The captured Maps notifications as a test case file, or null when none were captured. */
+    suspend fun navCaptureExport(): String? = withContext(Dispatchers.IO) { graph.navCapture.export() }
+
+    /** Delete the captured Maps notifications. */
+    fun deleteNavCapture() {
+        viewModelScope.launch(Dispatchers.IO) { graph.navCapture.clear() }
     }
 
     fun updateSettings(transform: (CompanionSettings) -> CompanionSettings) = graph.settingsStore.update(transform)

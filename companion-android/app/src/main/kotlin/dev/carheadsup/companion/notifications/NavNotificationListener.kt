@@ -12,10 +12,14 @@ import dev.carheadsup.companion.AppGraph
 import dev.carheadsup.companion.CompanionApp
 import dev.carheadsup.protocol.PhoneMessages
 import dev.carheadsup.protocol.messaging.MessagingNotificationExtractor
+import dev.carheadsup.protocol.nav.AndroidAuto
 import dev.carheadsup.protocol.nav.DrivingSide
 import dev.carheadsup.protocol.nav.GoogleMapsNotificationParser
+import dev.carheadsup.protocol.nav.NavCaptureLog
 import dev.carheadsup.protocol.nav.NavLanguages
+import dev.carheadsup.protocol.nav.NavNotificationContent
 import java.time.Clock
+import java.time.ZoneId
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -27,7 +31,13 @@ import java.util.concurrent.RejectedExecutionException
  *   guidance ends when the notification has been gone for [NAV_END_DELAY_MS] — Maps briefly
  *   removes and re-posts it during normal guidance;
  * - message notifications → sender to the HUD, content read aloud on the phone ([MessageRelay]);
- * - the dialer's incoming-call notification → caller name for the call card.
+ * - the dialer's incoming-call notification → caller name for the call card;
+ * - Android Auto's ongoing notification → whether it projects ([AppGraph.refreshProjection]).
+ *
+ * How well Maps' notifications are understood is counted for the Status screen, a notification
+ * not understood is logged (its language and the lengths of its texts, never the texts), and
+ * with the capture switched on (Setup) Maps' notifications are kept as parser test cases
+ * ([dev.carheadsup.companion.data.NavCaptureStore]).
  *
  * Being the enabled listener also authorises [dev.carheadsup.companion.media.MediaMonitor] to read
  * the active media sessions. Work happens on a single worker thread.
@@ -47,6 +57,9 @@ class NavNotificationListener : NotificationListenerService() {
     /** Worker-thread state: the driving side where the phone is, and when it was last looked up. */
     private var cachedDrivingSide = DrivingSide.RIGHT
     private var drivingSideCheckedAt: Long? = null
+
+    /** Worker-thread state: when a notification Maps' parser did not understand was last logged. */
+    private var notUnderstoodLoggedAt: Long? = null
 
     private val endNavigation = Runnable { runOnWorker { publishNavigationEnded() } }
 
@@ -84,6 +97,7 @@ class NavNotificationListener : NotificationListenerService() {
                     emptyArray()
                 }
             active.filter { it.packageName == GoogleMapsNotificationParser.GOOGLE_MAPS_PACKAGE }.forEach(::handleMaps)
+            updateAndroidAuto(active)
             // Guidance published before the listener was unbound that has ended meanwhile.
             if (!navActive && graph.hub.latestNav()?.active == true) {
                 graph.hub.publish(PhoneMessages.navEnded(PhoneMessages.SOURCE_GOOGLE_MAPS))
@@ -107,6 +121,10 @@ class NavNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        if (sbn?.packageName == AndroidAuto.PACKAGE) {
+            runOnWorker { updateAndroidAuto(activeOrEmpty()) }
+            return
+        }
         if (sbn?.packageName != GoogleMapsNotificationParser.GOOGLE_MAPS_PACKAGE) return
         runOnWorker {
             if (navActive && sbn.key == navKey) {
@@ -122,6 +140,8 @@ class NavNotificationListener : NotificationListenerService() {
 
             GoogleMapsNotificationParser.GOOGLE_MAPS_PACKAGE -> handleMaps(sbn)
 
+            AndroidAuto.PACKAGE -> updateAndroidAuto(activeOrEmpty())
+
             else -> {
                 NotificationContent.callerHint(sbn)?.let(graph.calls::onCallerHint)
                 val content = NotificationContent.messaging(this, sbn)
@@ -131,12 +151,58 @@ class NavNotificationListener : NotificationListenerService() {
     }
 
     private fun handleMaps(sbn: StatusBarNotification) {
-        val nav = parser.parse(NotificationContent.nav(sbn), Clock.systemDefaultZone(), drivingSide()) ?: return
+        val content = NotificationContent.nav(sbn)
+        val side = drivingSide()
+        val nav = parser.parse(content, Clock.systemDefaultZone(), side)
+        graph.onNavParsed(content, nav, SystemClock.elapsedRealtime())
+        if (graph.settings.value.navCapture) {
+            val locale = Locale.getDefault().toLanguageTag()
+            val zone = ZoneId.systemDefault().id
+            graph.navCapture.record(NavCaptureLog.case(content, locale, zone, sbn.postTime, side, nav))
+        }
+        if (nav == null) {
+            logNotUnderstood(content)
+            return
+        }
         mainHandler.removeCallbacks(endNavigation)
         navActive = true
         navKey = sbn.key
         val icon = iconEncoder.encode(sbn.notification.getLargeIcon())
         graph.hub.publish(nav.copy(iconPng = icon))
+    }
+
+    /**
+     * A navigation notification Maps' parser did not understand: log what may explain it — the
+     * phone's language and the shape of the notification — but never its text (the streets and
+     * destination of the drive). At most once a minute: Maps re-posts every second.
+     */
+    private fun logNotUnderstood(content: NavNotificationContent) {
+        if (content.category != GoogleMapsNotificationParser.CATEGORY_NAVIGATION) return
+        val now = SystemClock.elapsedRealtime()
+        val last = notUnderstoodLoggedAt
+        if (last != null && now - last < NOT_UNDERSTOOD_LOG_MS) return
+        notUnderstoodLoggedAt = now
+        fun length(text: String?): String = text?.length?.toString() ?: "-"
+        Log.i(
+            TAG,
+            "Maps guidance not understood (language ${Locale.getDefault().toLanguageTag()}; " +
+                "title ${length(content.title)}, text ${length(content.text)}, " +
+                "subText ${length(content.subText)}, bigText ${length(content.bigText)}, " +
+                "chip ${length(content.shortCriticalText)} characters). " +
+                "Capture it in Setup to make a test case.",
+        )
+    }
+
+    /** Whether Android Auto's ongoing notification is among [active]; then re-check projection. */
+    private fun updateAndroidAuto(active: Array<StatusBarNotification>) {
+        graph.androidAutoNotification = active.any { it.packageName == AndroidAuto.PACKAGE && it.isOngoing }
+        graph.refreshProjection()
+    }
+
+    private fun activeOrEmpty(): Array<StatusBarNotification> = try {
+        activeNotifications.orEmpty()
+    } catch (e: SecurityException) {
+        emptyArray()
     }
 
     private fun publishNavigationEnded() {
@@ -188,5 +254,6 @@ class NavNotificationListener : NotificationListenerService() {
         const val TAG = "NavNotificationListener"
         const val NAV_END_DELAY_MS = 10_000L
         const val DRIVING_SIDE_REFRESH_MS = 60_000L
+        const val NOT_UNDERSTOOD_LOG_MS = 60_000L
     }
 }
