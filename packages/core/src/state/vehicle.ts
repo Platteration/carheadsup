@@ -179,10 +179,18 @@ const DTC_KINDS: readonly DtcKind[] = ['stored', 'permanent', 'pending'];
 /**
  * Replace the trouble-code list with the latest read (so empty lists clear it). A code that
  * was already present — in any list — keeps its `firstSeenAt`. Codes are normalised, invalid
- * ones dropped, and each (code, kind) pair appears once.
+ * ones dropped, and each (code, kind) pair appears once. An incomplete read (`complete:
+ * false`: only the MIL state was readable) updates the MIL and keeps the codes, and the time
+ * they were last checked, as they were.
  */
 export function applyDtcs(state: HudState, event: EventOf<'obd/dtcs'>): HudState {
   const { now } = state;
+  if (event.complete === false) {
+    const milOn = event.milOn === true;
+    return milOn === state.vehicle.milOn
+      ? state
+      : { ...state, vehicle: { ...state.vehicle, milOn } };
+  }
   const firstSeen = new Map<string, number>();
   for (const entry of state.vehicle.dtcs) {
     const seen = firstSeen.get(entry.code);

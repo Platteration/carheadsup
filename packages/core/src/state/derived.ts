@@ -48,6 +48,8 @@ export function advanceGear(state: HudState, config: HudConfig): HudState['gear'
       rpm: freshSignal(state, 'rpm'),
       throttlePct: freshSignal(state, 'throttle') ?? freshSignal(state, 'relativeThrottle'),
       reportedGear: freshSignal(state, 'transmissionGear'),
+      speedAt: state.vehicle.signals.speed?.at ?? null,
+      rpmAt: state.vehicle.signals.rpm?.at ?? null,
     },
     config.vehicle,
   );

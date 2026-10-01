@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Elm327Emulator, SIM_TPMS_PIDS } from '../src/sim/elm327-emulator.ts';
 import { encodeDtc, supportedBitmap } from '../src/sim/ecus.ts';
 import { VehicleSimulator } from '../src/sim/vehicle-sim.ts';
-import { flush } from './helpers.ts';
+import { FakeClock, flush } from './helpers.ts';
 
 /** Talk to the emulator the way a terminal would: send a line, collect text up to the prompt. */
 async function session(options: ConstructorParameters<typeof Elm327Emulator>[1] = {}) {
@@ -206,6 +206,135 @@ describe('Elm327Emulator OBD responses', () => {
     await emulator.write('X');
     await flush();
     expect(buffer).toBe('STOPPED\r\r>');
+  });
+});
+
+/** A line as an ELM327 prints it on ISO 9141-2 with headers on: header, data, checksum. */
+const kline = (...data: number[]): string => {
+  const bytes = [0x48, 0x6b, 0x10, ...data];
+  const checksum = bytes.reduce((sum, b) => sum + b, 0) & 0xff;
+  return [...bytes, checksum].map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+};
+
+describe('Elm327Emulator clone and K-line profiles', () => {
+  it('prints only the first frame of a long answer without flow control (multiFrame: false)', async () => {
+    const { send } = await session({ multiFrame: false });
+    await send('ATE0');
+    await send('ATH1');
+    await send('0100');
+    expect(await send('0902')).toBe('7E8 10 14 49 02 01 31 48 47\r\r>');
+    // An answer that fits one frame is complete.
+    expect(await send('010D0C')).toMatch(
+      /^7E8 06 41 0D [0-9A-F]{2} 0C [0-9A-F]{2} [0-9A-F]{2}\r\r>$/,
+    );
+  });
+
+  it('prints SEARCHING... at once and the answer when the search is done', async () => {
+    const clock = new FakeClock(0);
+    const sim = new VehicleSimulator({ mode: 'manual' });
+    const emulator = new Elm327Emulator(sim, {
+      latencyMs: 20,
+      searchLatencyMs: 3000,
+      timers: clock,
+    });
+    let buffer = '';
+    emulator.onData((chunk) => (buffer += chunk));
+    await emulator.open();
+    await emulator.write('ATE0\r');
+    await clock.advance(50);
+    buffer = '';
+    await emulator.write('0100\r');
+    await clock.advance(100);
+    expect(buffer).toBe('SEARCHING...\r');
+    await clock.advance(3000);
+    expect(buffer).toMatch(/^SEARCHING\.\.\.\r(41 00 [0-9A-F ]+\r)+\r>$/);
+    // "A6" tries the car's protocol first: no long search.
+    await emulator.write('ATSPA6\r');
+    await clock.advance(50);
+    buffer = '';
+    await emulator.write('0100\r');
+    await clock.advance(50);
+    expect(buffer).toMatch(/^SEARCHING\.\.\.\r(41 00 [0-9A-F ]+\r)+\r>$/);
+  });
+
+  it('emulates an ISO 9141-2 car: bus init, one PID per request, headers with checksum', async () => {
+    const { send, sim } = await session({
+      bus: 'iso9141',
+      requestLatencyMs: 0,
+      busInitLatencyMs: 0,
+    });
+    await send('ATE0');
+    await send('ATH1');
+    expect(await send('ATSP3')).toBe('OK\r\r>');
+    expect(await send('0100')).toMatch(
+      /^BUS INIT: \.\.\.OK\r48 6B 10 41 00( [0-9A-F]{2}){5}\r\r>$/,
+    );
+    expect(await send('ATDPN')).toBe('3\r\r>');
+    expect(await send('ATDP')).toBe('ISO 9141-2\r\r>');
+    const speed = Math.round(sim.snapshot().speedKph);
+    // Only the first PID of a multi-PID request is answered.
+    expect(await send('010D0C')).toBe(`${kline(0x41, 0x0d, speed)}\r\r>`);
+    // Trouble codes: three per line, no count byte, zero-padded.
+    sim.setDtcs({ stored: ['P0143', 'P0196', 'P0234', 'P0235'] });
+    expect(await send('03')).toBe(
+      `${kline(0x43, 0x01, 0x43, 0x01, 0x96, 0x02, 0x34)}\r${kline(0x43, 0x02, 0x35, 0, 0, 0, 0)}\r\r>`,
+    );
+    expect(await send('07')).toBe(`${kline(0x47, 0, 0, 0, 0, 0, 0)}\r\r>`);
+    // The VIN: five numbered lines of four bytes, padded with zeros in front.
+    await send('ATH0');
+    const vin = [...sim.vin].map((ch) => ch.charCodeAt(0));
+    const padded = [0, 0, 0, ...vin];
+    const lines = [0, 1, 2, 3, 4].map((i) =>
+      [0x49, 0x02, i + 1, ...padded.slice(i * 4, i * 4 + 4)]
+        .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+        .join(' '),
+    );
+    expect(await send('0902')).toBe(`${lines.join('\r')}\r\r>`);
+  });
+
+  it('initialises the K-line again after the ECU was off', async () => {
+    const { send, emulator } = await session({
+      bus: 'iso9141',
+      requestLatencyMs: 0,
+      busInitLatencyMs: 0,
+    });
+    await send('ATE0');
+    expect(await send('0100')).toMatch(/^SEARCHING\.\.\.\rBUS INIT: \.\.\.OK\r41 00 /);
+    expect(await send('ATDPN')).toBe('A3\r\r>');
+    expect(await send('010D')).toMatch(/^41 0D [0-9A-F]{2}\r\r>$/);
+    emulator.setEcuOnline(false);
+    expect(await send('010D')).toBe('BUS INIT: ...ERROR\r\r>');
+    emulator.setEcuOnline(true);
+    expect(await send('010D')).toMatch(/^BUS INIT: \.\.\.OK\r41 0D [0-9A-F]{2}\r\r>$/);
+    await send('ATSP6');
+    expect(await send('010D')).toBe('CAN ERROR\r\r>');
+  });
+
+  it('takes about 200 ms per K-line request and 2.5 s for the bus init', async () => {
+    const clock = new FakeClock(0);
+    const sim = new VehicleSimulator({ mode: 'manual' });
+    const emulator = new Elm327Emulator(sim, { bus: 'iso9141', timers: clock });
+    let buffer = '';
+    emulator.onData((chunk) => (buffer += chunk));
+    await emulator.open();
+    for (const command of ['ATE0', 'ATSP3']) {
+      await emulator.write(`${command}\r`);
+      await clock.advance(100);
+    }
+    buffer = '';
+    await emulator.write('010D\r');
+    await clock.advance(100);
+    expect(buffer).toBe('BUS INIT: ...');
+    await clock.advance(2550); // 25 ms adapter + 175 ms bus + 2500 ms init
+    expect(buffer).toBe('BUS INIT: ...');
+    await clock.advance(100);
+    expect(buffer).toMatch(/^BUS INIT: \.\.\.OK\r41 0D [0-9A-F]{2}\r\r>$/);
+    buffer = '';
+    await emulator.write('010C\r');
+    await clock.advance(150);
+    expect(buffer).toBe('');
+    await clock.advance(100);
+    expect(buffer).toMatch(/^41 0C [0-9A-F]{2} [0-9A-F]{2}\r\r>$/);
   });
 });
 

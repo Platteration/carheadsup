@@ -320,8 +320,11 @@ export class Elm327 {
       return Promise.reject(new RangeError(`Invalid PID list ${JSON.stringify(pids)}`));
     }
     return this.exclusive(async () => {
-      const messages = await this.obd(`01${pids.map(hexByte).join('')}`, { pids });
-      return collectMode01(messages, pids);
+      const { messages, dropped } = await this.obdResponse(`01${pids.map(hexByte).join('')}`, {
+        pids,
+      });
+      const result = collectMode01(messages, pids);
+      return dropped > 0 ? { ...result, incomplete: true } : result;
     });
   }
 
@@ -593,8 +596,16 @@ export class Elm327 {
     command: string,
     options: { timeoutMs?: number; pids?: readonly number[]; complete?: boolean } = {},
   ): Promise<EcuMessage[]> {
+    return (await this.obdResponse(command, options)).messages;
+  }
+
+  /** {@link obd}, also reporting how many lines or frames had to be dropped. */
+  private async obdResponse(
+    command: string,
+    options: { timeoutMs?: number; pids?: readonly number[]; complete?: boolean } = {},
+  ): Promise<{ messages: EcuMessage[]; dropped: number }> {
     const lines = await this.request(command, 'obd', options.timeoutMs);
-    if (lines.length === 0) return [];
+    if (lines.length === 0) return { messages: [], dropped: 0 };
     const { messages, dropped } = parseEcuResponse(lines, {
       family: this.family,
       headers: this._info?.headers ?? true,
@@ -617,7 +628,7 @@ export class Elm327 {
         { command, response: lines },
       );
     }
-    return messages;
+    return { messages, dropped };
   }
 
   /**

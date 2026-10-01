@@ -116,7 +116,8 @@ into happy-dom. What covers what:
   pairing page, the DTC database, and the replayed drives in `test/scenarios`.
 - **obd** — the driver against scripted transports, the poller, the service's reconnect loop,
   and end-to-end tests (`e2e.test.ts`) of the real driver and poller against the ELM327 emulator
-  and vehicle simulator.
+  and vehicle simulator — as a CAN car, a K-line (ISO 9141-2) car (`bus: 'iso9141'`) and a clone
+  without ISO-TP flow control (`multiFrame: false`), the timing-sensitive ones on a fake clock.
 - **hud-server** — the REST API, auth, static files, both WebSockets, stores, sensors (with fake
   I²C buses, fake `gpiomon` and real UDP sockets on port 0), the engine; `smoke.test.ts` runs
   the complete server with the real simulation and sockets, and `main.test.ts` spawns the CLI.

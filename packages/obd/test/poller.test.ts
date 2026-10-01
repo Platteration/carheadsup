@@ -593,3 +593,273 @@ describe('ObdPoller regressions', () => {
     expect(Math.max(...intervals(fast.map((c) => c.at)))).toBeLessThanOrEqual(1000);
   });
 });
+
+describe('ObdPoller with adapters that cannot take multi-PID requests', () => {
+  /** Expected bytes of one ECU's answer to a request for `pids` (service byte, PIDs, data). */
+  const answerLength = (pids: readonly number[], table: Record<number, number[]>): number =>
+    pids.reduce((n, pid) => n + (table[pid] ? 1 + (table[pid]?.length ?? 0) : 0), 1);
+
+  it('keeps answers to one frame when long ones fail from the start', async () => {
+    const ctx = make();
+    ctx.driver.singleFrameOnly = true;
+    await ctx.poller.discover();
+    expect(ctx.poller.pidsPerRequest).toBe(3);
+    const discoveryCalls = ctx.driver.calls.length;
+    await runFor(ctx, 5000);
+    const requests = ctx.driver.calls.slice(discoveryCalls).filter((c) => c.kind === 'mode01');
+    for (const call of requests) {
+      expect(answerLength(call.pids ?? [], ENGINE), JSON.stringify(call.pids)).toBeLessThanOrEqual(
+        7,
+      );
+    }
+    const speeds = ofType(ctx.events, 'obd/samples')
+      .filter((e) => e.samples.some((s) => s.signal === 'speed'))
+      .map((e) => e.at);
+    expect(speeds.length).toBeGreaterThan(40);
+    expect(Math.max(...intervals(speeds))).toBeLessThanOrEqual(200);
+    // The link tells why.
+    expect(ofType(ctx.events, 'obd/link').at(-1)?.message).toBe(
+      'Polling up to 3 PIDs per request (long answers fail)',
+    );
+  });
+
+  it('falls back to one PID per request when even two PIDs fail', async () => {
+    const ctx = make();
+    const query = ctx.driver.queryMode01.bind(ctx.driver);
+    ctx.driver.queryMode01 = async (pids) => {
+      if (pids.length > 1) {
+        ctx.driver.calls.push({ at: ctx.clock.now(), kind: 'mode01', pids: [...pids] });
+        throw new ElmError('UNSUPPORTED', 'The adapter did not understand the command');
+      }
+      return query(pids);
+    };
+    await ctx.poller.discover();
+    expect(ctx.poller.pidsPerRequest).toBe(1);
+    await runFor(ctx, 3000);
+    expect(ctx.poller.latest('speed')?.value).toBe(50);
+    expect(ofType(ctx.events, 'obd/link').at(-1)?.message).toBe(
+      'Polling one PID per request (multi-PID requests fail)',
+    );
+  });
+
+  it('makes requests smaller when multi-PID requests start failing while polling', async () => {
+    const ctx = make({ link: { adapter: 'ELM327 v2.1', protocol: 'ISO 15765-4 (CAN 11/500)' } });
+    await ctx.poller.discover();
+    expect(ctx.poller.pidsPerRequest).toBe(6);
+    const running = ctx.poller.run();
+    await ctx.clock.advance(1000);
+    ctx.driver.singleFrameOnly = true; // e.g. the adapter's flow control stops working
+    const brokenAt = ctx.clock.now();
+    await ctx.clock.advance(2000);
+    expect(ctx.poller.pidsPerRequest).toBe(3);
+    const speeds = ofType(ctx.events, 'obd/samples')
+      .filter((e) => e.at > brokenAt && e.samples.some((s) => s.signal === 'speed'))
+      .map((e) => e.at);
+    expect(speeds[0]).toBeLessThan(brokenAt + 500);
+    expect(Math.max(...intervals(speeds))).toBeLessThanOrEqual(200);
+    expect(ofType(ctx.events, 'obd/link')).toEqual([
+      expect.objectContaining({
+        state: 'connected',
+        message: 'Polling up to 3 PIDs per request (long answers fail)',
+      }),
+    ]);
+    ctx.poller.stop();
+    await running;
+  });
+
+  it('steps down when another ECU answers but a long answer loses its frames', async () => {
+    // The transmission answers A4 in one frame while the engine's long answer is lost: the
+    // result is incomplete rather than an error, and the engine's PIDs must not be backed off.
+    const ctx = make();
+    await ctx.poller.discover();
+    const running = ctx.poller.run();
+    await ctx.clock.advance(1000);
+    ctx.driver.singleFrameOnly = true;
+    await ctx.clock.advance(10_000);
+    expect(ctx.poller.pidsPerRequest).toBeLessThanOrEqual(3);
+    const recent = ctx.driver.pollsOf(0x05).filter((c) => c.at > ctx.clock.now() - 3000);
+    expect(recent.length).toBeGreaterThanOrEqual(2); // coolant was not backed off
+    ctx.poller.stop();
+    await running;
+  });
+
+  it('keeps the batch size when lone requests fail too (a bad link, not the batching)', async () => {
+    const ctx = make();
+    await ctx.poller.discover();
+    const caught = ctx.poller.run().catch((err: unknown) => err);
+    await ctx.clock.advance(500);
+    ctx.driver.queryMode01 = async () => {
+      throw new ElmError('TIMEOUT', 'No response within 1000 ms');
+    };
+    await ctx.clock.advance(5000);
+    expect(await caught).toMatchObject({ code: 'DESYNC' });
+    expect(ctx.poller.pidsPerRequest).toBe(6);
+  });
+
+  it('does not count NO DATA or a silent vehicle as a batch failure', async () => {
+    const ctx = make();
+    const running = ctx.poller.run();
+    await ctx.clock.advance(500);
+    ctx.driver.silent = true;
+    await ctx.clock.advance(10_000);
+    for (let i = 0; i < 10; i++) ctx.driver.errors.push(new ElmError('CAN_ERROR', 'CAN ERROR'));
+    await ctx.clock.advance(5000);
+    expect(ctx.poller.pidsPerRequest).toBe(6);
+    ctx.poller.stop();
+    await running;
+  });
+});
+
+describe('ObdPoller with one PID per request (K-line)', () => {
+  /** Every driver call takes a bus round trip on the fake clock, as on ISO 9141. */
+  function kline(options: Partial<PollerOptions> = {}, engine = ENGINE, latencyMs = 250) {
+    const ctx = make({ maxPidsPerRequest: 1, ...options }, engine);
+    const { driver, clock } = ctx;
+    const delay = (ms: number) => new Promise<void>((resolve) => clock.setTimeout(resolve, ms));
+    const query = driver.queryMode01.bind(driver);
+    const readDtcs = driver.readDtcs.bind(driver);
+    const readVin = driver.readVin.bind(driver);
+    const readVoltage = driver.readVoltage.bind(driver);
+    driver.queryMode01 = async (pids) => (await delay(latencyMs), query(pids));
+    driver.readDtcs = async () => (await delay(latencyMs * 4), readDtcs()); // 0101, 03, 07, 0A
+    driver.readVin = async () => (await delay(latencyMs * 2), readVin());
+    driver.readVoltage = async () => (await delay(30), readVoltage());
+    return ctx;
+  }
+  const timesOf = (events: HudEvent[], signal: string): number[] =>
+    ofType(events, 'obd/samples')
+      .filter((e) => e.samples.some((s) => s.signal === signal))
+      .map((e) => e.at);
+  const STOPPED = { ...ENGINE, 0x0d: [0x00] };
+  /** Like `runFor`, then let the request in flight finish (it waits on the fake clock). */
+  async function runKline(ctx: ReturnType<typeof make>, ms: number): Promise<void> {
+    const running = ctx.poller.run();
+    await ctx.clock.advance(ms);
+    ctx.poller.stop();
+    await ctx.clock.advance(5000);
+    await running;
+  }
+
+  it('keeps speed under 2 s old at 250 ms per request, also while reading codes and the VIN', async () => {
+    const ctx = kline({}, STOPPED);
+    await runKline(ctx, 100_000);
+    const speed = timesOf(ctx.events, 'speed');
+    expect(Math.max(...intervals(speed))).toBeLessThan(2000);
+    expect(Math.max(...intervals(timesOf(ctx.events, 'rpm')))).toBeLessThan(2000);
+    // The fuel flow (fuel rate PID) every cycle: 3 s stale limit.
+    expect(Math.max(...intervals(timesOf(ctx.events, 'fuelRate')))).toBeLessThan(3000);
+    // Coolant ahead of the other medium PIDs: 10 s stale limit.
+    expect(Math.max(...intervals(timesOf(ctx.events, 'coolantTemp')))).toBeLessThan(6000);
+    // Trouble codes every 30 s at a standstill, and the VIN once.
+    expect(ctx.driver.calls.filter((c) => c.kind === 'dtcs').length).toBeGreaterThanOrEqual(4);
+    expect(ofType(ctx.events, 'obd/vin')).toHaveLength(1);
+    // Throttle and pedal moved to the medium tier: far fewer polls than speed.
+    expect(ctx.driver.pollsOf(0x11).length).toBeLessThan(speed.length / 3);
+    expect(ctx.driver.calls.filter((c) => (c.pids?.length ?? 0) > 1)).toHaveLength(0);
+  });
+
+  it('reads codes and the VIN with only speed and rpm in that cycle', async () => {
+    const ctx = kline({}, STOPPED);
+    await runKline(ctx, 40_000);
+    const reads = ctx.driver.calls.filter((c) => c.kind === 'dtcs' || c.kind === 'vin');
+    for (const read of reads) {
+      // The requests between the previous cycle's last one and the read: speed and rpm only.
+      const before = ctx.driver.calls.filter((c) => c.at < read.at && c.at > read.at - 900);
+      const pids = before.filter((c) => c.kind === 'mode01').flatMap((c) => c.pids ?? []);
+      expect(
+        pids.every((pid) => pid === 0x0c || pid === 0x0d),
+        JSON.stringify(pids),
+      ).toBe(true);
+    }
+  });
+
+  it('puts code and VIN reads off while moving, for at most maxReadDeferralMs', async () => {
+    const ctx = kline({ tuning: { maxReadDeferralMs: 60_000 } });
+    await runKline(ctx, 150_000);
+    const dtcReads = ctx.driver.calls.filter((c) => c.kind === 'dtcs').map((c) => c.at - START);
+    // Once on connecting (speed not known yet); the next one is due 30 s later but waits for
+    // the deferral (60 s) to run out.
+    expect(dtcReads).toHaveLength(2);
+    expect(dtcReads[1]).toBeGreaterThan((dtcReads[0] ?? 0) + 30_000 + 60_000);
+    expect(dtcReads[1]).toBeLessThan((dtcReads[0] ?? 0) + 30_000 + 63_000);
+    // The VIN waited too, then came once.
+    expect(ctx.driver.calls.filter((c) => c.kind === 'vin').map((c) => c.at - START)).toEqual([
+      expect.toSatisfy((at: number) => at > 60_000),
+    ]);
+    expect(Math.max(...intervals(timesOf(ctx.events, 'speed')))).toBeLessThan(2000);
+  });
+
+  it('reads codes at once when asked to, even while moving', async () => {
+    const ctx = kline();
+    const running = ctx.poller.run();
+    await ctx.clock.advance(10_000);
+    const before = ctx.driver.calls.filter((c) => c.kind === 'dtcs').length;
+    ctx.poller.requestDtcRead();
+    await ctx.clock.advance(3000);
+    expect(ctx.driver.calls.filter((c) => c.kind === 'dtcs')).toHaveLength(before + 1);
+    ctx.poller.stop();
+    await ctx.clock.advance(5000);
+    await running;
+  });
+
+  it('does not put reads off on CAN', async () => {
+    const ctx = make({ dtcIntervalMs: 10_000 });
+    await runFor(ctx, 25_000);
+    expect(ctx.driver.calls.filter((c) => c.kind === 'dtcs')).toHaveLength(3);
+  });
+
+  it('moves throttle and pedal to the medium tier after falling back to one PID', async () => {
+    const ctx = make();
+    ctx.driver.multiPid = false;
+    await runFor(ctx, 10_000);
+    expect(ctx.poller.pidsPerRequest).toBe(1);
+    const speed = ctx.driver.pollsOf(0x0d).length;
+    expect(ctx.driver.pollsOf(0x5e).length).toBeGreaterThan(speed * 0.9);
+    expect(ctx.driver.pollsOf(0x11).length).toBeLessThan(speed / 3);
+    expect(ctx.driver.pollsOf(0x49).length).toBeLessThan(speed / 3);
+  });
+});
+
+describe('ObdPoller MIL when trouble codes cannot be read', () => {
+  it('reports the MIL alone (an incomplete read) when the code read fails', async () => {
+    const ctx = make();
+    ctx.driver.addEcu('7E8', { ...ENGINE, 0x01: [0x83, 0x07, 0x65, 0x00] }); // MIL on, 3 codes
+    ctx.driver.readDtcs = async () => {
+      throw new ElmError('MALFORMED', 'Control unit 7E8 counts 3 trouble code(s) but sent none');
+    };
+    await runFor(ctx, 1000);
+    expect(ofType(ctx.events, 'obd/dtcs')).toEqual([
+      {
+        type: 'obd/dtcs',
+        complete: false,
+        milOn: true,
+        stored: [],
+        pending: [],
+        permanent: [],
+        at: expect.any(Number),
+      },
+    ]);
+    expect(ctx.driver.pollsOf(0x01)).toHaveLength(1);
+  });
+
+  it('reports the MIL off too, and nothing when the vehicle is silent', async () => {
+    const ctx = make();
+    ctx.driver.addEcu('7E8', { ...ENGINE, 0x01: [0x00, 0x07, 0x65, 0x00] });
+    let error: Error = new ElmError('NEGATIVE_RESPONSE', 'busy, repeat request (0x21)');
+    ctx.driver.readDtcs = async () => {
+      throw error;
+    };
+    await runFor(ctx, 1000);
+    expect(ofType(ctx.events, 'obd/dtcs').map((e) => [e.complete, e.milOn])).toEqual([
+      [false, false],
+    ]);
+    error = new ElmError('NO_RESPONSE', 'no answer');
+    const silent = make();
+    silent.driver.readDtcs = async () => {
+      throw error;
+    };
+    await runFor(silent, 1000);
+    expect(ofType(silent.events, 'obd/dtcs')).toEqual([]);
+    expect(silent.driver.pollsOf(0x01)).toHaveLength(0);
+  });
+});

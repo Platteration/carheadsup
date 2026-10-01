@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { dismissAlert, evaluateAlerts } from '../../src/alerts/engine.ts';
 import {
+  CHECK_ENGINE_MIL_KEY,
   FUEL_LOW_HYSTERESIS_PCT,
   FUEL_VERY_LOW_RANGE_KM,
   ICE_RISK_REARM_C,
@@ -332,6 +333,30 @@ describe('check engine', () => {
     const b = new Bench();
     b.at(T0 + 100, {}, b.withDtcs([{ code: 'P0420', kind: 'stored' }]));
     b.at(T0 + 200, {}, b.withDtcs([]));
+    expect(b.state.alerts).toEqual([]);
+  });
+
+  it('warns about a lit MIL when no confirmed code is known', () => {
+    const b = new Bench();
+    const mil =
+      (on: boolean) =>
+      (s: HudState): HudState => ({ ...s, vehicle: { ...s.vehicle, milOn: on } });
+    b.at(T0 + 100, {}, mil(true));
+    expect(b.get(CHECK_ENGINE_MIL_KEY)).toMatchObject({
+      kind: 'check-engine',
+      severity: 'warning',
+      title: 'CHECK ENGINE',
+      detail: 'Lamp on – no code read',
+      code: null,
+      dismissible: true,
+    });
+    // A pending code does not explain the lamp …
+    b.at(T0 + 200, {}, (s) => b.withDtcs([{ code: 'P0301', kind: 'pending' }])(mil(true)(s)));
+    expect(b.state.alerts.map((a) => a.key)).toEqual([CHECK_ENGINE_MIL_KEY, 'check-engine:P0301']);
+    // … a confirmed one does, and takes over.
+    b.at(T0 + 300, {}, (s) => b.withDtcs([{ code: 'P0301', kind: 'stored' }])(mil(true)(s)));
+    expect(b.state.alerts.map((a) => a.key)).toEqual(['check-engine:P0301']);
+    b.at(T0 + 400, {}, (s) => b.withDtcs([])(mil(false)(s)));
     expect(b.state.alerts).toEqual([]);
   });
 });

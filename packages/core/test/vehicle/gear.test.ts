@@ -302,6 +302,77 @@ describe('updateGear with configured ratios', () => {
   });
 });
 
+describe('sparse samples (one PID per request, a cycle of a second or more)', () => {
+  /** A sample whose speed and rpm were read `skewMs` apart (rpm first, as the poller asks). */
+  const read = (at: number, kph: number, ratio: number, skewMs = 0): GearInput =>
+    input(at, kph, kph * ratio, { rpmAt: at - skewMs, speedAt: at });
+  /** Settle in `gear` (1-based) with samples a second apart. */
+  const settled = (gear: number, vehicle = MANUAL): GearState => {
+    const ratio = SIX_SPEED[gear - 1] ?? NaN;
+    const { state } = run([read(T0, 40, ratio), read(T0 + 1000, 40, ratio)], vehicle);
+    expect(state.estimate.gear).toBe(gear);
+    return state;
+  };
+
+  it('shows the next gear from one sample that matches it closely', () => {
+    const state = settled(2);
+    const after = updateGear(state, read(T0 + 2000, 42, SIX_SPEED[2], 250), MANUAL);
+    expect(after.estimate).toMatchObject({ gear: 3, inferred: true });
+    // Also once N showed in between (the clutch was in at two samples): the gear before it
+    // counts.
+    const withClutch = run(
+      [read(T0 + 2000, 41, 20), read(T0 + 3000, 41, 20), read(T0 + 4000, 42, SIX_SPEED[2], 250)],
+      MANUAL,
+      state,
+    );
+    expect(gears(withClutch.estimates)).toEqual([2, 'N', 3]);
+  });
+
+  it('waits for confirmation when the readings are not from the same moment', () => {
+    const state = settled(2);
+    // A new rpm with the previous cycle's speed: its ratio can be anything.
+    const after = updateGear(state, read(T0 + 2000, 42, SIX_SPEED[2], 1250), MANUAL);
+    expect(after.estimate.gear).toBe(2);
+    // Readings without times (other callers) keep the two-sample rule too.
+    expect(updateGear(state, input(T0 + 2000, 42, 42 * SIX_SPEED[2]), MANUAL).estimate.gear).toBe(
+      2,
+    );
+  });
+
+  it('never shows a gear two steps away from one sample (rpm read mid-shift)', () => {
+    const state = settled(2);
+    const after = updateGear(state, read(T0 + 2000, 40, SIX_SPEED[3], 200), MANUAL);
+    expect(after.estimate.gear).toBe(2);
+    expect(updateGear(after, read(T0 + 3000, 40, SIX_SPEED[3], 200), MANUAL).estimate.gear).toBe(4);
+  });
+
+  it('waits for confirmation when the match is loose or the samples are close together', () => {
+    const state = settled(2);
+    const loose = updateGear(state, read(T0 + 2000, 60, SIX_SPEED[2] * 1.05), MANUAL);
+    expect(loose.estimate.gear).toBe(2);
+    const dense = run(
+      [read(T0 + 2000, 42, SIX_SPEED[2]), read(T0 + 2100, 42, SIX_SPEED[2])],
+      MANUAL,
+      run([read(T0 + 1900, 41, SIX_SPEED[1])], MANUAL, state).state,
+    );
+    expect(gears(dense.estimates)).toEqual([2, 2]);
+  });
+
+  it('applies to automatics, whose usual confirmation takes three samples', () => {
+    const auto = testVehicle({ transmission: 'automatic', gearRatiosRpmPerKph: [...SIX_SPEED] });
+    const { state } = run(
+      [
+        read(T0, 80, SIX_SPEED[3]),
+        read(T0 + 1000, 80, SIX_SPEED[3]),
+        read(T0 + 2000, 80, SIX_SPEED[3]),
+      ],
+      auto,
+    );
+    expect(state.estimate.gear).toBe(4);
+    expect(updateGear(state, read(T0 + 3000, 82, SIX_SPEED[4], 250), auto).estimate.gear).toBe(5);
+  });
+});
+
 describe('reported gear (PID 0xA4)', () => {
   it('wins over inference and applies immediately', () => {
     const { estimates } = run([input(T0, 50, 50 * 46, { reportedGear: 4 })], MANUAL);

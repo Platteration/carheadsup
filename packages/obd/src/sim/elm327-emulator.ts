@@ -8,10 +8,17 @@
  *  - Echo, linefeeds, spaces and headers behave as on the chip; responses end with "\r\r>".
  *    A bare CR repeats the last command; a character received while a request is being
  *    processed interrupts it ("STOPPED").
- *  - OBD requests: "SEARCHING..." on the first request in automatic mode, functional (7DF) or
- *    physical addressing (AT SH), the default 7E8–7EF receive filter (AT CRA widens it), and
- *    ISO-TP framing (single frame ≤ 7 bytes, else first + consecutive frames), printed with or
- *    without headers ("014" / "0: …" segments) exactly like the chip.
+ *  - OBD requests: "SEARCHING..." on the first request in automatic mode (printed at once, the
+ *    answer following when the search is done), functional (7DF) or physical addressing
+ *    (AT SH), the default 7E8–7EF receive filter (AT CRA widens it), and ISO-TP framing (single
+ *    frame ≤ 7 bytes, else first + consecutive frames), printed with or without headers ("014"
+ *    / "0: …" segments) exactly like the chip.
+ *  - `bus: 'iso9141'`: an older car on the ISO 9141-2 K-line instead — one engine ECU (address
+ *    10), "BUS INIT: ...OK" (a 5-baud initialisation of about 2.5 s) before the first answer and
+ *    again after the ECU was off, one PID per service 01 request, slow round trips (200 ms by
+ *    default), 3-byte headers with a checksum, and multi-line trouble-code and VIN answers.
+ *  - `multiFrame: false`: a clone without working ISO-TP flow control, which prints only the
+ *    first frame of an answer longer than one CAN frame.
  *  - Fault injection for tests: lost responses, line noise, STOPPED, adapter reset, link loss.
  */
 import type { CustomPidConfig } from '@carheadsup/core';
@@ -78,16 +85,33 @@ export interface EmulatorFaultOptions {
   seed?: number;
 }
 
+/** The emulated car's bus: CAN 11-bit 500 kbit/s (protocol 6) or ISO 9141-2 (protocol 3). */
+export type EmulatedBus = 'can' | 'iso9141';
+
 export interface Elm327EmulatorOptions {
+  /** The car's bus. Default 'can'. */
+  bus?: EmulatedBus;
   /** Delay before each response. Default 25 ms; 0 answers on the next microtask. */
   latencyMs?: number;
+  /**
+   * Extra delay of each OBD request on the bus (the round trip to the ECU). Default 0 on CAN
+   * and 175 ms on ISO 9141 (200 ms per request with the default latency).
+   */
+  requestLatencyMs?: number;
+  /** Extra delay of an ISO 9141 bus initialisation ("BUS INIT: ...OK"). Default 2500 ms. */
+  busInitLatencyMs?: number;
+  /**
+   * Whether answers longer than one CAN frame arrive whole. False prints only their first
+   * frame, like a clone without working ISO-TP flow control. Default true.
+   */
+  multiFrame?: boolean;
   /** Extra delay of ATZ. Default 20 × latency. */
   resetLatencyMs?: number;
   /** Extra delay of the automatic protocol search. Default 8 × latency. */
   searchLatencyMs?: number;
   /** `ATI` answer. Default "ELM327 v1.5". */
   version?: string;
-  /** Emulate the transmission ECU (second responder). Default true. */
+  /** Emulate the transmission ECU (second responder; CAN only). Default true. */
   transmissionEcu?: boolean;
   /** Whether the ECUs answer initially (ignition on); see {@link Elm327Emulator.setEcuOnline}. Default true. */
   ecuOnline?: boolean;
@@ -119,7 +143,9 @@ const DEFAULT_SETTINGS: Readonly<ElmSettings> = Object.freeze({
   receiveFilter: null,
 });
 
-const BUS_PROTOCOL = '6';
+const BUS_PROTOCOLS: Readonly<Record<EmulatedBus, string>> = { can: '6', iso9141: '3' };
+/** ISO 9141-2 response header: format byte, target (tester) and the engine ECU's address. */
+const KLINE_HEADER: readonly number[] = [0x48, 0x6b, 0x10];
 const DESCRIPTION = 'OBDII to RS232 Interpreter';
 const LOG_LIMIT = 500;
 
@@ -140,7 +166,13 @@ export class Elm327Emulator implements Transport {
   readonly sim: VehicleSimulator;
   private readonly events = new TransportEvents();
   private readonly timers: Timers;
+  private readonly bus: EmulatedBus;
+  /** ELM327 protocol number of the car's bus. */
+  private readonly busProtocol: string;
   private readonly latencyMs: number;
+  private readonly requestLatencyMs: number;
+  private readonly busInitLatencyMs: number;
+  private readonly multiFrame: boolean;
   private readonly resetLatencyMs: number;
   private readonly searchLatencyMs: number;
   private readonly version: string;
@@ -157,11 +189,21 @@ export class Elm327Emulator implements Transport {
   private busy: { cancel: () => void } | null = null;
   private commandCount = 0;
   private ecuOnline = true;
+  /** ISO 9141: the K-line session is initialised (lost while the ECU is off). */
+  private busInitialised = false;
 
   constructor(sim: VehicleSimulator, options: Elm327EmulatorOptions = {}) {
     this.sim = sim;
     this.timers = options.timers ?? SYSTEM_TIMERS;
+    this.bus = options.bus ?? 'can';
+    this.busProtocol = BUS_PROTOCOLS[this.bus];
     this.latencyMs = Math.max(0, options.latencyMs ?? 25);
+    this.requestLatencyMs = Math.max(
+      0,
+      options.requestLatencyMs ?? (this.bus === 'iso9141' ? 175 : 0),
+    );
+    this.busInitLatencyMs = Math.max(0, options.busInitLatencyMs ?? 2500);
+    this.multiFrame = options.multiFrame ?? true;
     this.resetLatencyMs = Math.max(0, options.resetLatencyMs ?? this.latencyMs * 20);
     this.searchLatencyMs = Math.max(0, options.searchLatencyMs ?? this.latencyMs * 8);
     this.version = options.version ?? 'ELM327 v1.5';
@@ -169,8 +211,10 @@ export class Elm327Emulator implements Transport {
     this.ecuOnline = options.ecuOnline ?? true;
     this.random = prng(this.faultOptions.seed ?? 1);
     this.ecus = [createEngineEcu(sim)];
-    if (options.transmissionEcu ?? true) this.ecus.push(createTransmissionEcu());
-    this.ecus.push(createTpmsEcu());
+    if (this.bus === 'can') {
+      if (options.transmissionEcu ?? true) this.ecus.push(createTransmissionEcu());
+      this.ecus.push(createTpmsEcu());
+    }
   }
 
   // -------------------------------------------------------------------------------------------
@@ -188,6 +232,7 @@ export class Elm327Emulator implements Transport {
     this.input = '';
     this.lastCommand = '';
     this.commandCount = 0;
+    this.busInitialised = false;
   }
 
   async write(data: string): Promise<void> {
@@ -231,9 +276,13 @@ export class Elm327Emulator implements Transport {
     for (let i = 0; i < count; i++) this.faultQueue.push(fault);
   }
 
-  /** Simulate the ignition: when offline no ECU answers (NO DATA / UNABLE TO CONNECT). */
+  /**
+   * Simulate the ignition: when offline no ECU answers (NO DATA / UNABLE TO CONNECT; on
+   * ISO 9141 the K-line session ends, so the next request initialises the bus again).
+   */
   setEcuOnline(online: boolean): void {
     this.ecuOnline = online;
+    if (!online) this.busInitialised = false;
   }
 
   /** Spontaneous adapter reset (supply dip): prints the banner unprompted, settings lost. */
@@ -335,8 +384,11 @@ export class Elm327Emulator implements Transport {
 
     if (body === 'Z' || body === 'WS') {
       this.settings = { ...DEFAULT_SETTINGS };
-      const delay = body === 'Z' ? this.resetLatencyMs : 0;
-      this.respondRaw(`${this.eol}${this.eol}${this.version}${this.eol}${this.eol}>`, delay);
+      this.busInitialised = false;
+      const delay = this.latencyMs + (body === 'Z' ? this.resetLatencyMs : 0);
+      this.respondRaw([
+        { text: `${this.eol}${this.eol}${this.version}${this.eol}${this.eol}>`, delayMs: delay },
+      ]);
       return;
     }
     if (body === 'D') {
@@ -366,11 +418,13 @@ export class Elm327Emulator implements Transport {
     if (protocol?.[1]) {
       s.protocol = protocol[1];
       s.active = null;
+      this.busInitialised = false;
       ok();
       return;
     }
     if (body === 'PC') {
       s.active = null;
+      this.busInitialised = false;
       ok();
       return;
     }
@@ -419,29 +473,47 @@ export class Elm327Emulator implements Transport {
     // An odd trailing digit is the "expected responses" count; it only shortens waiting.
     if (hex.length % 2 === 1) hex = hex.slice(0, -1);
     if (hex.length < 2 || hex.length > 16) return this.respond(['?']);
-    const request = hexToBytes(hex);
+    let request = hexToBytes(hex);
+    // A K-line ECU answers one PID per service 01 request: the first one.
+    if (this.bus === 'iso9141' && request[0] === 0x01) request = request.slice(0, 2);
 
     const s = this.settings;
-    const prefix: string[] = [];
-    let extraDelay = 0;
+    // Printed at once, like the chip, while the search or bus initialisation runs.
+    const progress: string[] = [];
+    let extraDelay = this.requestLatencyMs;
     if (s.active === null) {
       const auto = s.protocol === '0' || s.protocol.startsWith('A');
       if (auto) {
-        prefix.push('SEARCHING...');
-        extraDelay = this.searchLatencyMs;
-        if (!this.ecuOnline) return this.respond([...prefix, 'UNABLE TO CONNECT'], extraDelay * 4);
-        s.active = BUS_PROTOCOL;
-      } else if (s.protocol === BUS_PROTOCOL) {
-        s.active = BUS_PROTOCOL;
+        progress.push('SEARCHING...');
+        // "A<n>" tries protocol n first: quick when it is the car's.
+        if (s.protocol !== `A${this.busProtocol}`) extraDelay += this.searchLatencyMs;
+        if (!this.ecuOnline) {
+          return this.respondStaged(progress, ['UNABLE TO CONNECT'], extraDelay * 4);
+        }
+        s.active = this.busProtocol;
+      } else if (s.protocol === this.busProtocol) {
+        s.active = this.busProtocol;
       } else {
-        return this.respond([wrongProtocolAnswer(s.protocol)]);
+        return this.respond([wrongProtocolAnswer(s.protocol, this.bus)]);
       }
     }
-    if (!this.ecuOnline) return this.respond([...prefix, 'NO DATA'], extraDelay);
+    if (this.bus === 'iso9141' && !this.busInitialised) {
+      // The 5-baud initialisation, before the first request and after the ECU was off:
+      // "BUS INIT: ..." at once, "OK" (or "ERROR") and the answer once it is done.
+      extraDelay += this.busInitLatencyMs;
+      progress.push('BUS INIT: ...');
+      if (!this.ecuOnline) return this.respondStaged(progress, ['ERROR'], extraDelay);
+      this.busInitialised = true;
+      return this.respondStaged(progress, ['OK', ...this.answerLines(request)], extraDelay);
+    }
+    if (!this.ecuOnline) return this.respondStaged(progress, ['NO DATA'], extraDelay);
+    return this.respondStaged(progress, this.answerLines(request), extraDelay);
+  }
 
-    const snapshot = this.sim.snapshot();
-    const lines = this.route(request, snapshot);
-    this.respond([...prefix, ...(lines.length > 0 ? lines : ['NO DATA'])], extraDelay);
+  /** The answer of every ECU to a request ("NO DATA" when none answers). */
+  private answerLines(request: Uint8Array): string[] {
+    const lines = this.route(request, this.sim.snapshot());
+    return lines.length > 0 ? lines : ['NO DATA'];
   }
 
   private route(request: Uint8Array, snapshot: VehicleSnapshot): string[] {
@@ -453,7 +525,13 @@ export class Elm327Emulator implements Transport {
       if (functional ? !ecu.functional : ecu.requestId !== headerId) continue;
       if (!this.accepts(ecu.responseId)) continue;
       const payload = ecu.handle(request, functional, snapshot);
-      if (payload && payload.length > 0) lines.push(...this.formatMessage(ecu.responseId, payload));
+      if (payload && payload.length > 0) {
+        lines.push(
+          ...(this.bus === 'iso9141'
+            ? this.formatKLine(payload)
+            : this.formatMessage(ecu.responseId, payload)),
+        );
+      }
     }
     return lines;
   }
@@ -483,9 +561,10 @@ export class Elm327Emulator implements Transport {
       ];
     }
     // First frame: PCI (1 + length) and 6 data bytes; consecutive frames: PCI and 7 bytes, the
-    // last one padded (the adapter prints the whole CAN frame).
+    // last one padded (the adapter prints the whole CAN frame). Without flow control (a broken
+    // clone) the ECU never sends the consecutive frames.
     const segments: number[][] = [[...payload.slice(0, 6)]];
-    for (let offset = 6; offset < payload.length; offset += 7) {
+    for (let offset = 6; this.multiFrame && offset < payload.length; offset += 7) {
       const chunk = [...payload.slice(offset, offset + 7)];
       while (chunk.length < 7) chunk.push(0x00);
       segments.push(chunk);
@@ -505,35 +584,96 @@ export class Elm327Emulator implements Transport {
     ];
   }
 
+  /**
+   * Print one message the way the ELM327 does on ISO 9141-2: header, data and checksum (data
+   * only with headers off), at most 7 data bytes per line. Trouble-code answers become lines of
+   * three codes each (no count byte, unused codes zero); service 09 answers lines of a sequence
+   * number and 4 bytes (the VIN padded with three zero bytes in front).
+   */
+  private formatKLine(payload: Uint8Array): string[] {
+    const sp = this.sp;
+    const line = (data: readonly number[]): string => {
+      if (!this.settings.headers) return bytesToHex(data, sp);
+      const bytes = [...KLINE_HEADER, ...data];
+      const checksum = bytes.reduce((sum, b) => sum + b, 0) & 0xff;
+      return bytesToHex([...bytes, checksum], sp);
+    };
+    const sid = payload[0] ?? 0;
+    if (sid === 0x43 || sid === 0x47 || sid === 0x4a) {
+      const codes = [...payload.slice(2)];
+      const lines: string[] = [];
+      for (let offset = 0; offset === 0 || offset < codes.length; offset += 6) {
+        const chunk = codes.slice(offset, offset + 6);
+        while (chunk.length < 6) chunk.push(0x00);
+        lines.push(line([sid, ...chunk]));
+      }
+      return lines;
+    }
+    if (sid === 0x49 && payload.length > 7) {
+      const data = [...payload.slice(3)];
+      while (data.length % 4 !== 0) data.unshift(0x00);
+      const lines: string[] = [];
+      for (let i = 0; i < data.length / 4; i++) {
+        lines.push(line([sid, payload[1] ?? 0, i + 1, ...data.slice(i * 4, i * 4 + 4)]));
+      }
+      return lines;
+    }
+    return [line([...payload.slice(0, 7)])];
+  }
+
   // -------------------------------------------------------------------------------------------
   // Output
   // -------------------------------------------------------------------------------------------
 
   private respond(lines: readonly string[], extraDelayMs = 0): void {
-    const eol = this.eol;
-    this.respondRaw(`${lines.map((line) => `${line}${eol}`).join('')}${eol}>`, extraDelayMs);
+    this.respondStaged([], lines, extraDelayMs);
   }
 
-  private respondRaw(text: string, extraDelayMs: number): void {
-    const delay = this.latencyMs + extraDelayMs;
-    let cancelled = false;
-    const deliver = (): void => {
-      if (cancelled) return;
-      this.busy = null;
-      this.emitNow(text);
-    };
-    if (delay <= 0) {
-      this.busy = { cancel: () => (cancelled = true) };
-      queueMicrotask(deliver);
+  /**
+   * Answer with `progress` lines ("SEARCHING...", "BUS INIT: ...") after the usual latency and
+   * the rest `extraDelayMs` later, as the chip prints them while it works.
+   */
+  private respondStaged(
+    progress: readonly string[],
+    lines: readonly string[],
+    extraDelayMs: number,
+  ): void {
+    const eol = this.eol;
+    const rest = `${lines.map((line) => `${line}${eol}`).join('')}${eol}>`;
+    // "BUS INIT: ..." is completed on the same line ("BUS INIT: ...OK").
+    const head = progress
+      .map((line) => (line.startsWith('BUS INIT') ? line : `${line}${eol}`))
+      .join('');
+    if (progress.length === 0 || extraDelayMs <= 0) {
+      this.respondRaw([{ text: `${head}${rest}`, delayMs: this.latencyMs + extraDelayMs }]);
       return;
     }
-    const handle = this.timers.setTimeout(deliver, delay);
+    this.respondRaw([
+      { text: head, delayMs: this.latencyMs },
+      { text: rest, delayMs: this.latencyMs + extraDelayMs },
+    ]);
+  }
+
+  private respondRaw(parts: ReadonlyArray<{ text: string; delayMs: number }>): void {
+    let cancelled = false;
+    const handles: unknown[] = [];
+    let remaining = parts.length;
+    const deliver = (text: string): void => {
+      if (cancelled) return;
+      remaining -= 1;
+      if (remaining === 0) this.busy = null;
+      this.emitNow(text);
+    };
     this.busy = {
       cancel: () => {
         cancelled = true;
-        this.timers.clearTimeout(handle);
+        for (const handle of handles) this.timers.clearTimeout(handle);
       },
     };
+    for (const { text, delayMs } of parts) {
+      if (delayMs <= 0) queueMicrotask(() => deliver(text));
+      else handles.push(this.timers.setTimeout(() => deliver(text), delayMs));
+    }
   }
 
   /** Emit asynchronously so a write() never re-enters its caller. */
@@ -555,10 +695,11 @@ export class Elm327Emulator implements Transport {
   }
 }
 
-/** What the chip reports when told to use a protocol the (CAN 11/500) car does not speak. */
-function wrongProtocolAnswer(protocol: string): string {
+/** What the chip reports when told to use a protocol the car does not speak. */
+function wrongProtocolAnswer(protocol: string, bus: EmulatedBus): string {
   const id = protocol.startsWith('A') ? protocol.slice(1) : protocol;
   if (id === '3' || id === '4' || id === '5') return 'BUS INIT: ...ERROR';
+  if (bus === 'iso9141' && /^[6-9A-C]$/.test(id)) return 'CAN ERROR';
   if (id === '8' || id === '9' || id === 'B' || id === 'C') return 'CAN ERROR';
   return 'NO DATA';
 }

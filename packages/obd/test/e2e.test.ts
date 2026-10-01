@@ -5,6 +5,7 @@ import { ElmError } from '../src/errors.ts';
 import { ObdPoller } from '../src/poller.ts';
 import { Elm327Emulator, SIM_TPMS_PIDS } from '../src/sim/elm327-emulator.ts';
 import { VehicleSimulator } from '../src/sim/vehicle-sim.ts';
+import { FakeClock } from './helpers.ts';
 
 const DRIVER = { timeoutMs: 80, settleMs: 5, resetTimeoutMs: 300, searchTimeoutMs: 500 } as const;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -260,5 +261,84 @@ describe('ObdPoller against the emulator', () => {
     await sleep(20);
     emulator.injectFault('disconnect');
     await expect(running).rejects.toMatchObject({ code: 'CLOSED' });
+  });
+});
+
+describe('Driver and poller against emulated clones and K-line cars (fake clock)', () => {
+  async function connect(
+    emulatorOptions: ConstructorParameters<typeof Elm327Emulator>[1],
+    simOptions: ConstructorParameters<typeof VehicleSimulator>[0] = {},
+  ) {
+    const clock = new FakeClock(1_000_000);
+    const sim = new VehicleSimulator({ mode: 'manual', engineTempC: 90, ...simOptions });
+    const emulator = new Elm327Emulator(sim, { timers: clock, ...emulatorOptions });
+    await emulator.open();
+    const elm = new Elm327(emulator, { timers: clock, settleMs: 20 });
+    const initializing = elm.initialize({ protocol: '0' });
+    await clock.advance(30_000);
+    const info = await initializing;
+    const events: HudEvent[] = [];
+    const poller = new ObdPoller(
+      elm,
+      {
+        maxPidsPerRequest: info.maxPidsPerRequest,
+        voltageSupported: info.voltageSupported,
+        link: { adapter: info.adapter, protocol: info.protocol },
+        now: clock.now,
+        timers: clock,
+      },
+      (event) => events.push(event),
+    );
+    const speedTimes = (): number[] =>
+      events.flatMap((e) =>
+        e.type === 'obd/samples' && e.samples.some((s) => s.signal === 'speed') ? [e.at] : [],
+      );
+    return { clock, sim, emulator, elm, info, poller, events, speedTimes };
+  }
+
+  it('gets speed within 5 s from a clone that cannot receive multi-frame answers', async () => {
+    const ctx = await connect({ multiFrame: false, latencyMs: 30 });
+    ctx.sim.setDtcs({ stored: ['P0420', 'P0171', 'P0300', 'U0100'] });
+    const start = ctx.clock.now();
+    const running = ctx.poller.run();
+    await ctx.clock.advance(5000);
+    expect(ctx.speedTimes()[0]).toBeLessThan(start + 5000);
+    expect(ctx.poller.pidsPerRequest).toBe(3);
+    await ctx.clock.advance(10_000);
+    const times = ctx.speedTimes();
+    expect(times.length).toBeGreaterThan(30);
+    expect(Math.max(...times.slice(1).map((t, i) => t - (times[i] ?? 0)))).toBeLessThan(2000);
+    // Four codes do not fit one frame: the MIL is reported on its own.
+    expect(ctx.events.find((e) => e.type === 'obd/dtcs')).toMatchObject({
+      complete: false,
+      milOn: true,
+    });
+    ctx.poller.stop();
+    await ctx.clock.advance(5000);
+    await running;
+  });
+
+  it('polls an ISO 9141 car at 200 ms per request without speed going stale', async () => {
+    const ctx = await connect({ bus: 'iso9141' }, { engineRunning: true });
+    expect(ctx.info).toMatchObject({ protocolId: '3', family: 'legacy', maxPidsPerRequest: 1 });
+    ctx.sim.setDtcs({ stored: ['P0420', 'P0171', 'P0300', 'P0301'], pending: ['P0133'] });
+    const running = ctx.poller.run();
+    await ctx.clock.advance(70_000);
+    const times = ctx.speedTimes().slice(1);
+    expect(times.length).toBeGreaterThan(40);
+    expect(Math.max(...times.slice(1).map((t, i) => t - (times[i] ?? 0)))).toBeLessThan(2000);
+    // Standing still: codes read on connecting and every 30 s, from multi-line answers.
+    const dtcs = ctx.events.filter((e) => e.type === 'obd/dtcs');
+    expect(dtcs.length).toBeGreaterThanOrEqual(2);
+    expect(dtcs[0]).toMatchObject({
+      milOn: true,
+      stored: ['P0420', 'P0171', 'P0300', 'P0301'],
+      pending: ['P0133'],
+    });
+    expect(ctx.events.find((e) => e.type === 'obd/vin')).toMatchObject({ vin: ctx.sim.vin });
+    expect(ctx.emulator.commandLog.filter((c) => /^01[0-9A-F]{4,}$/.test(c))).toEqual([]);
+    ctx.poller.stop();
+    await ctx.clock.advance(5000);
+    await running;
   });
 });

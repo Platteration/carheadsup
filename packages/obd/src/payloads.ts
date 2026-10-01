@@ -114,6 +114,12 @@ export interface Mode01Result {
   answers: Map<number, Mode01Answer[]>;
   /** Decoded canonical values; when several ECUs answer a PID the first ECU's value wins. */
   values: Partial<Record<SignalId, number>>;
+  /**
+   * Some of the response had to be dropped — typically a multi-frame answer that lost its
+   * consecutive frames (a clone without working ISO-TP flow control) while another ECU's
+   * single-frame answer came through — so PIDs missing from `answers` may have been answered.
+   */
+  incomplete?: boolean;
 }
 
 /** Collect a service 01 response from all ECUs. */

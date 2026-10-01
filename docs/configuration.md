@@ -113,7 +113,10 @@ following a launch (2nd), seen twice. An automatic's anchor is saved with the ra
 (`state.json`), so gears show right after the next start. Until there is an anchor, and for any
 gear above a gap in the learned ladder (a gear never driven steadily), the gear shows as unknown
 rather than as a wrong number. Changing `vehicle.transmission` forgets the learned ratios and
-their anchor.
+their anchor. A new inferred gear shows once it has held for two samples and 300 ms (three and
+600 ms on automatics); on a slow bus (one PID per request, samples a second or more apart) one
+sample suffices when its speed and rpm were read together, it matches the gear closely and the
+gear is one up or down from the last one shown.
 
 ### obd
 

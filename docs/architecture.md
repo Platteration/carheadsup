@@ -245,7 +245,7 @@ a stable key (e.g. `check-engine:P0420`), a severity (`info` < `caution` < `warn
 | `forward-collision` | The ADAS module reports a collision risk (fresh reading); "BRAKE!" stays at least 1 s after the module's last warning. | `caution` "VEHICLE AHEAD", `critical` "BRAKE!" |
 | `coolant` | Coolant ≥ `coolantHighC` (110 °C); cleared `coolantHysteresisC` below. | `warning` "ENGINE HOT", `critical` "OVERHEATING – STOP" at ≥ `coolantCriticalC` (118 °C) |
 | `voltage` | Engine running and ≤ `voltageLowRunningV` for 60 s; engine off and ≤ `voltageLowOffV` for 10 s; ≥ `voltageHighV` for 10 s. | `warning` "CHARGING FAULT", `caution` "BATTERY LOW", `warning` "OVERVOLTAGE" |
-| `check-engine` | One alert per trouble code. | From the DTC database for stored and permanent codes; `info` while a code is only pending |
+| `check-engine` | One alert per trouble code; one more ("Lamp on – no code read") while the MIL is on and no confirmed code is known — e.g. the adapter could only read the MIL. | From the DTC database for stored and permanent codes; `info` while a code is only pending; `warning` for the MIL alone |
 | `tpms` | A tyre (when `vehicle.hasTpms`) below `tpmsLowKpa`; cleared 7 kPa above. | `warning` |
 | `fuel-low` | Fuel level ≤ `fuelLowPct`; cleared 2 points above. | `caution` |
 | `ice-risk` | Outside temperature ≤ `iceRiskC`; shown for 10 s, re-armed after it warms up by 2 °C. | `caution` |

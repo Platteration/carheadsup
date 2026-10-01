@@ -67,6 +67,12 @@ export type HudEvent =
       stored: string[];
       pending: string[];
       permanent: string[];
+      /**
+       * False when only the MIL state could be read (the trouble-code read failed, e.g. a
+       * clone that cannot receive a long answer): the code lists are not known and the
+       * previous ones are kept. Absent: a complete read.
+       */
+      complete?: boolean;
       at: number;
     }
   | { type: 'obd/vin'; vin: string; at: number }

@@ -819,6 +819,24 @@ describe('obd/samples', () => {
     expect(h.state.trip.current?.distanceKm).toBeGreaterThan(0.03);
   });
 
+  it('shows the next gear one K-line cycle after a shift (speed and rpm read 250 ms apart)', () => {
+    const config = makeConfig({
+      vehicle: { transmission: 'manual', gearRatiosRpmPerKph: [120, 70, 48, 36, 29] },
+    });
+    const h = new Harness(config);
+    h.obdConnected(T0);
+    // One PID per request: rpm, then speed 250 ms later, a cycle every 1.25 s.
+    const cycle = (at: number, kph: number, ratio: number): void => {
+      h.samples(at, { rpm: kph * ratio });
+      h.samples(at + 250, { speed: kph });
+    };
+    cycle(T0, 30, 70);
+    cycle(T0 + 1250, 31, 70);
+    expect(h.state.gear.estimate.gear).toBe(2);
+    cycle(T0 + 2500, 33, 48); // shifted up: shown at the speed reading of this cycle
+    expect(h.state.gear.estimate.gear).toBe(3);
+  });
+
   it('treats the engine as running only from 300 rpm', () => {
     const h = new Harness();
     h.obdConnected(T0);
@@ -1167,6 +1185,55 @@ describe('OBD events', () => {
     });
     expect(h.state.vehicle.dtcs).toEqual([]);
     expect(h.state.vehicle.milOn).toBe(false);
+  });
+
+  it('keeps the codes on an incomplete read and takes only the MIL from it', () => {
+    const h = new Harness();
+    h.send({
+      type: 'obd/dtcs',
+      milOn: true,
+      stored: ['P0420'],
+      pending: [],
+      permanent: [],
+      at: T0 + 1000,
+    });
+    const before = h.state.vehicle.dtcs;
+    h.send({
+      type: 'obd/dtcs',
+      complete: false,
+      milOn: true,
+      stored: [],
+      pending: [],
+      permanent: [],
+      at: T0 + 5000,
+    });
+    expect(h.state.vehicle.dtcs).toBe(before);
+    expect(h.state.vehicle.dtcsCheckedAt).toBe(T0 + 1000);
+    // A clone that never manages a complete read: the MIL alone raises CHECK ENGINE.
+    const clone = new Harness();
+    clone.send({
+      type: 'obd/dtcs',
+      complete: false,
+      milOn: true,
+      stored: [],
+      pending: [],
+      permanent: [],
+      at: T0 + 1000,
+    });
+    expect(clone.state.vehicle).toMatchObject({ milOn: true, dtcs: [], dtcsCheckedAt: null });
+    expect(clone.state.alerts.map((a) => [a.key, a.severity, a.detail])).toEqual([
+      ['check-engine:mil', 'warning', 'Lamp on – no code read'],
+    ]);
+    clone.send({
+      type: 'obd/dtcs',
+      complete: false,
+      milOn: false,
+      stored: [],
+      pending: [],
+      permanent: [],
+      at: T0 + 2000,
+    });
+    expect(clone.state.alerts).toEqual([]);
   });
 
   it('stores the VIN trimmed and upper-cased', () => {

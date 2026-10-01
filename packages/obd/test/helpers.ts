@@ -2,7 +2,7 @@ import { decodeMode01 } from '@carheadsup/core';
 import type { SignalId } from '@carheadsup/core';
 import type { DtcReport, RawAnswer } from '../src/elm327.ts';
 import { ElmError } from '../src/errors.ts';
-import type { Mode01Result } from '../src/payloads.ts';
+import { MODE01_DATA_LENGTHS, type Mode01Result } from '../src/payloads.ts';
 import type { PollerDriver } from '../src/poller.ts';
 import type { Timers } from '../src/runtime.ts';
 import { supportedBitmap } from '../src/sim/ecus.ts';
@@ -175,6 +175,12 @@ export class FakeDriver implements PollerDriver {
   /** Errors thrown by the next calls, in order. */
   readonly errors: Error[] = [];
   multiPid = true;
+  /**
+   * A clone without working ISO-TP flow control: an ECU's answer longer than one CAN frame (7
+   * bytes) is lost. If no answer is left the request fails (MALFORMED, as the driver reports
+   * an unparseable response); otherwise the result is flagged incomplete.
+   */
+  singleFrameOnly = false;
   dtcs: DtcReport = { milOn: false, stored: [], pending: [], permanent: [] };
   vin: string | null = 'WP0ZZZ99ZTS392124';
   voltage: number | null = 12.6;
@@ -202,7 +208,19 @@ export class FakeDriver implements PollerDriver {
     const values: Partial<Record<SignalId, number>> = {};
     if (this.silent) return { answers, values };
     const asked = this.multiPid ? pids : pids.slice(0, 1);
+    let lost = 0;
     for (const [ecu, table] of [...this.ecus].sort(([a], [b]) => (a < b ? -1 : 1))) {
+      if (this.singleFrameOnly) {
+        let length = 1;
+        for (const pid of asked) {
+          const answered = pid % 0x20 === 0 || (!this.noData.has(pid) && table.has(pid));
+          if (answered) length += 1 + (MODE01_DATA_LENGTHS.get(pid) ?? 4);
+        }
+        if (length > 7) {
+          lost += 1;
+          continue;
+        }
+      }
       for (const pid of asked) {
         let data: number[] | undefined;
         if (pid % 0x20 === 0) {
@@ -221,6 +239,11 @@ export class FakeDriver implements PollerDriver {
           if (values[id] === undefined) values[id] = value;
         }
       }
+    }
+    if (lost > 0) {
+      if (answers.size === 0)
+        throw new ElmError('MALFORMED', 'Unparseable response (first frame only)');
+      return { answers, values, incomplete: true };
     }
     return { answers, values };
   }

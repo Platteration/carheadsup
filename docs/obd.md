@@ -32,7 +32,9 @@ Transports (`obd.transport`):
 - **`tcp`** — Wi-Fi adapters, typically `192.168.0.10:35000`.
 - **`simulator`** — an ELM327 emulator in front of a vehicle simulator, used by `--sim` and the
   tests. It answers like a real CAN car (including multi-frame answers, several ECUs, trouble
-  codes, a VIN and a tyre-pressure module) and can inject faults.
+  codes, a VIN and a tyre-pressure module) and can inject faults. The tests also run it as an
+  ISO 9141-2 K-line car (one PID per request, 200 ms round trips, a 2.5 s bus initialisation,
+  multi-line answers) and as a clone that prints only the first frame of long answers.
 
 Initialisation: `ATZ` (reset), `ATE0` (no echo), `ATL0`, `ATS0` (no spaces), `ATH1` (headers on,
 so answers from several ECUs can be told apart), `ATSP<obd.protocol>`, `ATAT1` (adaptive
@@ -111,8 +113,30 @@ A polling cycle starts at most every 100 ms. Each cycle requests:
 
 On CAN a service 01 request carries up to six PIDs, so the fast tier is usually a single round
 trip; legacy protocols (J1850, ISO 9141, KWP2000) carry one PID per request and are much slower.
-A few ECUs ignore multi-PID requests; the poller notices and falls back to one PID at a time.
-All values of a cycle are published together with one timestamp.
+The values of each request are published as soon as it completes, stamped with that moment (a
+slow request later in the cycle must not make earlier values look fresher than they are).
+
+**Adapters that fail multi-PID requests.** Six PIDs need an answer longer than one CAN frame,
+and clones without working ISO-TP flow control cannot receive those (they print the first frame
+only). The poller checks this right after discovery: if the fast batch fails twice but speed and
+rpm together (a one-frame answer) work, requests are kept to answers that fit one frame (up to
+three PIDs); if even that fails, it polls one PID per request. While polling, a PID that keeps
+failing in multi-PID requests (three in a row, or answers with frames missing) while a request
+for it alone works makes requests smaller again — 6 → 3 → 2 → 1 PIDs. A few ECUs simply ignore
+multi-PID requests and answer only the first PID; that also falls back to one PID per request.
+Each step is logged as a warning and shown on the link ("Polling up to 3 PIDs per request (long
+answers fail)").
+
+**One PID per request** (legacy buses, or after falling back): a K-line round trip takes
+150–250 ms, so the fast tier keeps only speed, rpm and the PID the fuel flow comes from (fuel
+rate, else MAF, else MAP); throttle and pedal — only hints for gear learning while moving — join
+the medium tier. Coolant is read before the other medium PIDs once its reading is 3 s old (the
+overheating alert needs it fresh). Trouble codes (four requests) and the VIN are read in a cycle
+of their own with only speed and rpm, and are put off while the car moves — read at the next
+stop, or after 5 minutes at the latest; reading them after clearing codes is never put off. At
+250 ms per request a typical 2000s K-line car then gets speed every 1.3 s and never older than
+1.5 s (it used to go stale for half a second at every trouble-code read), and coolant every
+4–6 s.
 
 How many cycles per second you get depends on the car's response time and the adapter: STN-based
 adapters (OBDLink) and genuine ELM327s answer quickly, many clones slowly. The developer console
@@ -126,6 +150,10 @@ Resilience:
   sends one probe every 2 s, reporting "No response from the vehicle (ignition off?)" on the
   link. The HUD parks; polling resumes as soon as the car answers.
 - Eight consecutive failed requests (errors, not `NO DATA`) end the session and reconnect.
+- When a trouble-code read fails — a clone that cannot receive a long service 03 answer (three or
+  more codes), a control unit that keeps answering "busy" — the MIL state is read on its own
+  (`0101`, one frame). A lit lamp then raises *CHECK ENGINE – Lamp on – no code read* (a warning)
+  while the codes already known are kept.
 
 ## Adapters and protocols
 
@@ -239,7 +267,8 @@ above, `batteryVoltage`, or the four `tirePressure*` signals.
 | --- | --- |
 | `The adapter did not respond to ATZ (check power and pairing)` | Nothing answers on the serial port: adapter unpowered, not paired, `/dev/rfcomm0` bound to the wrong MAC, or someone else connected to it. |
 | `No response from the vehicle (ignition off?)` | The adapter answers but the car does not: ignition off, or the wrong protocol fixed in `obd.protocol`. |
-| `the ECU ignores multi-PID requests; polling one PID at a time` | Harmless; updates are slower. |
+| `… polling one PID per request` / `… polling up to 3 PIDs per request` | The ECU ignores multi-PID requests, or the adapter cannot receive answers longer than one CAN frame (a clone without flow control). Harmless; updates are a little slower. |
+| *CHECK ENGINE – Lamp on – no code read* | The check-engine lamp is on but no confirmed code could be read: the adapter cannot receive the long trouble-code answer, a control unit keeps refusing, or the fault is in a module the generic services do not report. Read the codes with another tool. |
 | Connects, then drops every few seconds | Weak Bluetooth link (move the Pi closer, avoid metal between), or a clone that cannot keep up — raise `obd.timeoutMs`. |
 | Values missing on the dashboard | The car does not support those PIDs; `GET /api/diagnostics` lists `supported`. |
 | No fuel economy | The car reports neither fuel rate, MAF nor MAP; diesels need the fuel-rate PID. |

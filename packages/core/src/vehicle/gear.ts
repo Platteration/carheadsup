@@ -37,6 +37,13 @@ export interface GearInput {
   throttlePct: number | null;
   /** Gear reported by PID 0xA4, if the vehicle supports it. */
   reportedGear: number | null;
+  /**
+   * When the speed and rpm readings were taken (engine time), if known. On a slow bus they come
+   * from separate requests: only a sample whose two readings are from about the same moment can
+   * confirm a gear change on its own (see {@link SPARSE_SAMPLE_MS}).
+   */
+  speedAt?: number | null;
+  rpmAt?: number | null;
 }
 
 /** An inferred gear change waiting for confirmation (debounces shifts). */
@@ -82,6 +89,14 @@ export interface GearState {
   pending: PendingGearChange | null;
   /** Recent valid samples [at, km/h, rpm], oldest first, for the decoupling test. */
   recent: Array<[at: number, speedKph: number, rpm: number]>;
+  /**
+   * When the readings of the last coherent sample (speed and rpm read within
+   * `COHERENT_READINGS_MS` of each other) were taken, or null; spaces the sparse-sample
+   * confirmation.
+   */
+  coherentAt: number | null;
+  /** The last gear number shown (kept while 'N' or no gear shows), for the same purpose. */
+  lastGear: number | null;
   learner: GearLearnerState;
 }
 
@@ -127,6 +142,18 @@ const CONFIRM = {
 } as const;
 /** After disagreeing this long without a confirmed alternative, the old gear is dropped. */
 const MAX_HOLD_MS = 1000;
+/**
+ * Coherent samples (speed and rpm read within {@link COHERENT_READINGS_MS}) at least this far
+ * apart — a slow bus: one PID per request, a cycle of a second or more — confirm a change on
+ * their own when they match the new gear closely (score below {@link SPARSE_MAX_SCORE}):
+ * waiting for a second sample would show the old gear for a whole cycle after every shift,
+ * while the confirmation time already lies between two such samples. A sample that pairs a
+ * new rpm with the previous cycle's speed is not coherent: its ratio can match a wrong gear.
+ */
+const SPARSE_SAMPLE_MS = 500;
+const SPARSE_MAX_SCORE = 0.5;
+/** Speed and rpm read at most this far apart make a coherent sample. */
+const COHERENT_READINGS_MS = 300;
 
 const UNKNOWN: GearEstimate = { gear: null, inferred: false, confidence: 0 };
 
@@ -164,6 +191,8 @@ export function createGearState(
         : null,
     pending: null,
     recent: [],
+    coherentAt: null,
+    lastGear: null,
     learner: createGearLearner(),
   };
 }
@@ -241,14 +270,44 @@ export function updateGear(state: GearState, input: GearInput, vehicle: VehicleC
       : learnedRatios === null
         ? UNPROVEN
         : learnedNumbering(learnedRatios, vehicle.transmission, learner, anchor);
-  const raw: GearEstimate =
+  const inferred: RawGear =
     reported !== null
-      ? { gear: reported, inferred: false, confidence: 1 }
+      ? { estimate: { gear: reported, inferred: false, confidence: 1 }, score: null }
       : inferGear(input, ratios, numbering, vehicle, configured === null, recent);
+  const raw = inferred.estimate;
 
   const neutral = neutralEstimate(vehicle.transmission, configured === null);
-  const { estimate, pending } = debounce(state, raw, input.at, vehicle.transmission, neutral);
-  return { estimate, learnedRatios, anchor, pending, recent, learner };
+  const readAt = coherentReadingAt(input);
+  // A shift is to the next gear up or down; a sample taken mid-shift (clutch in, rpm falling)
+  // can match a gear further away, which a single sample must not show.
+  const conclusive =
+    inferred.score !== null &&
+    inferred.score < SPARSE_MAX_SCORE &&
+    typeof raw.gear === 'number' &&
+    state.lastGear !== null &&
+    Math.abs(raw.gear - state.lastGear) === 1 &&
+    readAt !== null &&
+    state.coherentAt !== null &&
+    readAt - state.coherentAt >= SPARSE_SAMPLE_MS;
+  const { estimate, pending } = debounce(
+    state,
+    raw,
+    input.at,
+    vehicle.transmission,
+    neutral,
+    conclusive,
+  );
+  const coherentAt = readAt ?? state.coherentAt;
+  const lastGear = typeof estimate.gear === 'number' ? estimate.gear : state.lastGear;
+  return { estimate, learnedRatios, anchor, pending, recent, coherentAt, lastGear, learner };
+}
+
+/** When a coherent sample's readings were taken (the older of the two), else null. */
+function coherentReadingAt(input: GearInput): number | null {
+  const { speedAt, rpmAt } = input;
+  if (typeof speedAt !== 'number' || typeof rpmAt !== 'number') return null;
+  if (!Number.isFinite(speedAt) || !Number.isFinite(rpmAt)) return null;
+  return Math.abs(speedAt - rpmAt) <= COHERENT_READINGS_MS ? Math.min(speedAt, rpmAt) : null;
 }
 
 function validSample(input: GearInput): input is GearInput & { speedKph: number; rpm: number } {
@@ -463,6 +522,14 @@ const NEUTRAL_CONFIDENCE: Record<TransmissionType, number> = {
 
 const round2 = (v: number): number => Math.round(v * 100) / 100;
 
+/** A raw inference and, when it is a matched gear, the match's score (see `matchGearRatio`). */
+interface RawGear {
+  estimate: GearEstimate;
+  score: number | null;
+}
+
+const UNKNOWN_RAW: RawGear = { estimate: UNKNOWN, score: null };
+
 /** Raw (undebounced) inference from rpm / speed. */
 function inferGear(
   input: GearInput,
@@ -471,7 +538,7 @@ function inferGear(
   vehicle: VehicleConfig,
   learned: boolean,
   recent: GearState['recent'],
-): GearEstimate {
+): RawGear {
   const { transmission } = vehicle;
   const { speedKph, rpm } = input;
   if (
@@ -484,7 +551,7 @@ function inferGear(
     speedKph < GEAR_MIN_SPEED_KPH ||
     rpm <= 0
   ) {
-    return UNKNOWN;
+    return UNKNOWN_RAW;
   }
   const idling = rpm <= vehicle.idleRpm * IDLE_BAND_FACTOR && speedKph > CREEP_MAX_KPH;
   const disengaged = idling || decoupled(recent, speedKph, rpm);
@@ -493,17 +560,20 @@ function inferGear(
     // With a clutch, no matching gear means it is in (or the box is in neutral) when the engine
     // has visibly let go of the wheels, or when every ratio is configured. Learned ratios may just
     // lack this gear so far; an automatic in D is never in neutral.
-    if (transmission === 'automatic' || (learned && !disengaged)) return UNKNOWN;
-    return neutralEstimate(transmission, learned);
+    if (transmission === 'automatic' || (learned && !disengaged)) return UNKNOWN_RAW;
+    return { estimate: neutralEstimate(transmission, learned), score: null };
   }
   // A gear whose number is not proven is in gear all the same: unknown, never 'N'.
-  if (match.index >= numbering.proven) return UNKNOWN;
+  if (match.index >= numbering.proven) return UNKNOWN_RAW;
   const sourceFactor = learned ? LEARNED_CONFIDENCE : 1;
   const closeness = 1 - 0.5 * match.score * match.score;
   return {
-    gear: match.index + numbering.firstGear,
-    inferred: true,
-    confidence: round2(closeness * transmissionConfidence(transmission, speedKph) * sourceFactor),
+    estimate: {
+      gear: match.index + numbering.firstGear,
+      inferred: true,
+      confidence: round2(closeness * transmissionConfidence(transmission, speedKph) * sourceFactor),
+    },
+    score: match.score,
   };
 }
 
@@ -517,8 +587,10 @@ function neutralEstimate(transmission: TransmissionType, learned: boolean): Gear
 }
 
 /**
- * Hold the displayed gear until a different inferred result has been stable long enough.
- * Unknown (null) and vehicle-reported gears apply immediately: stale data must never linger.
+ * Hold the displayed gear until a different inferred result has been stable long enough — or,
+ * from samples far enough apart (`conclusive`, see {@link SPARSE_SAMPLE_MS}), until one sample
+ * has matched it closely. Unknown (null) and vehicle-reported gears apply immediately: stale
+ * data must never linger.
  *
  * With a clutch, a result that keeps changing (rpm falling through other gears' ratios after
  * the clutch goes in) is itself evidence of decoupling, so it shows 'N' once the disagreement has
@@ -531,9 +603,10 @@ function debounce(
   at: number,
   transmission: TransmissionType,
   neutral: GearEstimate,
+  conclusive: boolean,
 ): { estimate: GearEstimate; pending: PendingGearChange | null } {
   const current = state.estimate;
-  if (raw.gear === null || !raw.inferred || raw.gear === current.gear) {
+  if (raw.gear === null || !raw.inferred || raw.gear === current.gear || conclusive) {
     return { estimate: raw, pending: null };
   }
   const previous = state.pending;

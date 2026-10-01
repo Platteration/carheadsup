@@ -180,18 +180,35 @@ export function voltageRule({ state, config, now, previous }: RuleContext): Aler
 // ---------------------------------------------------------------------------------------------
 // Trouble codes
 
+/** Key of the check-engine alert for a lit MIL without a known confirmed code. */
+export const CHECK_ENGINE_MIL_KEY = 'check-engine:mil';
+
 /**
  * One alert per code. Confirmed (stored / permanent) codes take their severity from the DTC
- * database; codes that are only pending are informational until the ECU confirms them.
+ * database; codes that are only pending are informational until the ECU confirms them. A lit
+ * MIL without any confirmed code known raises a warning of its own.
  */
 export function checkEngineRule({ state }: RuleContext): AlertSpec[] {
-  const dtcs = state.vehicle.dtcs;
-  if (dtcs.length === 0) return NONE;
+  const { dtcs, milOn } = state.vehicle;
+  if (dtcs.length === 0 && !milOn) return NONE;
   const confirmed = new Map<string, boolean>();
   for (const entry of dtcs) {
     confirmed.set(entry.code, (confirmed.get(entry.code) ?? false) || entry.kind !== 'pending');
   }
   const specs: AlertSpec[] = [];
+  if (milOn && ![...confirmed.values()].some(Boolean)) {
+    // The lamp is on but no confirmed code is known: the codes could not be read (a clone that
+    // cannot receive long answers, a busy control unit) or the fault sits in a module the
+    // generic services do not report. The lamp alone is worth a warning.
+    specs.push({
+      key: CHECK_ENGINE_MIL_KEY,
+      kind: 'check-engine',
+      severity: 'warning',
+      title: 'CHECK ENGINE',
+      detail: 'Lamp on – no code read',
+      code: null,
+    });
+  }
   for (const [code, isConfirmed] of confirmed) {
     const info = lookupDtc(code);
     specs.push({
