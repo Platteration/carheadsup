@@ -169,6 +169,8 @@ describe('parsePhoneMessage — framing', () => {
 describe('parsePhoneMessage — hello', () => {
   it('accepts a valid hello and strips unknown fields', () => {
     expect(ok(parsePhoneMessage(json({ ...hello, extra: 'x' })))).toEqual(hello);
+    const time = Date.UTC(2026, 9, 1, 8, 0);
+    expect(ok(parsePhoneMessage(json({ ...hello, time })))).toEqual({ ...hello, time });
   });
 
   it('drops a v1 pairing token: the token never travels in v2', () => {
@@ -181,6 +183,8 @@ describe('parsePhoneMessage — hello', () => {
     [{ nonce: undefined }, 'hello.nonce: required'],
     [{ v: 1.5 }, 'hello.v: expected integer, got 1.5'],
     [{ v: '1' }, 'hello.v: expected number, got string'],
+    [{ time: '2026-10-01' }, 'hello.time: expected number, got string'],
+    [{ time: 9e15 }, 'hello.time: expected number <= 8640000000000000'],
     [{ device: 'd'.repeat(101) }, 'hello.device: expected at most 100 characters'],
     // Identities, nonces and proofs are base64url of a fixed length: nothing else can reach
     // the proof message, whose fields are joined with "|".
@@ -567,6 +571,17 @@ describe('parsePhoneMessage — location, input, trips-request, ping', () => {
     expect(err(parsePhoneMessage(json({ t: 'trips-request' })))).toBe(
       'trips-request.since: required',
     );
+    expect(ok(parsePhoneMessage(json({ t: 'trips-request', since: 0, sinceSeq: 41 })))).toEqual({
+      t: 'trips-request',
+      since: 0,
+      sinceSeq: 41,
+    });
+    expect(err(parsePhoneMessage(json({ t: 'trips-request', since: 0, sinceSeq: 1.5 })))).toBe(
+      'trips-request.sinceSeq: expected integer, got 1.5',
+    );
+    expect(err(parsePhoneMessage(json({ t: 'trips-request', since: 0, sinceSeq: -1 })))).toBe(
+      'trips-request.sinceSeq: expected number >= 0',
+    );
   });
 
   it('validates ping', () => {
@@ -574,6 +589,18 @@ describe('parsePhoneMessage — location, input, trips-request, ping', () => {
     expect(ok(parsePhoneMessage(json({ t: 'ping', id: 7 })))).toEqual({ t: 'ping', id: 7 });
     expect(err(parsePhoneMessage(json({ t: 'ping', id: 'x' })))).toBe(
       'ping.id: expected number, got string',
+    );
+    const time = Date.UTC(2026, 9, 1, 8, 0);
+    expect(ok(parsePhoneMessage(json({ t: 'ping', id: 7, time })))).toEqual({
+      t: 'ping',
+      id: 7,
+      time,
+    });
+    expect(err(parsePhoneMessage(json({ t: 'ping', time: -1 })))).toBe(
+      'ping.time: expected number >= 0',
+    );
+    expect(err(parsePhoneMessage(json({ t: 'ping', time: 1.5 })))).toBe(
+      'ping.time: expected integer, got 1.5',
     );
   });
 });

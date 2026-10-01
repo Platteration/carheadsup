@@ -121,7 +121,8 @@ data class TrustedHud(val endpoint: HudEndpoint, val certFingerprint: String)
  * - after that, replays the latest nav/road/hazards/media/call state from [PhoneHub] and
  *   forwards everything published there, rate-limited per message type (nav ≤ 4 Hz, location 1 Hz);
  * - pings every 5 s and tears the socket down when the HUD stays silent for 15 s (a vanished
- *   Wi-Fi never delivers a TCP close);
+ *   Wi-Fi never delivers a TCP close); the hello and every ping carry the phone's clock, which a
+ *   HUD without network time sets its own by;
  * - reconnects with exponential backoff; a refused or untrusted pairing, or a session a newer one
  *   of this phone replaced (close 4000), waits the maximum delay; while another phone holds the
  *   HUD it is refused with close 1013 ("another phone is connected") and backs off as usual;
@@ -549,7 +550,8 @@ class HudLink(
                     null
                 }
             }
-            heartbeat.onTick(now)?.let(::sendNow)
+            // With the phone's clock: a HUD without network time takes its time from it.
+            heartbeat.onTick(now, System.currentTimeMillis())?.let(::sendNow)
             limiter.drainDue(now).forEach(::sendNow)
             return if (heartbeat.isTimedOut(now)) SessionOutcome.Closed("the HUD stopped responding") else null
         }

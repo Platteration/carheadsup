@@ -2,7 +2,11 @@ import { evaluateAlerts } from '../alerts/engine.ts';
 import { createBrightnessState } from '../display/brightness.ts';
 import { createContextState } from '../display/context.ts';
 import { updateShiftFlash } from '../display/shift-light.ts';
-import { createMaintenanceState, recordService } from '../maintenance/maintenance.ts';
+import {
+  createMaintenanceState,
+  dateUndatedServices,
+  recordService,
+} from '../maintenance/maintenance.ts';
 import type { ActiveTrip } from '../trip/trip.ts';
 import {
   createTripState,
@@ -68,22 +72,27 @@ export type PersistedStateWithTrip = Omit<PersistedState, 'activeTrip'> & {
  * with the persisted data.
  *
  * `wallOffsetMs` (default 0: engine time starts at the wall clock) converts the saved trip's
- * wall-clock times to engine time.
+ * wall-clock times to engine time. `clockTrusted` (default true) is `ClockState.trusted` at the
+ * start: false when the server found the system clock gone back (see `PersistedState.lastWallMs`);
+ * a trip resumed then is continued only provisionally (see `resumeTripState`). Trips completed
+ * from now on are numbered after `persisted.tripSeq`.
  */
 export function createInitialState(
   config: HudConfig,
   persisted: PersistedStateWithTrip,
   now: number,
-  options?: { simulated?: boolean; wallOffsetMs?: number },
+  options?: { simulated?: boolean; wallOffsetMs?: number; clockTrusted?: boolean },
 ): HudState {
   const odometerKm = validKm(persisted.odometerKm);
   const offset = options?.wallOffsetMs;
   const wallOffsetMs = offset !== undefined && Number.isFinite(offset) ? offset : 0;
+  const trusted = options?.clockTrusted ?? true;
+  const lastSeq = persisted.tripSeq ?? 0;
   const saved = restoreActiveTrip(persisted.activeTrip);
   const activeTrip = saved === null ? null : shiftActiveTrip(saved, -wallOffsetMs);
   const state: HudState = {
     now,
-    clock: { wallOffsetMs },
+    clock: { wallOffsetMs, trusted },
     simulated: options?.simulated ?? false,
     vehicle: {
       link: { state: 'disconnected', adapter: null, protocol: null, message: null, since: now },
@@ -104,12 +113,13 @@ export function createInitialState(
     fuel: createFuelState(persisted.avgLPer100km),
     trip:
       activeTrip === null
-        ? createTripState()
+        ? createTripState(lastSeq)
         : resumeTripState(
             activeTrip,
             { fuelPricePerL: config.vehicle.fuelPricePerL, currency: config.units.currency },
             now,
             wallOffsetMs,
+            { lastSeq, clockTrusted: trusted },
           ),
     odometer: {
       km: odometerKm,
@@ -213,7 +223,7 @@ function apply(state: HudState, event: HudEvent, config: HudConfig): HudState {
     case 'tick':
       return applyTick(state, config);
     case 'clock/sync':
-      return applyClockSync(state, event.wallOffsetMs, config);
+      return applyClockSync(state, event.wallOffsetMs, event.trusted, config);
     case 'config':
       return applyConfig(state, event.config, config);
 
@@ -301,21 +311,35 @@ function apply(state: HudState, event: HudEvent, config: HudConfig): HudState {
 }
 
 /**
- * The wall clock moved relative to engine time (or this is the first sync): re-derive what
- * depends on the absolute time — maintenance status (service dates) and night mode (the sun).
- * Everything measured in engine time — staleness, timers, the trip in progress — is unaffected,
- * except that a trip resumed after a restart is split again when the sync shows that the break
- * was long after all (`reconcileResumedTrip`: a start-up clock that was behind).
+ * The wall clock moved relative to engine time (or this is the first sync), or became trusted:
+ * re-derive what depends on the absolute time — maintenance status (service dates) and night
+ * mode (the sun). Everything measured in engine time — staleness, timers, the trip in progress —
+ * is unaffected, except that a trip resumed after a restart is split again when the sync shows
+ * that the break was long after all (`reconcileResumedTrip`: a start-up clock that was behind),
+ * or confirmed as one when a trusted sync shows a short one. Once the clock becomes trusted,
+ * services recorded while it was not are dated with the real time (`dateUndatedServices`).
  */
-function applyClockSync(state: HudState, wallOffsetMs: number, config: HudConfig): HudState {
-  if (!Number.isFinite(wallOffsetMs) || wallOffsetMs === state.clock.wallOffsetMs) return state;
+function applyClockSync(
+  state: HudState,
+  wallOffsetMs: number,
+  trusted: boolean | undefined,
+  config: HudConfig,
+): HudState {
+  const offset = Number.isFinite(wallOffsetMs) ? wallOffsetMs : state.clock.wallOffsetMs;
+  const nextTrusted = trusted ?? state.clock.trusted;
+  if (offset === state.clock.wallOffsetMs && nextTrusted === state.clock.trusted) return state;
+  const confirmed = nextTrusted && !state.clock.trusted;
   const synced: HudState = {
     ...state,
-    clock: { wallOffsetMs },
-    trip: reconcileResumedTrip(state.trip, wallOffsetMs, config.trip, {
-      fuelPricePerL: config.vehicle.fuelPricePerL,
-      currency: config.units.currency,
-    }),
+    clock: { wallOffsetMs: offset, trusted: nextTrusted },
+    trip: reconcileResumedTrip(
+      state.trip,
+      offset,
+      config.trip,
+      { fuelPricePerL: config.vehicle.fuelPricePerL, currency: config.units.currency },
+      nextTrusted,
+    ),
+    maintenance: confirmed ? dateUndatedServices(state.maintenance, offset) : state.maintenance,
   };
   return {
     ...synced,
@@ -341,7 +365,8 @@ function applyConfig(state: HudState, config: HudConfig, previous: HudConfig): H
 
 /**
  * Record a service for a configured item (unknown ids are ignored), dated with the wall-clock
- * time. Without an explicit odometer reading the current best-known odometer is used.
+ * time — while that is untrusted, provisionally (see `MaintenanceState.undated`). Without an
+ * explicit odometer reading the current best-known odometer is used.
  */
 function applyMaintenanceDone(
   state: HudState,
@@ -354,7 +379,13 @@ function applyMaintenanceDone(
   const km = validKm(odometerKm) ?? (current === null ? null : roundTo(current, 1));
   const recorded: HudState = {
     ...state,
-    maintenance: recordService(state.maintenance, itemId, km, wallNow(state)),
+    maintenance: recordService(
+      state.maintenance,
+      itemId,
+      km,
+      wallNow(state),
+      state.clock.trusted ? null : state.now,
+    ),
   };
   return { ...recorded, maintenance: refreshMaintenance(recorded, config) };
 }
@@ -394,5 +425,6 @@ export function extractPersisted(state: HudState): PersistedState {
     avgLPer100km: avg === null || !Number.isFinite(avg) ? null : roundTo(avg, 3),
     maintenanceRecords: state.maintenance.records.map((r) => ({ ...r })),
     activeTrip: extractActiveTrip(state),
+    tripSeq: state.trip.lastSeq,
   };
 }

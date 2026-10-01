@@ -57,6 +57,7 @@ function makeEngine(
     persisted?: Partial<PersistedState>;
     now?: () => number;
     monotonic?: () => number;
+    clockTrusted?: () => boolean;
   } = {},
 ): Harness {
   const outputs = new RecordingOutputs();
@@ -68,6 +69,7 @@ function makeEngine(
     logger,
     now: options.now ?? (() => Date.now()),
     ...(options.monotonic !== undefined ? { monotonic: options.monotonic } : {}),
+    ...(options.clockTrusted !== undefined ? { clockTrusted: options.clockTrusted } : {}),
     timers: SYSTEM_TIMERS,
   });
   return { engine, outputs, logger };
@@ -153,10 +155,28 @@ describe('HudEngine time', () => {
     expect(engine.state.clock.wallOffsetMs).toBe(701 + CLOCK_SYNC_TOLERANCE_MS);
     clock.step = -2 * 3_600_000;
     vi.advanceTimersByTime(100);
-    expect(logger.text('info')).toContain('the system clock moved back by 2 h 0 min');
+    expect(logger.text('info')).toContain('the wall clock moved back by 2 h 0 min');
     // A clock/sync from outside only asks for a fresh measurement.
     engine.dispatch({ type: 'clock/sync', wallOffsetMs: 12345, at: 0 });
     expect(engine.state.clock.wallOffsetMs).toBe(-2 * 3_600_000);
+  });
+
+  it('starts with the trust it is given and passes a change on at once', () => {
+    const { clock, now, monotonic } = steppableClock();
+    let trusted = false;
+    const { engine, logger } = makeEngine({ now, monotonic, clockTrusted: () => trusted });
+    expect(engine.state.clock).toEqual({ wallOffsetMs: 0, trusted: false });
+    engine.start();
+    vi.advanceTimersByTime(500);
+    expect(engine.state.clock.trusted).toBe(false);
+    // The phone confirms the time (no step): trusted on the next event.
+    trusted = true;
+    vi.advanceTimersByTime(100);
+    expect(engine.state.clock).toEqual({ wallOffsetMs: 0, trusted: true });
+    expect(logger.text('info')).not.toContain('wall clock moved');
+    clock.step = DAY;
+    engine.dispatch({ type: 'clock/sync', wallOffsetMs: 0, at: 0 });
+    expect(engine.state.clock).toEqual({ wallOffsetMs: DAY, trusted: true });
   });
 
   it('keeps a drive going through network time stepping the clock days forward mid-drive', async () => {
@@ -581,6 +601,20 @@ describe('HudEngine persistence', () => {
     expect(outputs.saved.map((s) => s.odometerKm)).toEqual([5000.01]);
   });
 
+  it('writes the wall time with every write, without asking for writes of its own', async () => {
+    const { clock, now, monotonic } = steppableClock();
+    const { engine, outputs } = makeEngine({ now, monotonic, persisted: { tripSeq: 5 } });
+    engine.start();
+    clock.step = 3 * DAY;
+    vi.advanceTimersByTime(60_000);
+    expect(outputs.saved).toHaveLength(0);
+    engine.dispatch({ type: 'odometer/set', odometerKm: 777, at: 0 });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(outputs.saved).toEqual([
+      expect.objectContaining({ odometerKm: 777, tripSeq: 5, lastWallMs: T0 + 62_000 + 3 * DAY }),
+    ]);
+  });
+
   it('flushes on stop and skips writing unchanged state', async () => {
     const quiet = makeEngine({ persisted: { odometerKm: 100 } });
     await quiet.engine.stop();
@@ -731,6 +765,29 @@ describe('HudEngine trip in progress', () => {
     expect(second.engine.state.trip.current?.distanceKm).toBeLessThan(1);
     await second.engine.stop();
     expect(second.outputs.saved.at(-1)?.activeTrip?.startedAt).toBeGreaterThan(T0 + DAY);
+  });
+
+  it('splits a trip resumed with an untrusted clock when the real time does not come, and saves it', async () => {
+    const first = makeEngine();
+    first.engine.start();
+    drive(first.engine);
+    await first.engine.stop();
+    const saved = first.outputs.saved.at(-1);
+    // The next start's system clock went back: the HUD started from its saved time, untrusted.
+    vi.setSystemTime(Date.now() + 60_000);
+    const second = makeEngine({ persisted: saved, clockTrusted: () => false });
+    second.engine.start();
+    second.engine.dispatch({ type: 'obd/link', state: 'connected', at: 0 });
+    driveFor(second.engine, 3 * 60_000 + 1000);
+    expect(second.outputs.trips).toEqual([
+      expect.objectContaining({ seq: 1, startedAt: T0 + 200 }),
+    ]);
+    // The completed trip is off the saved state within seconds; today's drive is on it.
+    const writes = second.outputs.saved.length;
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(second.outputs.saved.length).toBeGreaterThan(writes);
+    expect(second.outputs.saved.at(-1)?.activeTrip).toMatchObject({ seq: 2 });
+    await second.engine.stop();
   });
 
   it('completes a trip saved "in the future" of the next start’s clock', async () => {

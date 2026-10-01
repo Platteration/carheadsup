@@ -33,8 +33,11 @@ public class Heartbeat(public val intervalMs: Long = 5_000, public val timeoutMs
         lastRttMs = null
     }
 
-    /** A ping to send now, or null when the interval has not elapsed. */
-    public fun onTick(nowMs: Long): PhonePing? {
+    /**
+     * A ping to send now, or null when the interval has not elapsed. [wallMs] is the phone's
+     * clock (epoch ms), sent along as `ping.time` for a HUD without network time.
+     */
+    public fun onTick(nowMs: Long, wallMs: Long? = null): PhonePing? {
         val last = lastPingAt
         if (last != null && nowMs - last < intervalMs && nowMs >= last) return null
         lastPingAt = nowMs
@@ -42,7 +45,7 @@ public class Heartbeat(public val intervalMs: Long = 5_000, public val timeoutMs
         outstanding[id] = nowMs
         // Bound memory if pongs never come back.
         if (outstanding.size > 16) outstanding.remove(outstanding.keys.min())
-        return PhonePing(id)
+        return PhonePing(id, wallMs)
     }
 
     public fun onFrameReceived(nowMs: Long) {

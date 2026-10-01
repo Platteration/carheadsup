@@ -2,6 +2,8 @@ package dev.carheadsup.companion.data
 
 import android.util.Log
 import androidx.core.util.AtomicFile
+import dev.carheadsup.protocol.PhoneTripsRequest
+import dev.carheadsup.protocol.api.TripCursors
 import dev.carheadsup.protocol.api.TripLog
 import dev.carheadsup.protocol.api.TripRecord
 import kotlinx.coroutines.Dispatchers
@@ -16,24 +18,34 @@ import java.io.IOException
 
 /**
  * The phone's trip log: trips pushed by the HUD (`trip-completed`), answers to
- * `trips-request` and `GET /api/trips`, merged by id and stored atomically in app storage.
+ * `trips-request` and `GET /api/trips`, merged by id and stored atomically in app storage —
+ * and, next to it ([cursorFile]), how far it has caught up with each HUD ([TripCursors]).
  */
-class TripStore(file: File) {
+class TripStore(file: File, cursorFile: File) {
     private val atomicFile = AtomicFile(file)
+    private val cursorAtomicFile = AtomicFile(cursorFile)
     private val mutex = Mutex()
     private val state = MutableStateFlow<List<TripRecord>>(emptyList())
+    private var cursors = TripCursors()
     private var loaded = false
 
     val trips: StateFlow<List<TripRecord>> = state.asStateFlow()
-
-    /** End time of the newest known trip, for `trips-request.since`. */
-    val syncCursor: Long get() = TripLog.syncCursor(state.value)
 
     suspend fun load() {
         mutex.withLock { ensureLoaded() }
     }
 
-    suspend fun merge(incoming: List<TripRecord>) {
+    /** The `trips-request` that fetches what the phone is missing from the HUD [hudId]. */
+    suspend fun syncRequest(hudId: String): PhoneTripsRequest = mutex.withLock {
+        ensureLoaded()
+        cursors.request(hudId, state.value)
+    }
+
+    /**
+     * Merge trips into the log. [fromHud]: the HUD they came from in a `trips` answer or a
+     * `trip-completed` push ([pushed]), which moves its sync cursor; null for `GET /api/trips`.
+     */
+    suspend fun merge(incoming: List<TripRecord>, fromHud: String? = null, pushed: Boolean = false) {
         if (incoming.isEmpty()) return
         mutex.withLock {
             ensureLoaded()
@@ -41,6 +53,13 @@ class TripStore(file: File) {
             if (merged != state.value) {
                 state.value = merged
                 persist(merged)
+            }
+            if (fromHud != null) {
+                val moved = cursors.received(fromHud, incoming, pushed)
+                if (moved != cursors) {
+                    cursors = moved
+                    write(cursorAtomicFile, moved.encode())
+                }
             }
         }
     }
@@ -65,23 +84,33 @@ class TripStore(file: File) {
                 }
             }
         state.value = TripLog.merge(stored, state.value)
+        cursors =
+            withContext(Dispatchers.IO) {
+                try {
+                    TripCursors.decode(cursorAtomicFile.readFully().toString(Charsets.UTF_8))
+                } catch (e: IOException) {
+                    TripCursors()
+                }
+            }
         loaded = true
     }
 
-    private suspend fun persist(trips: List<TripRecord>) = withContext(Dispatchers.IO) {
+    private suspend fun persist(trips: List<TripRecord>) = write(atomicFile, TripLog.encode(trips))
+
+    private suspend fun write(file: AtomicFile, text: String) = withContext(Dispatchers.IO) {
         val stream =
             try {
-                atomicFile.startWrite()
+                file.startWrite()
             } catch (e: IOException) {
-                Log.w(TAG, "Cannot write the trip log", e)
+                Log.w(TAG, "Cannot write ${file.baseFile.name}", e)
                 return@withContext
             }
         try {
-            stream.write(TripLog.encode(trips).toByteArray(Charsets.UTF_8))
-            atomicFile.finishWrite(stream)
+            stream.write(text.toByteArray(Charsets.UTF_8))
+            file.finishWrite(stream)
         } catch (e: IOException) {
-            atomicFile.failWrite(stream)
-            Log.w(TAG, "Cannot write the trip log", e)
+            file.failWrite(stream)
+            Log.w(TAG, "Cannot write ${file.baseFile.name}", e)
         }
     }
 

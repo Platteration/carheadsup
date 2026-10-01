@@ -165,6 +165,7 @@ const phoneSchemas = [
     appVersion: label(L.version),
     nonce: authId,
     proof: authProof,
+    time: epochMs.optional(),
   }),
   z.object({
     t: z.literal('nav'),
@@ -236,8 +237,12 @@ const phoneSchemas = [
     bearingDeg: maybe(nonNegative(360)),
   }),
   z.object({ t: z.literal('input'), action: z.enum(INPUT_ACTIONS) }),
-  z.object({ t: z.literal('trips-request'), since: epochMs }),
-  z.object({ t: z.literal('ping'), id: z.number().optional() }),
+  z.object({
+    t: z.literal('trips-request'),
+    since: epochMs,
+    sinceSeq: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  }),
+  z.object({ t: z.literal('ping'), id: z.number().optional(), time: epochMs.optional() }),
 ] as const;
 
 /** Strict schema for phone → HUD messages (unknown fields are stripped). */

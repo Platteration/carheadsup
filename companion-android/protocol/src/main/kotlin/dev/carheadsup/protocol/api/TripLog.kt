@@ -43,8 +43,13 @@ public object TripLog {
     /** Removes a trip (e.g. after `DELETE /api/trips/:id`). */
     public fun remove(existing: List<TripRecord>, id: String): List<TripRecord> = existing.filterNot { it.id == id }
 
-    /** End time of the newest trip, for `trips-request.since`; 0 when there is none. */
-    public fun syncCursor(trips: List<TripRecord>): Long = trips.maxOfOrNull { it.endedAt } ?: 0L
+    /**
+     * End time of the newest trip without a sequence number (recorded by an older HUD version),
+     * for `trips-request.since`; 0 when there is none. Numbered trips are synced by number
+     * instead ([TripCursors]): their times are only as right as the HUD's clock was.
+     */
+    public fun syncCursor(trips: List<TripRecord>): Long =
+        trips.filter { it.seq == null }.maxOfOrNull { it.endedAt } ?: 0L
 
     public fun totals(trips: List<TripRecord>): TripTotals {
         val fuel = trips.mapNotNull { it.fuelUsedL?.takeIf(Double::isFinite) }

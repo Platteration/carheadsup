@@ -10,6 +10,22 @@ export interface MaintenanceState {
   /** Status as of `checkedAt`; recomputed by the reducer on odometer/time changes (at most once a minute). */
   status: MaintenanceItemStatus[];
   checkedAt: number | null;
+  /**
+   * Services recorded while the wall clock was untrusted (`ClockState.trusted`), whose dates are
+   * only a lower bound: dated again once the real time arrives (`dateUndatedServices`). Not
+   * persisted — after a restart the lower bound stays, which makes a reminder come early, never
+   * late.
+   */
+  undated: UndatedService[];
+}
+
+/** A service recorded while the wall clock was untrusted (see `MaintenanceState.undated`). */
+export interface UndatedService {
+  itemId: string;
+  /** Engine time it was recorded at. */
+  recordedAt: number;
+  /** The date it was recorded with (the untrusted wall clock then). */
+  at: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -94,20 +110,25 @@ export function createMaintenanceState(records: MaintenanceRecord[]): Maintenanc
     odometerKm: validOdometer(r.odometerKm),
     at: r.at,
   }));
-  return { records: latest, status: [], checkedAt: null };
+  return { records: latest, status: [], checkedAt: null, undated: [] };
 }
 
 /**
  * Record that an item was serviced (replaces the previous record for that item). `checkedAt`
- * is reset so the reducer recomputes `status` on its next pass.
+ * is reset so the reducer recomputes `status` on its next pass. With `undatedSince` (the engine
+ * time now, given while the wall clock is untrusted) `at` is only a lower bound, to be corrected
+ * by `dateUndatedServices`; without, an earlier undated record of the item is forgotten.
  */
 export function recordService(
   state: MaintenanceState,
   itemId: string,
   odometerKm: number | null,
   at: number,
+  undatedSince: number | null = null,
 ): MaintenanceState {
   const record: MaintenanceRecord = { itemId, odometerKm: validOdometer(odometerKm), at };
+  const undated = state.undated.filter((u) => u.itemId !== itemId);
+  if (undatedSince !== null) undated.push({ itemId, recordedAt: undatedSince, at });
   const index = state.records.findIndex((r) => r.itemId === itemId);
   const records =
     index === -1
@@ -117,7 +138,26 @@ export function recordService(
           record,
           ...state.records.slice(index + 1).filter((r) => r.itemId !== itemId),
         ];
-  return { ...state, records, checkedAt: null };
+  return { ...state, records, checkedAt: null, undated };
+}
+
+/**
+ * The wall clock was confirmed (wall clock − engine time = `wallOffsetMs`): date every service
+ * recorded while it was untrusted with the time the confirmed clock gives its moment — unless
+ * the item has been recorded again since. Returns `state` itself when there are none.
+ */
+export function dateUndatedServices(
+  state: MaintenanceState,
+  wallOffsetMs: number,
+): MaintenanceState {
+  if (state.undated.length === 0) return state;
+  const records = state.records.map((record) => {
+    const undated = state.undated.find((u) => u.itemId === record.itemId);
+    return undated !== undefined && record.at === undated.at
+      ? { ...record, at: undated.recordedAt + wallOffsetMs }
+      : record;
+  });
+  return { ...state, records, undated: [], checkedAt: null };
 }
 
 const SEVERITY: Record<MaintenanceStatusKind, number> = {

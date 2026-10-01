@@ -11,6 +11,7 @@ import {
   PhoneChannel,
 } from '../../src/ws/phone-channel.ts';
 import type { PhoneTransport } from '../../src/ws/phone-channel.ts';
+import type { PhoneTimeSample } from '../../src/clock.ts';
 import { FakeClock, memoryLogger } from '../sensors/fakes.ts';
 import { answerChallenge, testConfig, testDeviceId } from '../helpers.ts';
 import type { TestPhone } from '../helpers.ts';
@@ -100,6 +101,8 @@ function setup(options: { pairingToken?: string; allowPlainPhone?: boolean } = {
   const clock = new FakeClock();
   const events: HudEvent[] = [];
   const phoneChanges: boolean[] = [];
+  const phoneTimes: PhoneTimeSample[] = [];
+  const tripQueries: Array<{ since: number; sinceSeq?: number }> = [];
   let config = testConfig({
     phone: { pairingToken: options.pairingToken ?? '' },
     server: { allowPlainPhone: options.allowPlainPhone ?? false },
@@ -110,8 +113,11 @@ function setup(options: { pairingToken?: string; allowPlainPhone?: boolean } = {
     certFingerprint: CERT,
     dispatch: (event) => events.push(event),
     getConfig: () => config,
-    tripsEndedAfter: (_since, limit) =>
-      Array.from({ length: Math.min(limit, 10) }, (_, i) => trip(i)),
+    tripsMissed: (query, limit) => {
+      tripQueries.push(query);
+      return Array.from({ length: Math.min(limit, 10) }, (_, i) => trip(i));
+    },
+    onPhoneTime: (sample) => phoneTimes.push(sample),
     dueMaintenance: () => null,
     onPhoneChange: (connected) => phoneChanges.push(connected),
     version: 'test',
@@ -133,7 +139,18 @@ function setup(options: { pairingToken?: string; allowPlainPhone?: boolean } = {
     config = next;
     channel.updateConfig(next);
   };
-  return { clock, channel, events, phoneChanges, connect, links, changeConfig, logger };
+  return {
+    clock,
+    channel,
+    events,
+    phoneChanges,
+    phoneTimes,
+    tripQueries,
+    connect,
+    links,
+    changeConfig,
+    logger,
+  };
 }
 
 describe('PhoneChannel: mutual authentication', () => {
@@ -427,6 +444,50 @@ describe('PhoneChannel: one phone at a time', () => {
   });
 });
 
+describe("PhoneChannel: the phone's clock", () => {
+  const PHONE_NOW = Date.UTC(2026, 9, 1, 8, 0, 0);
+
+  it('passes the time of the hello and of every ping on, with half the round trip', async () => {
+    const { connect, clock, phoneTimes } = setup({ pairingToken: 's3cret' });
+    const phone = connect('10.42.0.23');
+    await clock.advance(40); // the phone answers the challenge 40 ms later
+    phone.sayHello({ device: 'Pixel', token: 's3cret', time: PHONE_NOW });
+    await flush();
+    expect(phone.ofType('welcome')).toHaveLength(1);
+    phone.receive({ t: 'ping', id: 1, time: PHONE_NOW + 5000 });
+    phone.receive({ t: 'ping', id: 2 }); // without a time: nothing to pass on
+    await flush();
+    expect(phone.ofType('pong')).toEqual([
+      { t: 'pong', id: 1 },
+      { t: 'pong', id: 2 },
+    ]);
+    expect(phoneTimes).toEqual([
+      { phoneMs: PHONE_NOW, delayMs: 20 },
+      { phoneMs: PHONE_NOW + 5000, delayMs: 20 },
+    ]);
+  });
+
+  it('takes no time from a phone that has not proved the pairing token', async () => {
+    const { connect, phoneTimes } = setup({ pairingToken: 's3cret' });
+    const phone = connect('10.42.0.23');
+    phone.sayHello({ device: 'Pixel', token: 'guess', time: PHONE_NOW });
+    phone.receive({ t: 'ping', id: 1, time: PHONE_NOW });
+    await flush();
+    expect(phone.closeCode).toBe(PHONE_CLOSE.badToken);
+    expect(phoneTimes).toEqual([]);
+  });
+
+  it('takes none from an older phone that sends no time', async () => {
+    const { connect, phoneTimes } = setup();
+    const phone = connect('10.42.0.23');
+    phone.sayHello('Pixel');
+    phone.receive({ t: 'ping', id: 1 });
+    await flush();
+    expect(phone.ofType('welcome')).toHaveLength(1);
+    expect(phoneTimes).toEqual([]);
+  });
+});
+
 describe('PhoneChannel: a phone that does not read', () => {
   it('closes a session whose unsent backlog exceeds the limit', async () => {
     const { connect, channel } = setup();
@@ -439,6 +500,17 @@ describe('PhoneChannel: a phone that does not read', () => {
     expect(phone.ofType('pong')).toHaveLength(0);
     expect(phone.closeCode).toBe(PHONE_CLOSE.backlog);
     expect(channel.connected).toBe(false);
+  });
+
+  it('asks the trip store for what the phone is missing, by sequence number when it can', async () => {
+    const { connect, tripQueries } = setup();
+    const phone = connect('10.42.0.23');
+    phone.sayHello('Pixel');
+    phone.receive({ t: 'trips-request', since: 1234 });
+    phone.receive({ t: 'trips-request', since: 1234, sinceSeq: 41 });
+    await flush();
+    expect(tripQueries).toEqual([{ since: 1234 }, { since: 1234, sinceSeq: 41 }]);
+    expect(phone.ofType('trips')).toHaveLength(2);
   });
 
   it('answers only a few trips-requests in a row', async () => {

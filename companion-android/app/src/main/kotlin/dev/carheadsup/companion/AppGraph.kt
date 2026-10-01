@@ -27,7 +27,6 @@ import dev.carheadsup.protocol.HudToPhone
 import dev.carheadsup.protocol.HudTripCompleted
 import dev.carheadsup.protocol.HudTrips
 import dev.carheadsup.protocol.HudWelcome
-import dev.carheadsup.protocol.PhoneMessages
 import dev.carheadsup.protocol.api.DisplayUnits
 import dev.carheadsup.protocol.api.FuelEconomyUnit
 import dev.carheadsup.protocol.api.TripFormatter
@@ -61,7 +60,7 @@ class AppGraph(private val app: Application) {
     val settingsStore = SettingsStore(app)
     val settings = settingsStore.settings
     val hub = PhoneHub()
-    val trips = TripStore(File(app.filesDir, "trips.json"))
+    val trips = TripStore(File(app.filesDir, "trips.json"), File(app.filesDir, "trip-sync.json"))
     val notifier = Notifier(app)
 
     /**
@@ -192,10 +191,15 @@ class AppGraph(private val app: Application) {
     fun formatter(): TripFormatter =
         TripFormatter(units.value, Locale.getDefault(), ZoneId.systemDefault(), DateFormat.is24HourFormat(app))
 
+    /** The HUD the link last connected to (its trips move that HUD's sync cursor). */
+    @Volatile
+    private var connectedHudId: String? = null
+
     private suspend fun onConnected(welcome: HudWelcome) {
         Log.i(TAG, "Connected to ${welcome.hudName} ${welcome.hudVersion}")
+        connectedHudId = welcome.hudId
         // Catch up on trips that ended while we were away, and learn the driver's units.
-        hub.publish(PhoneMessages.tripsRequest(trips.syncCursor))
+        hub.publish(trips.syncRequest(welcome.hudId))
         scope.launch {
             try {
                 unitsState.value = api.units()
@@ -211,10 +215,10 @@ class AppGraph(private val app: Application) {
                 Log.w(TAG, "Call ${message.action} not done: $failure")
             }
 
-            is HudTrips -> trips.merge(message.trips)
+            is HudTrips -> trips.merge(message.trips, fromHud = connectedHudId)
 
             is HudTripCompleted -> {
-                trips.merge(listOf(message.trip))
+                trips.merge(listOf(message.trip), fromHud = connectedHudId, pushed = true)
                 notifier.tripLogged(message.trip, formatter())
             }
 

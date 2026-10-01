@@ -9,7 +9,7 @@ import {
   reduce,
   type PersistedStateWithTrip,
 } from '../../src/state/reducer.ts';
-import { tripId } from '../../src/trip/trip.ts';
+import { RESUME_CONFIRM_MS, tripId } from '../../src/trip/trip.ts';
 import { TRACK_NOT_ANNOUNCED } from '../../src/state/phone.ts';
 import {
   ENDED_CALL_SHOW_MS,
@@ -136,7 +136,7 @@ describe('createInitialState', () => {
       lastInputAt: null,
     });
     // Engine time starts at the wall clock until the server says otherwise.
-    expect(state.clock).toEqual({ wallOffsetMs: 0 });
+    expect(state.clock).toEqual({ wallOffsetMs: 0, trusted: true });
     expect(state.shiftFlash).toBe(false);
   });
 
@@ -180,7 +180,7 @@ describe('a trip across a power-down', () => {
     const completed = after.effects.filter((e) => e.type === 'trip/completed');
     expect(completed).toHaveLength(1);
     expect(completed[0]).toMatchObject({
-      trip: { id: tripId(T0 + 1000), endedAt: lastActivity, startOdometerKm: 1000 },
+      trip: { id: tripId(1, T0 + 1000), endedAt: lastActivity, startOdometerKm: 1000 },
     });
     expect(after.state.trip.active).toBeNull();
   });
@@ -251,7 +251,7 @@ describe('a trip across a power-down', () => {
       {
         type: 'trip/completed',
         trip: expect.objectContaining({
-          id: tripId(T0 + 1000),
+          id: tripId(1, T0 + 1000),
           startedAt: T0 + 1000,
           endedAt: lastActivity,
           distanceKm: expect.closeTo(20, 0) as unknown,
@@ -297,7 +297,7 @@ describe('a trip across a power-down', () => {
       {
         type: 'trip/completed',
         trip: expect.objectContaining({
-          id: tripId(T0 + 1000),
+          id: tripId(1, T0 + 1000),
           startedAt: T0 + 1000,
           endedAt: lastActivity,
         }) as unknown,
@@ -307,6 +307,73 @@ describe('a trip across a power-down', () => {
     // Network time arrives later: nothing of the old trip is left to move.
     after.send({ type: 'clock/sync', wallOffsetMs: 3 * 3_600_000, at: boot + 5000 });
     expect(after.state.trip.lastCompleted?.startedAt).toBe(T0 + 1000);
+  });
+
+  describe('with an untrusted start-up clock (it went back; the HUD started from its saved time)', () => {
+    /** Started a minute after the power-down by the HUD's clock, then a minute of driving. */
+    function untrustedStart(): { h: Harness; boot: number; lastActivity: number | undefined } {
+      const before = driveThenPowerDown();
+      const lastActivity = before.state.trip.active?.lastActivityAt;
+      const boot = before.now + 60_000;
+      const h = new Harness(makeConfig(), saved(before), boot, { clockTrusted: false });
+      h.obdConnected(boot);
+      h.run(boot + 60_000, { speed: 60, rpm: 2000 }, 1000);
+      expect(h.effects.filter((e) => e.type === 'trip/completed')).toEqual([]);
+      expect(h.state.trip.current?.distanceKm).toBeGreaterThan(20.9);
+      return { h, boot, lastActivity };
+    }
+
+    it('counts the break as long when the real time does not come in time', () => {
+      const { h, boot, lastActivity } = untrustedStart();
+      h.run(boot + RESUME_CONFIRM_MS, { speed: 60, rpm: 2000 }, 1000);
+      expect(h.effects.filter((e) => e.type === 'trip/completed')).toEqual([
+        {
+          type: 'trip/completed',
+          trip: expect.objectContaining({
+            id: tripId(1, T0 + 1000),
+            seq: 1,
+            endedAt: lastActivity,
+            distanceKm: expect.closeTo(20, 0) as unknown,
+          }) as unknown,
+        },
+      ]);
+      // Today's drive goes on as a trip of its own.
+      expect(h.state.trip.current?.startedAt).toBeGreaterThanOrEqual(boot);
+      expect(h.state.trip.current?.distanceKm).toBeCloseTo(3, 0);
+    });
+
+    it('keeps the trip together once the real time shows the break was short', () => {
+      const { h, boot } = untrustedStart();
+      // The phone's clock agrees with the HUD's: the break really was a minute.
+      h.send({ type: 'clock/sync', wallOffsetMs: 0, trusted: true, at: h.now });
+      h.run(boot + RESUME_CONFIRM_MS + 10_000, { speed: 60, rpm: 2000 }, 1000);
+      expect(h.effects.filter((e) => e.type === 'trip/completed')).toEqual([]);
+      expect(h.state.trip.current?.startedAt).toBe(T0 + 1000);
+    });
+
+    it('splits it at once when the real time shows a long break', () => {
+      const { h } = untrustedStart();
+      h.send({ type: 'clock/sync', wallOffsetMs: DAY, trusted: true, at: h.now });
+      expect(h.effects.filter((e) => e.type === 'trip/completed')).toHaveLength(1);
+      expect(h.state.trip.current?.distanceKm).toBeLessThan(1.1);
+    });
+  });
+
+  it('numbers trips on from the persisted sequence number, and saves it', () => {
+    const h = new Harness(makeConfig(), persisted({ tripSeq: 41 }));
+    expect(extractPersisted(h.state).tripSeq).toBe(41);
+    h.obdConnected(T0);
+    h.run(T0 + 5 * 60_000, { speed: 60, rpm: 2000 }, 1000);
+    h.send({ type: 'obd/link', state: 'error', at: h.now + 100 });
+    h.idle(h.now + 6 * 60_000, 10_000);
+    const trips = h.effects.filter((e) => e.type === 'trip/completed');
+    expect(trips).toEqual([
+      {
+        type: 'trip/completed',
+        trip: expect.objectContaining({ seq: 42, id: tripId(42, T0 + 1000) }) as unknown,
+      },
+    ]);
+    expect(extractPersisted(h.state).tripSeq).toBe(42);
   });
 
   it('ignores a missing or corrupt saved trip', () => {
@@ -319,6 +386,7 @@ describe('a trip across a power-down', () => {
         active: null,
         endPending: false,
         resumed: null,
+        lastSeq: 0,
       });
     }
   });
@@ -370,7 +438,7 @@ describe('the wall clock (clock/sync)', () => {
     const trips = h.effects.filter((e) => e.type === 'trip/completed');
     expect(trips).toHaveLength(1);
     expect(trips[0]).toMatchObject({
-      trip: { startedAt: (tripStart ?? 0) + step, id: tripId((tripStart ?? 0) + step) },
+      trip: { startedAt: (tripStart ?? 0) + step, id: tripId(1, (tripStart ?? 0) + step) },
     });
   });
 
@@ -436,6 +504,57 @@ describe('the wall clock (clock/sync)', () => {
       { itemId: 'brake-fluid', odometerKm: null, at: T0 + 1000 },
     ]);
     expect(brake()?.status).toBe('ok');
+  });
+
+  describe('trust (a start-up clock that went back)', () => {
+    const withClock = (): ReturnType<typeof makeConfig> =>
+      makeConfig({
+        display: {
+          layout: {
+            preset: 'custom',
+            widgets: [{ id: 'clock', zone: 'bottom-right', contexts: ['parked'] }],
+          },
+        },
+      });
+
+    it('hides the clock until the real time arrives', () => {
+      const h = new Harness(withClock(), persisted(), T0, { clockTrusted: false });
+      expect(h.state.clock).toEqual({ wallOffsetMs: 0, trusted: false });
+      expect(widget(h.frame(), 'clock')).toBeUndefined();
+      // An offset alone (say, a step of the system clock) does not make it trusted.
+      h.send({ type: 'clock/sync', wallOffsetMs: 1000, at: T0 + 10 });
+      expect(h.state.clock).toEqual({ wallOffsetMs: 1000, trusted: false });
+      expect(widget(h.frame(), 'clock')).toBeUndefined();
+      // The phone's time (or network time) does, even when it agrees with the offset.
+      h.send({ type: 'clock/sync', wallOffsetMs: 1000, trusted: true, at: T0 + 20 });
+      expect(h.state.clock).toEqual({ wallOffsetMs: 1000, trusted: true });
+      expect(widget(h.frame(), 'clock')?.epochMs).toBe(T0 + 1020);
+      const before = h.state;
+      h.send({ type: 'clock/sync', wallOffsetMs: 1000, trusted: true, at: T0 + 20 });
+      expect(h.state).toBe(before);
+    });
+
+    it('dates a service recorded meanwhile with the real time once it arrives', () => {
+      const h = new Harness(makeConfig(), persisted(), T0, { clockTrusted: false });
+      h.send({ type: 'maintenance/done', itemId: 'oil', odometerKm: 41_000, at: T0 + 1000 });
+      expect(h.state.maintenance.records).toEqual([
+        { itemId: 'oil', odometerKm: 41_000, at: T0 + 1000 },
+      ]);
+      // The phone says the HUD's clock was 40 days behind.
+      h.send({ type: 'clock/sync', wallOffsetMs: 40 * DAY, trusted: true, at: T0 + 5000 });
+      expect(h.state.maintenance.records).toEqual([
+        { itemId: 'oil', odometerKm: 41_000, at: T0 + 1000 + 40 * DAY },
+      ]);
+      expect(h.state.maintenance.undated).toEqual([]);
+      expect(h.lastEffects).toContainEqual({ type: 'persist' });
+      expect(extractPersisted(h.state).maintenanceRecords[0]?.at).toBe(T0 + 1000 + 40 * DAY);
+    });
+
+    it('dates a service recorded while trusted with the clock at once', () => {
+      const h = new Harness();
+      h.send({ type: 'maintenance/done', itemId: 'oil', odometerKm: null, at: T0 + 1000 });
+      expect(h.state.maintenance.undated).toEqual([]);
+    });
   });
 
   it('asks for a write when the clock moves while a trip is in progress', () => {

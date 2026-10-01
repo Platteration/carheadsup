@@ -398,6 +398,24 @@ describe('PersistStore', () => {
     expect(parsePersistedState('nope')).toBeNull();
     expect(parsePersistedState({})).toEqual({ state: EMPTY_PERSISTED_STATE, errors: [] });
   });
+
+  it('round-trips the trip sequence number and the wall time of the write', async () => {
+    const store = new PersistStore(join(dir, 'state.json'), logger);
+    await store.save({ ...sample, tripSeq: 42, lastWallMs: 1_790_000_000_000 });
+    expect(await store.load()).toEqual({ ...sample, tripSeq: 42, lastWallMs: 1_790_000_000_000 });
+    expect(parsePersistedState({ tripSeq: 0, lastWallMs: null })).toEqual({
+      state: { ...EMPTY_PERSISTED_STATE, tripSeq: 0 },
+      errors: [],
+    });
+    expect(parsePersistedState({ tripSeq: 1.5, lastWallMs: 'noon' })).toEqual({
+      state: EMPTY_PERSISTED_STATE,
+      errors: ['tripSeq: invalid', 'lastWallMs: invalid'],
+    });
+    expect(parsePersistedState({ tripSeq: -1, lastWallMs: 9e15 })?.errors).toEqual([
+      'tripSeq: invalid',
+      'lastWallMs: invalid',
+    ]);
+  });
 });
 
 describe('TripStore', () => {
@@ -449,6 +467,42 @@ describe('TripStore', () => {
     expect(s.endedAfter(since - 1, 100).map((t) => t.id)).toEqual(['trip-3', 'trip-2']);
     expect(s.endedAfter(since, 100).map((t) => t.id)).toEqual(['trip-3']);
     expect(s.endedAfter(0, 1).map((t) => t.id)).toEqual(['trip-3']);
+  });
+
+  it('gives a phone what it is missing by sequence number, and older trips by end time', async () => {
+    const s = await store();
+    // Two trips from before sequence numbers, then three numbered ones recorded with a clock
+    // that went back: their end times say nothing about their order.
+    await s.append(trip(1));
+    await s.append(trip(2));
+    for (const [n, seq] of [
+      [3, 1],
+      [4, 2],
+      [5, 3],
+    ] as const) {
+      await s.append(trip(n, { seq, startedAt: trip(1).startedAt, endedAt: trip(6 - n).endedAt }));
+    }
+    expect(s.maxSeq).toBe(3);
+    // An older app: by end time, newest first, as before.
+    expect(s.missedBy({ since: trip(1).endedAt }, 100).map((t) => t.id)).toEqual(
+      s.endedAfter(trip(1).endedAt, 100).map((t) => t.id),
+    );
+    // A phone that has trip 1 and the first numbered one: the rest, oldest first.
+    expect(s.missedBy({ since: trip(1).endedAt, sinceSeq: 1 }, 100).map((t) => t.id)).toEqual([
+      'trip-2',
+      'trip-4',
+      'trip-5',
+    ]);
+    expect(s.missedBy({ since: 0, sinceSeq: 0 }, 2).map((t) => t.id)).toEqual(['trip-1', 'trip-2']);
+    expect(s.missedBy({ since: 1e15, sinceSeq: 3 }, 100)).toEqual([]);
+    expect((await store()).get('trip-5')?.seq).toBe(3);
+  });
+
+  it('keeps a sequence number only when it is a positive whole number', () => {
+    expect(isTripRecord(trip(1, { seq: 7 }))).toBe(true);
+    for (const seq of [0, -1, 1.5, Number.NaN, '7']) {
+      expect(isTripRecord({ ...trip(1), seq })).toBe(false);
+    }
   });
 
   it('deletes by id with an atomic rewrite', async () => {

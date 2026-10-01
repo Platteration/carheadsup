@@ -29,6 +29,13 @@ export interface TripPricing {
  * times are engine time in `TripState`, and wall-clock time when persisted (`shiftActiveTrip`).
  */
 export interface ActiveTrip {
+  /**
+   * The trip's sequence number (`TripRecord.seq`), taken when it starts, so that a trip
+   * completed again after a power cut lost the write that followed its completion gets the same
+   * number and id (the stores replace it rather than keep two). 0: none yet (a trip saved by a
+   * version before numbers; it takes the next one when it ends).
+   */
+  seq: number;
   startedAt: number;
   /** Last sample with the engine running or the vehicle moving (and the link up). */
   lastActivityAt: number;
@@ -78,6 +85,12 @@ export interface TripState {
    * (`reconcileResumedTrip`). Null otherwise, and once the trip ends.
    */
   resumed: ResumedTrip | null;
+  /**
+   * The last sequence number given to a trip (`TripRecord.seq`), 0 before the first. A trip takes
+   * the next one when it starts, so numbers only grow (a discarded trip leaves a gap). Seeded
+   * from the persisted state, so it keeps counting across restarts whatever the clock does.
+   */
+  lastSeq: number;
 }
 
 /** A trip continued across a restart, as `TripState.resumed` keeps it. */
@@ -93,12 +106,26 @@ export interface ResumedTrip {
    * from the first activity after the start-up on (null before).
    */
   sinceResume: ActiveTrip | null;
+  /**
+   * Engine time by which the start-up clock must be confirmed (a trusted `clock/sync`), or null
+   * when it was trusted (or has been confirmed). Resumed with an untrusted clock, the trip only
+   * looks continued, as the break cannot be measured: unless the real time arrives by then and
+   * shows a short break, the break counts as long — the trip from before the restart is
+   * completed with its saved times and what was driven since goes on as a trip of its own.
+   */
+  confirmBy: number | null;
 }
 
 /** At or above this speed the vehicle is moving; below it with the engine running it is idling. */
 export const TRIP_MOVING_KPH = 1;
 /** Consecutive samples further apart than this are not integrated across. */
 export const TRIP_MAX_GAP_MS = 5000;
+/**
+ * How long a trip resumed with an untrusted clock waits for the real time (network or phone)
+ * before the break counts as long (see `ResumedTrip.confirmBy`): enough for the HUD's Wi-Fi to
+ * come up and the phone to connect after a start.
+ */
+export const RESUME_CONFIRM_MS = 180_000;
 /** Economy needs at least this much distance with known fuel flow. */
 const MIN_ECONOMY_DISTANCE_KM = 0.1;
 
@@ -110,7 +137,15 @@ const round = (v: number, decimals: number): number => {
 const reading = (v: number | null): number | null =>
   v !== null && Number.isFinite(v) && v >= 0 ? v : null;
 
-export function createTripState(): TripState {
+/** A valid sequence number, or 0. */
+const validSeq = (seq: unknown): number =>
+  typeof seq === 'number' && Number.isSafeInteger(seq) && seq > 0 ? seq : 0;
+
+/**
+ * No trip in progress. `lastSeq` is the last sequence number given to a trip (from the persisted
+ * state; anything but a non-negative whole number counts as 0).
+ */
+export function createTripState(lastSeq = 0): TripState {
   return {
     current: null,
     lastCompleted: null,
@@ -118,7 +153,19 @@ export function createTripState(): TripState {
     active: null,
     endPending: false,
     resumed: null,
+    lastSeq: validSeq(lastSeq),
   };
+}
+
+/** Options of `resumeTripState`. */
+export interface ResumeOptions {
+  /** The last sequence number given to a trip (see `createTripState`). Default 0. */
+  lastSeq?: number;
+  /**
+   * Whether the start-up clock is trusted (`ClockState.trusted`). Default true. An untrusted
+   * one cannot measure the break: see `ResumedTrip.confirmBy`.
+   */
+  clockTrusted?: boolean;
 }
 
 /**
@@ -136,23 +183,31 @@ export function createTripState(): TripState {
  * The start-up clock can also be behind without showing it: a Pi without a real-time clock boots
  * with the time it saved at shutdown, so every break looks short and the trip is continued. The
  * trip then remembers where it was resumed (`TripState.resumed`) until it ends, so that network
- * time arriving later can split it after all (`reconcileResumedTrip`).
+ * time arriving later can split it after all (`reconcileResumedTrip`). When the server knows the
+ * start-up clock to be untrusted (`options.clockTrusted` false: it went back, so the HUD started
+ * from the time it last saved), the trip is continued only provisionally: unless the real time
+ * arrives within `RESUME_CONFIRM_MS` and shows a short break, it is split then — most restarts
+ * are an ignition cycle (see `ResumedTrip.confirmBy`).
  */
 export function resumeTripState(
   active: ActiveTrip,
   pricing: TripPricing,
   now: number,
   wallOffsetMs = 0,
+  options: ResumeOptions = {},
 ): TripState {
   const endPending = !(active.last.at <= now);
+  const confirmBy = (options.clockTrusted ?? true) ? null : now + RESUME_CONFIRM_MS;
+  const state = createTripState(options.lastSeq);
   return {
-    ...createTripState(),
+    ...state,
+    lastSeq: Math.max(state.lastSeq, active.seq),
     active,
     current: summarise(active, pricing, wallOffsetMs),
     endPending,
     resumed: endPending
       ? null
-      : { restored: active, resumedAt: now, wallOffsetMs, sinceResume: null },
+      : { restored: active, resumedAt: now, wallOffsetMs, sinceResume: null, confirmBy },
   };
 }
 
@@ -161,19 +216,40 @@ export function resumeTripState(
  * was resumed after a restart and the start-up clock turns out to have been behind by enough
  * that the break was really `config.endAfterEngineOffMs` or longer, split it again — the trip
  * from before the restart is completed with the times it was saved with, and what was driven
- * since becomes the trip in progress. Otherwise `state` is returned unchanged.
+ * since becomes the trip in progress. Otherwise, when the sync is `trusted` (the real time), a
+ * trip resumed with an untrusted clock is confirmed as one (`ResumedTrip.confirmBy` cleared);
+ * an untrusted sync leaves it waiting. Returns `state` itself when nothing changes.
  */
 export function reconcileResumedTrip(
   state: TripState,
   wallOffsetMs: number,
   config: TripConfig,
   pricing: TripPricing,
+  trusted = true,
 ): TripState {
   const { resumed } = state;
   if (resumed === null || state.active === null || !Number.isFinite(wallOffsetMs)) return state;
   const clockBehindMs = wallOffsetMs - resumed.wallOffsetMs;
   const breakMs = resumed.resumedAt - resumed.restored.lastActivityAt + clockBehindMs;
-  if (clockBehindMs <= 0 || breakMs < config.endAfterEngineOffMs) return state;
+  if (clockBehindMs > 0 && breakMs >= config.endAfterEngineOffMs) {
+    return splitResumed(state, config, pricing, wallOffsetMs);
+  }
+  if (!trusted || resumed.confirmBy === null) return state;
+  return { ...state, resumed: { ...resumed, confirmBy: null } };
+}
+
+/**
+ * Split a resumed trip at the restart: the trip from before it is completed with the times it
+ * was saved with, and what was driven since becomes the trip in progress.
+ */
+function splitResumed(
+  state: TripState,
+  config: TripConfig,
+  pricing: TripPricing,
+  wallOffsetMs: number,
+): TripState {
+  const { resumed } = state;
+  if (resumed === null) return state;
   const completed = finishTrip(
     { ...state, active: resumed.restored },
     config,
@@ -239,6 +315,7 @@ export function restoreActiveTrip(value: unknown): ActiveTrip | null {
   // Every field read below was validated above.
   const trip = value as unknown as ActiveTrip;
   return {
+    seq: validSeq(value['seq']),
     startedAt,
     lastActivityAt,
     distanceKm: trip.distanceKm,
@@ -267,21 +344,26 @@ export function restoreActiveTrip(value: unknown): ActiveTrip | null {
   };
 }
 
-/** Deterministic trip id derived from its (wall-clock) start time. */
-export function tripId(startedAt: number): string {
-  return `trip-${Math.trunc(startedAt).toString(36)}`;
+/**
+ * Deterministic trip id from its sequence number and (wall-clock) start time, both base 36: see
+ * `TripRecord.id`.
+ */
+export function tripId(seq: number, startedAt: number): string {
+  return `trip-${Math.trunc(seq).toString(36)}-${Math.trunc(startedAt).toString(36)}`;
 }
 
 /**
  * Advance the trip. A trip starts when the engine starts or the vehicle moves, integrates
  * distance (trapezoidal, gaps > 5 s are not bridged), fuel (from fuel rate), moving/idle time
  * and max speed, and ends after `config.endAfterEngineOffMs` of engine-off / link-down.
- * Trips shorter than `config.minDistanceKm` are discarded rather than completed.
- * Record ids must be deterministic (derived from `startedAt`), never random.
+ * Trips shorter than `config.minDistanceKm` are discarded rather than completed. Every trip takes
+ * the next sequence number when it starts (`TripState.lastSeq`). Record ids must be
+ * deterministic (from the sequence number and `startedAt`), never random.
  *
  * The end time is the last activity, not when the timeout expired. If activity resumes after a
  * silence longer than the timeout (e.g. no ticks arrived meanwhile) the old trip is closed and a
- * new one starts with this sample. A trip resumed with `endPending` is closed by any update.
+ * new one starts with this sample. A trip resumed with `endPending` is closed by any update, and
+ * one resumed with an untrusted clock is split at the restart once its `confirmBy` has passed.
  *
  * Durations are measured in engine time (`input.at`); the start and end times of summaries and
  * records are wall-clock times (`input.wallOffsetMs` added), so a clock step during the trip
@@ -300,6 +382,11 @@ export function updateTrip(
   const offset = wallOffset(input);
 
   let next = state;
+  const confirmBy = next.resumed?.confirmBy ?? null;
+  if (confirmBy !== null && input.at >= confirmBy) {
+    // The real time never came: count the break as long (see `ResumedTrip.confirmBy`).
+    next = splitResumed(next, config, pricing, offset);
+  }
   if (next.active !== null) {
     const silentMs = input.at - next.active.lastActivityAt;
     const timedOut = active
@@ -309,37 +396,35 @@ export function updateTrip(
   }
 
   let trip = next.active;
+  let { lastSeq } = next;
   if (trip === null) {
     if (!active) return next;
-    trip = startTrip(input, speedKph);
+    lastSeq += 1;
+    trip = startTrip(input, speedKph, lastSeq);
   } else {
     trip = integrate(trip, input, speedKph, active);
   }
-  const resumed =
-    next.resumed === null ? null : trackSinceResume(next.resumed, input, speedKph, active);
-  return { ...next, active: trip, current: summarise(trip, pricing, offset), resumed };
-}
-
-/** Integrate `input` into the part of a resumed trip driven since the start-up. */
-function trackSinceResume(
-  resumed: ResumedTrip,
-  input: TripInput,
-  speedKph: number | null,
-  active: boolean,
-): ResumedTrip {
-  const since = resumed.sinceResume;
-  if (since === null) {
-    return active ? { ...resumed, sinceResume: startTrip(input, speedKph) } : resumed;
+  let { resumed } = next;
+  if (resumed !== null) {
+    // The part of a resumed trip driven since the start-up, integrated alongside.
+    const since = resumed.sinceResume;
+    if (since !== null) {
+      resumed = { ...resumed, sinceResume: integrate(since, input, speedKph, active) };
+    } else if (active) {
+      lastSeq += 1;
+      resumed = { ...resumed, sinceResume: startTrip(input, speedKph, lastSeq) };
+    }
   }
-  return { ...resumed, sinceResume: integrate(since, input, speedKph, active) };
+  return { ...next, active: trip, current: summarise(trip, pricing, offset), resumed, lastSeq };
 }
 
 const wallOffset = (input: TripInput): number =>
   input.wallOffsetMs !== undefined && Number.isFinite(input.wallOffsetMs) ? input.wallOffsetMs : 0;
 
-function startTrip(input: TripInput, speedKph: number | null): ActiveTrip {
+function startTrip(input: TripInput, speedKph: number | null, seq: number): ActiveTrip {
   const odometerKm = reading(input.odometerKm);
   return {
+    seq,
     startedAt: input.at,
     lastActivityAt: input.at,
     distanceKm: 0,
@@ -496,8 +581,10 @@ function finishTrip(
   const odometer = odometerBounds(trip);
   const movingHours = trip.movingMs / 3_600_000;
   const startedAt = trip.startedAt + wallOffsetMs;
+  const seq = trip.seq > 0 ? trip.seq : state.lastSeq + 1;
   const record: TripRecord = {
-    id: tripId(startedAt),
+    id: tripId(seq, startedAt),
+    seq,
     startedAt,
     endedAt: trip.lastActivityAt + wallOffsetMs,
     distanceKm: round(trip.distanceKm, 3),
@@ -513,5 +600,10 @@ function finishTrip(
     startOdometerKm: odometer.start,
     endOdometerKm: odometer.end,
   };
-  return { ...ended, lastCompleted: record, completedCount: state.completedCount + 1 };
+  return {
+    ...ended,
+    lastCompleted: record,
+    completedCount: state.completedCount + 1,
+    lastSeq: Math.max(state.lastSeq, seq),
+  };
 }

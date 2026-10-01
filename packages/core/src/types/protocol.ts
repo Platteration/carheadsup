@@ -13,7 +13,8 @@ import type { TripRecord } from './records.ts';
  *  Renderer ⇄ HUD : WebSocket `ws://<hud>:<port>/ws/hud`   (projected display & dev console)
  *
  * Timestamps on the phone link are the phone's epoch ms; the HUD re-stamps on receipt
- * and uses the phone's clock only for absolute values such as ETA.
+ * and uses the phone's clock only for absolute values such as ETA — and, while its own system
+ * clock is not synchronised to network time, as its wall clock (`hello.time`, `ping.time`).
  *
  * The phone link runs over TLS with the HUD's self-signed certificate, which the phone pins, and
  * starts with a mutual proof of the pairing token (`phone.pairingToken`), which itself never
@@ -47,6 +48,12 @@ export interface PhoneHello {
    * challenge and the TLS certificate the phone was shown.
    */
   proof: string;
+  /**
+   * The phone's wall clock (epoch ms) when it sent this hello. A HUD whose system clock is not
+   * synchronised to network time sets its wall clock from it (the midpoint between its
+   * `challenge` and this hello). Absent from older phones.
+   */
+  time?: number;
 }
 
 export interface PhoneNav {
@@ -126,13 +133,20 @@ export interface PhoneInput {
 
 export interface PhoneTripsRequest {
   t: 'trips-request';
-  /** Return trips that ended after this epoch ms. */
+  /**
+   * Return trips that ended after this epoch ms. With `sinceSeq`, only trips without a sequence
+   * number (recorded by older HUD versions) are selected by it; older HUDs ignore `sinceSeq`.
+   */
   since: number;
+  /** Return trips whose `TripRecord.seq` is greater than this (oldest first). */
+  sinceSeq?: number;
 }
 
 export interface Ping {
   t: 'ping';
   id?: number;
+  /** The phone's wall clock (epoch ms) when it sent this ping (see `PhoneHello.time`). */
+  time?: number;
 }
 
 export type PhoneToHud =
@@ -194,6 +208,10 @@ export interface HudCallAction {
   action: 'accept' | 'decline';
 }
 
+/**
+ * Answer to `trips-request`: newest first for `since`; with `sinceSeq`, the trips after it in
+ * the order they were recorded, so a phone that gets the most per answer asks again from there.
+ */
 export interface HudTrips {
   t: 'trips';
   trips: TripRecord[];

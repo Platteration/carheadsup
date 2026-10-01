@@ -12,6 +12,8 @@ const finiteNonNegative = (value: unknown): value is number =>
 
 /** Largest odometer / consumption values accepted from disk (anything beyond is corruption). */
 const MAX_ODOMETER_KM = 10_000_000;
+/** Largest epoch ms of a JavaScript date. */
+const MAX_EPOCH_MS = 8.64e15;
 const MAX_L_PER_100KM = 1000;
 const MAX_GEARS = 12;
 
@@ -59,6 +61,14 @@ export function parsePersistedState(
   if (finiteNonNegative(avg) && avg <= MAX_L_PER_100KM) state.avgLPer100km = avg;
   else if (avg !== null && avg !== undefined) errors.push('avgLPer100km: invalid');
 
+  const seq = value['tripSeq'];
+  if (typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0) state.tripSeq = seq;
+  else if (seq !== null && seq !== undefined) errors.push('tripSeq: invalid');
+
+  const wall = value['lastWallMs'];
+  if (finiteNonNegative(wall) && wall <= MAX_EPOCH_MS) state.lastWallMs = wall;
+  else if (wall !== null && wall !== undefined) errors.push('lastWallMs: invalid');
+
   const records = value['maintenanceRecords'];
   if (Array.isArray(records)) {
     records.forEach((record: unknown, index) => {
@@ -88,8 +98,9 @@ function emptyState(): PersistedState {
 
 /**
  * `state.json`: the odometer, learned gear ratios and their numbering anchor, long-run
- * consumption, service records (dated on the wall clock) and the trip in progress (with
- * wall-clock times).
+ * consumption, service records (dated on the wall clock), the trip in progress (with
+ * wall-clock times), the last trip's sequence number and the wall time of the write (the next
+ * start's clock floor).
  *
  * Every save keeps the previous file as `state.json.bak` before the new one takes its place
  * (both steps atomic, see `writeFileAtomic`), so there is always a complete earlier copy.

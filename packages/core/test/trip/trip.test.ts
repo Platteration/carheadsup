@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TripConfig } from '../../src/types/config.ts';
 import {
+  RESUME_CONFIRM_MS,
   createTripState,
   reconcileResumedTrip,
   restoreActiveTrip,
@@ -219,7 +220,8 @@ describe('trip end', () => {
     // Fuel: 30 s idle at 0.8 L/h, 1 s ramp at 3.9 L/h, 360 s at 7 L/h.
     const litres = (30 * 0.8 + 3.9 + 360 * 7) / 3600;
     expect(s.lastCompleted).toEqual({
-      id: tripId(T0),
+      id: tripId(1, T0),
+      seq: 1,
       startedAt: T0,
       endedAt: lastActive,
       distanceKm: 9.986,
@@ -315,7 +317,7 @@ describe('trip end', () => {
     expect(s.lastCompleted).toBe(first);
     s = feed(s, parked(secondStart + 61_000, 300_000));
     expect(s.completedCount).toBe(2);
-    expect(s.lastCompleted?.id).toBe(tripId(secondStart));
+    expect(s.lastCompleted).toMatchObject({ id: tripId(2, secondStart), seq: 2 });
   });
 
   it('extrapolates start and end odometer from late / early readings', () => {
@@ -366,10 +368,94 @@ describe('trip end', () => {
   });
 });
 
+describe('trip sequence numbers', () => {
+  const trip = (from: number): TripInput[] => [
+    ...seconds(from, 60, () => ({ speedKph: 60 })),
+    ...parked(from + 61_000, 300_000),
+  ];
+
+  it('numbers completed trips on from the last one, and ids follow', () => {
+    let s = feed(createTripState(41), trip(T0));
+    expect(s.lastCompleted).toMatchObject({ seq: 42, id: tripId(42, T0) });
+    s = feed(s, trip(T0 + 400_000));
+    expect(s.lastCompleted).toMatchObject({ seq: 43, id: tripId(43, T0 + 400_000) });
+    expect(s.lastSeq).toBe(43);
+  });
+
+  it('gives two trips that start at the same clock time different ids', () => {
+    // A clock restored to the same time at every boot: the second "drive" starts at T0 again.
+    const first = feed(createTripState(), trip(T0));
+    const second = feed(createTripState(first.lastSeq), trip(T0));
+    expect(second.lastCompleted?.id).not.toBe(first.lastCompleted?.id);
+  });
+
+  it('gives every trip its number when it starts, so a discarded one leaves a gap', () => {
+    let s = feed(
+      createTripState(3),
+      seconds(T0, 5, () => ({ speedKph: 0 })),
+    );
+    expect(s.active?.seq).toBe(4);
+    expect(s.lastSeq).toBe(4);
+    s = feed(s, parked(T0 + 6_000, 300_000));
+    expect(s.completedCount).toBe(0);
+    s = feed(s, trip(T0 + 400_000));
+    expect(s.lastCompleted?.seq).toBe(5);
+  });
+
+  it('gives a trip completed again after a lost write the same number and id', () => {
+    // The trip is saved while driving, completes, and the power goes before the state that
+    // follows its completion is written: the next start completes the saved copy once more.
+    const driving = feed(
+      createTripState(9),
+      seconds(T0, 120, () => ({ speedKph: 60 })),
+    );
+    const saved = restoreActiveTrip(JSON.parse(JSON.stringify(driving.active)));
+    if (saved === null) throw new Error('not restored');
+    const completed = feed(driving, parked(T0 + 121_000, 300_000)).lastCompleted;
+    const again = updateTrip(
+      resumeTripState(saved, PRICING, T0 + 7_200_000, 0, { lastSeq: 9 }),
+      input(T0 + 7_200_000, { linkUp: false }),
+      CONFIG,
+      PRICING,
+    ).lastCompleted;
+    expect(completed?.seq).toBe(10);
+    expect(again?.id).toBe(completed?.id);
+  });
+
+  it('numbers a trip saved before numbers existed when it ends', () => {
+    const driving = feed(
+      createTripState(),
+      seconds(T0, 120, () => ({ speedKph: 60 })),
+    );
+    const legacy: unknown = { ...JSON.parse(JSON.stringify(driving.active)), seq: undefined };
+    const saved = restoreActiveTrip(JSON.parse(JSON.stringify(legacy)));
+    expect(saved?.seq).toBe(0);
+    if (saved === null) throw new Error('not restored');
+    const ended = updateTrip(
+      resumeTripState(saved, PRICING, T0 + 7_200_000, 0, { lastSeq: 4 }),
+      input(T0 + 7_200_000, { linkUp: false }),
+      CONFIG,
+      PRICING,
+    );
+    expect(ended.lastCompleted?.seq).toBe(5);
+    expect(ended.lastSeq).toBe(5);
+  });
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'starts from 0 with an invalid last number (%s)',
+    (lastSeq) => {
+      expect(createTripState(lastSeq).lastSeq).toBe(0);
+    },
+  );
+});
+
 describe('trip ids and state', () => {
-  it('derives ids deterministically from the start time', () => {
-    expect(tripId(T0)).toBe(`trip-${T0.toString(36)}`);
-    expect(tripId(T0 + 0.7)).toBe(tripId(T0));
+  it('derives ids deterministically from the sequence number and the start time', () => {
+    expect(tripId(1, T0)).toBe(`trip-1-${T0.toString(36)}`);
+    expect(tripId(36, T0)).toBe(`trip-10-${T0.toString(36)}`);
+    expect(tripId(1, T0 + 0.7)).toBe(tripId(1, T0));
+    // The same start (a clock that restores the same time at every boot): still distinct.
+    expect(tripId(2, T0)).not.toBe(tripId(1, T0));
   });
 
   it('is JSON-serialisable and deterministic', () => {
@@ -416,7 +502,7 @@ describe('trips across a restart', () => {
     expect(after.active).toBeNull();
     expect(after.completedCount).toBe(1);
     expect(after.lastCompleted).toMatchObject({
-      id: tripId(T0),
+      id: tripId(1, T0),
       endedAt: T0 + 600_000,
       distanceKm: expect.closeTo(9.93, 2) as unknown,
     });
@@ -431,7 +517,7 @@ describe('trips across a restart', () => {
       ...parked(T0 + 761_000, 400_000),
     ]);
     expect(after.completedCount).toBe(1);
-    expect(after.lastCompleted?.id).toBe(tripId(T0));
+    expect(after.lastCompleted?.id).toBe(tripId(1, T0));
     expect(after.lastCompleted?.distanceKm).toBeGreaterThan(10.9);
   });
 
@@ -473,7 +559,7 @@ describe('trips across a restart', () => {
     expect(after.completedCount).toBe(1);
     expect(after.endPending).toBe(false);
     expect(after.lastCompleted).toMatchObject({
-      id: tripId(T0),
+      id: tripId(1, T0),
       startedAt: T0,
       endedAt: T0 + 600_000,
       distanceKm: expect.closeTo(9.93, 2) as unknown,
@@ -504,7 +590,7 @@ describe('trips across a restart', () => {
       const split = reconcileResumedTrip(state, DAY, CONFIG, PRICING);
       expect(split.completedCount).toBe(1);
       expect(split.lastCompleted).toMatchObject({
-        id: tripId(T0),
+        id: tripId(1, T0),
         startedAt: T0,
         endedAt: T0 + 600_000,
         distanceKm: expect.closeTo(9.93, 2) as unknown,
@@ -526,7 +612,7 @@ describe('trips across a restart', () => {
       ]);
       expect(ended.completedCount).toBe(2);
       expect(ended.lastCompleted).toMatchObject({
-        id: tripId(boot + 20_000 + DAY),
+        id: tripId(2, boot + 20_000 + DAY),
         startedAt: boot + 20_000 + DAY,
         endedAt: boot + 151_000 + DAY,
         distanceKm: expect.closeTo(2.17, 1) as unknown,
@@ -539,7 +625,7 @@ describe('trips across a restart', () => {
       const resumed = resumeTripState(active, PRICING, T0 + 681_000);
       const split = reconcileResumedTrip(resumed, 3_600_000, CONFIG, PRICING);
       expect(split.completedCount).toBe(1);
-      expect(split.lastCompleted?.id).toBe(tripId(T0));
+      expect(split.lastCompleted?.id).toBe(tripId(1, T0));
       expect(split.active).toBeNull();
       expect(split.current).toBeNull();
     });
@@ -565,6 +651,91 @@ describe('trips across a restart', () => {
       if (active === null) throw new Error('not restored');
       expect(resumeTripState(active, PRICING, T0 + 300_000).resumed).toBeNull();
       expect(createTripState().resumed).toBeNull();
+    });
+  });
+
+  describe('resumed with an untrusted clock (it went back; the HUD started from its saved time)', () => {
+    /** Resumed 81 s after the last activity by the start-up clock, then 2 minutes of driving. */
+    function provisional(): { state: TripState; boot: number } {
+      const active = restoreActiveTrip(JSON.parse(JSON.stringify(drive().active)));
+      if (active === null) throw new Error('not restored');
+      const boot = T0 + 681_000;
+      const resumed = resumeTripState(active, PRICING, boot, 0, {
+        clockTrusted: false,
+        lastSeq: 7,
+      });
+      expect(resumed.resumed?.confirmBy).toBe(boot + RESUME_CONFIRM_MS);
+      const state = feed(resumed, [
+        ...parked(boot, 10_000, { linkUp: false }),
+        ...seconds(boot + 20_000, 120, () => ({ speedKph: 60, fuelRateLph: 4, odometerKm: 911 })),
+      ]);
+      expect(state.completedCount).toBe(0);
+      expect(state.current?.distanceKm).toBeCloseTo(11.93, 1);
+      return { state, boot };
+    }
+
+    it('splits it at the restart when the real time does not come in time', () => {
+      const { state, boot } = provisional();
+      const before = updateTrip(
+        state,
+        input(boot + RESUME_CONFIRM_MS - 1, { speedKph: 60 }),
+        CONFIG,
+        PRICING,
+      );
+      expect(before.completedCount).toBe(0);
+      const split = updateTrip(
+        before,
+        input(boot + RESUME_CONFIRM_MS, { speedKph: 60 }),
+        CONFIG,
+        PRICING,
+      );
+      expect(split.completedCount).toBe(1);
+      expect(split.lastCompleted).toMatchObject({
+        id: tripId(1, T0),
+        seq: 1, // its own number, taken when it started
+        startedAt: T0,
+        endedAt: T0 + 600_000,
+        distanceKm: expect.closeTo(9.93, 2) as unknown,
+      });
+      expect(split.resumed).toBeNull();
+      // Today's drive goes on as a trip of its own, numbered after the last one given.
+      expect(split.active).toMatchObject({ seq: 8, startedAt: boot + 20_000 });
+      expect(split.lastSeq).toBe(8);
+      expect(split.current?.distanceKm).toBeCloseTo(2, 1);
+    });
+
+    it('splits a trip nothing was driven after too', () => {
+      const active = restoreActiveTrip(JSON.parse(JSON.stringify(drive().active)));
+      if (active === null) throw new Error('not restored');
+      const boot = T0 + 681_000;
+      const resumed = resumeTripState(active, PRICING, boot, 0, { clockTrusted: false });
+      const after = feed(resumed, parked(boot, RESUME_CONFIRM_MS, { linkUp: false }));
+      expect(after.completedCount).toBe(1);
+      expect(after.active).toBeNull();
+      expect(after.current).toBeNull();
+    });
+
+    it('keeps it as one when the real time shows a short break', () => {
+      const { state, boot } = provisional();
+      // The phone's time: the start-up clock was right after all (81 s + 2 min of break < 5 min).
+      expect(reconcileResumedTrip(state, 0, CONFIG, PRICING, false)).toBe(state);
+      const confirmed = reconcileResumedTrip(state, 120_000, CONFIG, PRICING, true);
+      expect(confirmed.resumed?.confirmBy).toBeNull();
+      expect(confirmed.active).toBe(state.active);
+      const later = feed(
+        confirmed,
+        seconds(boot + RESUME_CONFIRM_MS, 10, () => ({ speedKph: 60, wallOffsetMs: 120_000 })),
+      );
+      expect(later.completedCount).toBe(0);
+      expect(later.current?.startedAt).toBe(T0 + 120_000);
+    });
+
+    it('splits it at once when the real time shows a long break', () => {
+      const { state, boot } = provisional();
+      const split = reconcileResumedTrip(state, 3_600_000, CONFIG, PRICING, true);
+      expect(split.completedCount).toBe(1);
+      expect(split.lastCompleted).toMatchObject({ seq: 1, startedAt: T0, endedAt: T0 + 600_000 });
+      expect(split.active?.startedAt).toBe(boot + 20_000);
     });
   });
 
@@ -604,7 +775,7 @@ describe('trip times and the wall clock', () => {
     s = feed(s, parked(T0 + 602_000, 300_000, { wallOffsetMs: offset }));
     expect(s.completedCount).toBe(1);
     expect(s.lastCompleted).toMatchObject({
-      id: tripId(T0 + offset),
+      id: tripId(1, T0 + offset),
       startedAt: T0 + offset,
       endedAt: T0 + 601_000 + offset,
       durationS: 601,

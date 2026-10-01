@@ -87,6 +87,11 @@ public data class PhoneHello(
      * certificate the phone was shown (43 base64url characters).
      */
     val proof: String,
+    /**
+     * The phone's clock (epoch ms) when it sent the hello: a HUD without network time takes its
+     * wall clock from it. Omitted when null.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val time: Long? = null,
 ) : PhoneToHud
 
 /** Turn-by-turn guidance state; `active = false` ends guidance. */
@@ -168,15 +173,29 @@ public data class PhoneLocation(
 @SerialName("input")
 public data class PhoneInput(val action: InputAction) : PhoneToHud
 
-/** Ask for trips that ended after [since] (epoch ms); answered with [HudTrips]. */
+/**
+ * Ask for the trips the phone is missing; answered with [HudTrips]. [sinceSeq]: the trips the HUD
+ * numbered after it ([TripRecord.seq]); [since] (epoch ms): those without a number (older HUD
+ * versions) that ended after it — an older HUD ignores [sinceSeq] and goes by [since] alone.
+ * See [dev.carheadsup.protocol.api.TripCursors].
+ */
 @Serializable
 @SerialName("trips-request")
-public data class PhoneTripsRequest(val since: Long) : PhoneToHud
+public data class PhoneTripsRequest(
+    val since: Long,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val sinceSeq: Long? = null,
+) : PhoneToHud
 
-/** Application-level heartbeat; the HUD answers with [HudPong] carrying the same id. */
+/**
+ * Application-level heartbeat; the HUD answers with [HudPong] carrying the same id. [time] is the
+ * phone's clock when it was sent (see [PhoneHello.time]). Both are omitted when null.
+ */
 @Serializable
 @SerialName("ping")
-public data class PhonePing(@EncodeDefault(EncodeDefault.Mode.NEVER) val id: Long? = null) : PhoneToHud
+public data class PhonePing(
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val id: Long? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val time: Long? = null,
+) : PhoneToHud
 
 // ---------------------------------------------------------------------------------------------
 // HUD → Phone

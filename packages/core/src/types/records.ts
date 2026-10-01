@@ -6,7 +6,19 @@ import type { GearAnchor } from '../vehicle/gear.ts';
  * (converted from engine time with the latest clock offset when the trip ends).
  */
 export interface TripRecord {
+  /**
+   * `trip-<seq>-<start>` (both base 36): the sequence number keeps ids unique on this HUD
+   * whatever its clock does; the start time keeps them apart from another HUD's trips (or this
+   * one's after its data was wiped) in the phone's log. Opaque to everything else.
+   */
   id: string;
+  /**
+   * The HUD's sequence number of this trip, taken when it started: 1 for its first, then one more
+   * for every trip started since (a trip too short to keep leaves a gap). It only grows, whatever
+   * the clock does, so the phone syncs by it (`trips-request.sinceSeq`). Absent from trips
+   * recorded by HUD versions before it existed.
+   */
+  seq?: number;
   startedAt: number;
   endedAt: number;
   distanceKm: number;
@@ -87,4 +99,17 @@ export interface PersistedState {
    * before it existed.
    */
   activeTrip?: ActiveTrip | null;
+  /**
+   * The last sequence number given to a trip (`TripRecord.seq`; 0 or absent: none yet). Absent in
+   * files written before it existed.
+   */
+  tripSeq?: number;
+  /**
+   * The HUD's wall clock when this was written (epoch ms): a floor for the next start. A system
+   * clock that reads earlier at start-up has gone back — a Pi without a real-time clock under a
+   * read-only root restores the same time at every boot — so the HUD's wall clock starts here
+   * instead and counts as untrusted until network or phone time arrives. Written by the server
+   * (`extractPersisted` leaves it out); absent in files written before it existed.
+   */
+  lastWallMs?: number | null;
 }

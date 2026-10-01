@@ -287,6 +287,8 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     createSensorSources: () => [],
     createFrameSinks: () => [],
     advertiseHud: () => null,
+    // Whatever the machine running the tests says: no network time unless a test says so.
+    clockSynchronized: () => false,
     ...options,
   });
   let port: number;
@@ -434,6 +436,8 @@ export interface TestPhone {
   app?: string;
   appVersion?: string;
   v?: number;
+  /** The phone's clock sent with the hello (`hello.time`); left out by default. */
+  time?: number;
 }
 
 /**
@@ -465,6 +469,7 @@ export function answerChallenge(
     appVersion: phone.appVersion ?? '1.2.3',
     nonce,
     proof,
+    ...(phone.time === undefined ? {} : { time: phone.time }),
   };
 }
 

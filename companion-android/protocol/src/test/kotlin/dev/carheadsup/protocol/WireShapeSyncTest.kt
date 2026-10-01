@@ -152,7 +152,7 @@ class WireShapeSyncTest {
     @Test
     fun `phone to HUD messages match protocol_ts field by field`() {
         val protocol = source("protocol.ts")
-        assertSends(PhoneHello.serializer(), tsInterface(protocol, "PhoneHello"))
+        assertSends(PhoneHello.serializer(), tsInterface(protocol, "PhoneHello"), omittedWhenNull = setOf("time"))
         assertSends(PhoneNav.serializer(), tsInterface(protocol, "PhoneNav"), omittedWhenNull = setOf("maneuver"))
         assertSends(PhoneRoad.serializer(), tsInterface(protocol, "PhoneRoad"))
         assertSends(PhoneHazards.serializer(), tsInterface(protocol, "PhoneHazards"))
@@ -161,16 +161,27 @@ class WireShapeSyncTest {
         assertSends(PhoneMessage.serializer(), tsInterface(protocol, "PhoneMessage"))
         assertSends(PhoneLocation.serializer(), tsInterface(protocol, "PhoneLocation"))
         assertSends(PhoneInput.serializer(), tsInterface(protocol, "PhoneInput"))
-        assertSends(PhoneTripsRequest.serializer(), tsInterface(protocol, "PhoneTripsRequest"))
-        assertSends(PhonePing.serializer(), tsInterface(protocol, "Ping"), omittedWhenNull = setOf("id"))
+        assertSends(
+            PhoneTripsRequest.serializer(),
+            tsInterface(protocol, "PhoneTripsRequest"),
+            omittedWhenNull = setOf("sinceSeq"),
+        )
+        assertSends(PhonePing.serializer(), tsInterface(protocol, "Ping"), omittedWhenNull = setOf("id", "time"))
     }
 
     @Test
     fun `fields sent as omitted rather than null really are omitted`() {
         val nav = PhoneWire.encodeUnchecked(PhoneMessages.navEnded("google-maps"))
         assertFalse("maneuver" in ProtocolJson.parseToJsonElement(nav).jsonObject)
-        val ping = PhoneWire.encodeUnchecked(PhonePing())
-        assertFalse("id" in ProtocolJson.parseToJsonElement(ping).jsonObject)
+        val ping = ProtocolJson.parseToJsonElement(PhoneWire.encodeUnchecked(PhonePing())).jsonObject
+        assertFalse("id" in ping)
+        assertFalse("time" in ping)
+        val trips = PhoneWire.encodeUnchecked(PhoneMessages.tripsRequest(0))
+        assertFalse("sinceSeq" in ProtocolJson.parseToJsonElement(trips).jsonObject)
+        val hello = PhoneWire.encodeUnchecked(
+            PhoneMessages.hello("d", "8PHy8_T19vf4-fr7_P3-_w", "1", "ICEiIyQlJicoKSorLC0uLw", "A".repeat(43)),
+        )
+        assertFalse("time" in ProtocolJson.parseToJsonElement(hello).jsonObject)
     }
 
     @Test

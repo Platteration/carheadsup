@@ -137,7 +137,7 @@ export class Harness {
     config: HudConfig = makeConfig(),
     persistedState: PersistedStateWithTrip = persisted(),
     now: number = T0,
-    options?: { simulated?: boolean },
+    options?: { simulated?: boolean; clockTrusted?: boolean },
   ) {
     this.config = config;
     this.state = freezeDeep(createInitialState(config, persistedState, now, options));

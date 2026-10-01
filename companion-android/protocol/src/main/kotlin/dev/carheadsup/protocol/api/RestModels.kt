@@ -15,6 +15,11 @@ import kotlinx.serialization.Serializable
 @Serializable
 public data class TripRecord(
     val id: String,
+    /**
+     * The HUD's sequence number of this trip (1, 2, 3 … per HUD, whatever its clock does); null
+     * for trips recorded by HUD versions before it existed. See [TripCursors].
+     */
+    val seq: Long? = null,
     val startedAt: Long,
     val endedAt: Long,
     val distanceKm: Double,

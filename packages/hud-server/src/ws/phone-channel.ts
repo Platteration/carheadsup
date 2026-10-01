@@ -14,6 +14,7 @@ import type {
 } from '@carheadsup/core';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
 import type { RawData, WebSocket } from 'ws';
+import type { PhoneTimeSample } from '../clock.ts';
 import { hudProof, phoneProof, proofsEqual, randomAuthId } from '../phone/auth.ts';
 import { phoneMessageToEvents } from '../phone/translate.ts';
 import { TokenBucket } from './rate-limit.ts';
@@ -77,8 +78,16 @@ export interface PhoneChannelOptions {
   dispatch(event: HudEvent): void;
   /** Effective config (vehicle name, pairing token, readMessagesAloud). */
   getConfig(): HudConfig;
-  /** Trips that ended after `since`, newest first. */
-  tripsEndedAfter(since: number, limit: number): TripRecord[];
+  /**
+   * The trips a `trips-request` asks for (`since`, and `sinceSeq` from newer phones), at most
+   * `limit` (see `TripStore.missedBy`).
+   */
+  tripsMissed(query: { since: number; sinceSeq?: number }, limit: number): TripRecord[];
+  /**
+   * A reading of the authenticated phone's clock (`hello.time`, `ping.time`), with the delay
+   * estimated from this session's challenge → hello round trip, as it arrives.
+   */
+  onPhoneTime?(sample: PhoneTimeSample): void;
   /** Maintenance items currently due, pushed right after `welcome`. */
   dueMaintenance(): HudMaintenanceDue | null;
   /**
@@ -112,6 +121,13 @@ interface Session {
   readonly channelBinding: string;
   /** The nonce of this connection's `challenge`. */
   readonly hudNonce: string;
+  /** When the `challenge` was sent (the channel's clock). */
+  challengedAt: number;
+  /**
+   * Estimated one-way delay to the phone: half the challenge → hello round trip, which bounds
+   * how far off the phone's clock readings can be (null until the hello).
+   */
+  delayMs: number | null;
   phase: 'hello' | 'active' | 'closed';
   helloTimer: unknown;
   readonly bucket: TokenBucket;
@@ -149,6 +165,8 @@ interface Session {
  *    `ping` → `pong`, `trips-request` → `trips` (at most {@link TRIPS_REQUEST_BURST} in a row,
  *    then one per 5 s). An invalid message gets `error bad-message` but the session survives,
  *    until {@link MAX_CONSECUTIVE_INVALID} in a row.
+ *  - The time the phone sends with its hello and pings (`time`) goes to `onPhoneTime`, with
+ *    half the challenge → hello round trip as the delay estimate.
  *  - Each session is rate limited (token bucket, 50 msg/s, burst 100); excess messages are
  *    dropped with one `bad-message` notice per episode.
  *  - A session that stops reading (more than {@link MAX_PHONE_BACKLOG_BYTES} unsent) is closed
@@ -191,6 +209,8 @@ export class PhoneChannel {
           ? (this.options.certFingerprint ?? NO_CHANNEL_BINDING)
           : NO_CHANNEL_BINDING,
       hudNonce: randomAuthId(),
+      challengedAt: this.options.now(),
+      delayMs: null,
       phase: 'hello',
       helloTimer: null,
       bucket: new TokenBucket(
@@ -390,6 +410,7 @@ export class PhoneChannel {
     }
     session.phase = 'active';
     session.hello = hello;
+    session.delayMs = Math.max(0, this.options.now() - session.challengedAt) / 2;
     this.active = session;
     if (previous !== null && previous !== session) {
       this.options.logger.info(`Phone: session ${previous.id} replaced by session ${session.id}`);
@@ -410,6 +431,7 @@ export class PhoneChannel {
       `Phone: ${hello.device || 'phone'} connected from ${session.remoteAddress} (${hello.app} ${hello.appVersion}${session.transport === 'plain' ? ', unencrypted' : ''})`,
     );
     if (previous === null) this.notifyPhoneChange(true);
+    if (hello.time !== undefined) this.phoneTime(session, hello.time);
     this.options.dispatch({
       type: 'phone/link',
       connected: true,
@@ -432,6 +454,7 @@ export class PhoneChannel {
           session,
           message.id === undefined ? { t: 'pong' } : { t: 'pong', id: message.id },
         );
+        if (message.time !== undefined) this.phoneTime(session, message.time);
         return;
       case 'trips-request':
         if (!session.tripsBucket.take()) {
@@ -444,7 +467,12 @@ export class PhoneChannel {
         }
         this.sendTo(session, {
           t: 'trips',
-          trips: this.options.tripsEndedAfter(message.since, MAX_TRIPS_PER_REQUEST),
+          trips: this.options.tripsMissed(
+            message.sinceSeq === undefined
+              ? { since: message.since }
+              : { since: message.since, sinceSeq: message.sinceSeq },
+            MAX_TRIPS_PER_REQUEST,
+          ),
         });
         return;
       default:
@@ -463,6 +491,17 @@ export class PhoneChannel {
     this.options.logger.info(`Phone: ${session.hello?.device || 'phone'} disconnected`);
     this.options.dispatch({ type: 'phone/link', connected: false, at: this.options.now() });
     this.notifyPhoneChange(false);
+  }
+
+  /** Pass a reading of the phone's clock on (the session is authenticated). */
+  private phoneTime(session: Session, phoneMs: number): void {
+    try {
+      this.options.onPhoneTime?.({ phoneMs, delayMs: session.delayMs ?? 0 });
+    } catch (err) {
+      this.options.logger.warn(
+        `Phone: time handler failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private notifyPhoneChange(connected: boolean): void {

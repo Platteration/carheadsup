@@ -189,20 +189,31 @@ leave the car, without corrupting the SD card and without draining the battery.
 ## Clock
 
 The Raspberry Pi has no battery-backed clock (the Pi 5 has one, but only with its optional
-battery fitted). Without network time it boots with the time it last shut down, and network time
-arriving later steps the clock — forwards, or backwards if a real-time clock ran fast. The HUD's
-own timing survives both: it measures time on a monotonic clock, so a step mid-drive neither
-expires live data nor splits the trip in progress, and the clock widget, trip times, service
-dates and night mode follow the corrected time at once
-([details](architecture.md#engine-time-and-the-wall-clock)). But those are only as right as the
-system time — and without either a real-time clock or network time, the HUD cannot tell how long
-the car was off: every restart looks like a short stop, so consecutive drives are merged into one
-trip. (When network time arrives later, a trip merged that way is split again.)
+battery fitted). Without network time it boots with the time `fake-hwclock` saved at the last
+shutdown — and under the [read-only root](install-raspberry-pi.md#read-only-root-file-system)
+not even that: the saved time is written into the overlay and lost, so every boot starts at the
+same time, the one the image was set up with. Network time arriving later steps the clock —
+forwards, or backwards if a real-time clock ran fast. The HUD's own timing survives both: it
+measures time on a monotonic clock, so a step mid-drive neither expires live data nor splits the
+trip in progress, and the clock widget, trip times, service dates and night mode follow the
+corrected time at once ([details](architecture.md#engine-time-and-the-wall-clock)).
 
-- **Network time via the phone**: if the Pi joins the phone's hotspot (instead of being the
-  hotspot), `systemd-timesyncd` sets the time at every start. See
+Without network time the HUD takes the time from the **companion app**: the phone sends its
+clock when it connects and with every heartbeat, and the HUD follows it (it never sets the
+system clock; [details](protocol.md#the-huds-clock)). Before the phone has connected, the HUD
+never runs earlier than the time it last saved in its data directory (which the read-only root
+leaves writable): a start whose system clock reads earlier counts on from there, and treats its
+clock as only a lower bound — the clock widget stays hidden, a trip from before the restart is
+completed after 3 minutes unless the phone shows the break was short, and a service recorded
+meanwhile is dated again once the real time is known. Trips are numbered, so none is lost or
+overwritten in the phone's log whatever the clock did. Without the phone, the clock widget, the
+sun-based night mode and day-based service reminders still need a real-time clock:
+
+- **Network time via the phone's hotspot**: if the Pi joins the phone's hotspot (instead of being
+  the hotspot), `systemd-timesyncd` sets the time at every start. See
   [install guide](install-raspberry-pi.md#8-wi-fi-for-the-phone).
-- **DS3231 RTC module** (I²C address `0x68`, shares the bus with the sensors): add
+- **DS3231 RTC module** (I²C address `0x68`, shares the bus with the sensors; recommended for a
+  HUD that is the phone's access point, especially under the read-only root): add
   `dtoverlay=i2c-rtc,ds3231` to `/boot/firmware/config.txt`, then follow the module's
   Raspberry Pi guide for the remaining OS steps — reading the clock at boot and setting it once
   from network time — which differ between OS releases. `timedatectl` shows whether the system

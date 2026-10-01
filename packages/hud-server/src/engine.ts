@@ -50,7 +50,10 @@ export interface EngineOutputs {
   sendToPhone(message: HudToPhone): void;
   /** Persist a completed trip. */
   saveTrip(trip: TripRecord): Promise<void>;
-  /** Write the persisted state (odometer, learned ratios, service records, trip in progress). */
+  /**
+   * Write the persisted state (odometer, learned ratios, service records, trip in progress,
+   * trip sequence number, and the wall time of the write: `lastWallMs`).
+   */
   savePersisted(state: PersistedState): Promise<void>;
 }
 
@@ -63,6 +66,12 @@ export interface HudEngineOptions {
   outputs: EngineOutputs;
   /** The wall (system) clock, epoch ms. Default `Date.now`. */
   now?: Clock;
+  /**
+   * Whether the wall clock `now` is known to be right (`ClockState.trusted`; see `WallClock`).
+   * Read at start-up and before every event; a change is passed on with a `clock/sync`. Default:
+   * always.
+   */
+  clockTrusted?: () => boolean;
   /**
    * A monotonic ms counter that engine time follows. Default: `performance.now()`, or — when only
    * `now` is given (tests with a fake clock) — `now` without its backward steps.
@@ -107,8 +116,10 @@ export function maintenanceDueMessage(
  *    (network time on a Pi without a real-time clock, possibly hours or days mid-drive) neither
  *    expires live data nor splits the trip in progress. The wall clock reaches the core as an
  *    offset: a `clock/sync` event on `start()` and before any event once the offset has moved
- *    by more than {@link CLOCK_SYNC_TOLERANCE_MS} (a `clock/sync` dispatched from outside just
- *    asks for a fresh measurement). Events dispatched from inside an effect handler are queued
+ *    by more than {@link CLOCK_SYNC_TOLERANCE_MS} or its trust changed (`clockTrusted`; a
+ *    `clock/sync` dispatched from outside just asks for a fresh measurement). The wall time of
+ *    every write of the persisted state goes with it (`lastWallMs`, the next start's floor).
+ *    Events dispatched from inside an effect handler are queued
  *    and processed in order. (A `phone/link` from a different phone clears the previous phone's
  *    route, road, call, media and hazards in the reducer.)
  *  - A tick event is dispatched every {@link TICK_INTERVAL_MS}; frames are composed on their
@@ -137,8 +148,11 @@ export class HudEngine {
   private readonly queue: HudEvent[] = [];
   private draining = false;
   private readonly time: EngineClock;
+  private readonly clockTrusted: () => boolean;
   /** The wall-clock offset the core was last told (`clock/sync`). */
   private syncedOffset = 0;
+  /** Whether the core was last told the wall clock is trusted. */
+  private syncedTrusted: boolean;
 
   private running = false;
   private stopped = false;
@@ -172,9 +186,12 @@ export class HudEngine {
     const monotonic =
       options.monotonic ?? (options.now === undefined ? SYSTEM_MONOTONIC : monotonicView(wall));
     this.time = new EngineClock(wall, monotonic);
+    this.clockTrusted = options.clockTrusted ?? (() => true);
+    this.syncedTrusted = this.clockTrusted();
     // Engine time starts at the wall clock: the initial state's offset of 0 is right.
     this.current = createInitialState(this.cfg, options.persisted, this.lastAt, {
       simulated: this.simulated,
+      clockTrusted: this.syncedTrusted,
     });
     this.lastSavedJson = JSON.stringify(this.snapshot());
     this.lastSavedOdometerKm = this.current.odometer.km;
@@ -315,22 +332,26 @@ export class HudEngine {
   }
 
   /**
-   * Measure the wall clock's offset from engine time and pass it to the core when it moved by
-   * more than {@link CLOCK_SYNC_TOLERANCE_MS} since the last sync (or when `force`d).
+   * Measure the wall clock's offset from engine time and pass it to the core, with its trust,
+   * when it moved by more than {@link CLOCK_SYNC_TOLERANCE_MS} since the last sync, when the
+   * trust changed, or when `force`d.
    */
   private syncClock(at: number, force: boolean): void {
     const wall = this.time.wall();
     if (wall === null) return;
     const offset = Math.round(wall - at);
     const moved = offset - this.syncedOffset;
-    if (!force && Math.abs(moved) <= CLOCK_SYNC_TOLERANCE_MS) return;
+    const trusted = this.clockTrusted();
+    const trustChanged = trusted !== this.syncedTrusted;
+    if (!force && !trustChanged && Math.abs(moved) <= CLOCK_SYNC_TOLERANCE_MS) return;
     if (Math.abs(moved) > CLOCK_SYNC_TOLERANCE_MS) {
       this.logger.info(
-        `Engine: the system clock moved ${moved > 0 ? 'forward' : 'back'} by ${describeDuration(Math.abs(moved))}; timing is unaffected, the displayed time follows`,
+        `Engine: the wall clock moved ${moved > 0 ? 'forward' : 'back'} by ${describeDuration(Math.abs(moved))}; timing is unaffected, the displayed time follows`,
       );
     }
     this.syncedOffset = offset;
-    this.apply({ type: 'clock/sync', wallOffsetMs: offset, at });
+    this.syncedTrusted = trusted;
+    this.apply({ type: 'clock/sync', wallOffsetMs: offset, trusted, at });
   }
 
   private apply(stamped: HudEvent): void {
@@ -369,6 +390,9 @@ export class HudEngine {
         );
         this.track(this.outputs.saveTrip(trip), `saving trip ${trip.id}`);
         this.sendToPhone({ t: 'trip-completed', trip });
+        // Soon, also when the next trip goes on at once (a resumed trip split at the restart):
+        // until then a power cut brings the completed trip back at the next start.
+        this.requestPersist();
         return;
       }
       case 'maintenance/due': {
@@ -427,7 +451,10 @@ export class HudEngine {
     if (json === this.lastSavedJson) return Promise.resolve();
     let write: Promise<void>;
     try {
-      write = Promise.resolve(this.outputs.savePersisted(snapshot));
+      // The write's wall time, for the next start's floor; it alone never asks for a write.
+      const wall = this.time.wall();
+      const lastWallMs = wall === null ? null : Math.round(wall);
+      write = Promise.resolve(this.outputs.savePersisted({ ...snapshot, lastWallMs }));
     } catch (err) {
       write = Promise.reject(err instanceof Error ? err : new Error(String(err)));
     }

@@ -44,9 +44,10 @@ export type HudEvent =
   /**
    * Where the wall clock stands relative to engine time: wall-clock epoch ms − `at`. The server
    * sends it on start and whenever the difference drifts (e.g. network time stepped the system
-   * clock); see `ClockState`.
+   * clock) or the clock becomes trusted; `trusted` absent leaves `ClockState.trusted` as it is.
+   * See `ClockState`.
    */
-  | { type: 'clock/sync'; wallOffsetMs: number; at: number }
+  | { type: 'clock/sync'; wallOffsetMs: number; trusted?: boolean; at: number }
   | { type: 'config'; config: HudConfig; at: number }
 
   // OBD-II

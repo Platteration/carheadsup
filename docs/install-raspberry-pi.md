@@ -270,7 +270,8 @@ On the phone, join `CarHUD` and tell Android to stay connected although the netw
 internet. The HUD is `https://10.42.0.1:8443` for browsers (`http://10.42.0.1:8080` redirects
 there); the companion app connects to the same TLS port, `10.42.0.1:8443`.
 
-The Pi itself has no internet on its own network — no network time (see
+The Pi itself has no internet on its own network — no network time (the HUD takes the time from
+the companion app once it connects; for the time before that, see
 [hardware.md](hardware.md#clock)) and no updates. To update at home:
 `sudo nmcli connection down carheadsup-hotspot` (the Pi falls back to your home Wi-Fi), update,
 then `sudo nmcli connection up carheadsup-hotspot`.
@@ -441,7 +442,9 @@ Power disappears whenever the ignition goes off. The HUD's own files are written
 but the OS writes elsewhere too. For a car that is switched off without a clean shutdown, make the
 root file system read-only with the overlay of `raspi-config` (the `overlayroot` package): every
 change to the root file system then lives in RAM and is gone at the next power cycle, so the HUD
-needs a file system of its own outside the overlay.
+needs a file system of its own outside the overlay. That includes the time `fake-hwclock` saves:
+without a real-time clock every boot starts at the same time, and the HUD relies on the time it
+saved itself and on the phone's clock ([hardware.md](hardware.md#clock)).
 
 1. **Finish setting up first.** With the overlay active, changes outside the HUD's data
    partition — `/etc/default/carheadsup`, unit drop-ins, packages, Wi-Fi settings — are lost at
@@ -576,7 +579,7 @@ renderer clients pass their token) or message content.
 | Light or gesture sensor does nothing | `i2cdetect -y 1` shows the address? I²C enabled? The log says whether the `i2c-bus` module is missing (then rebuild with `build-essential` installed: `npm ci`, `sudo deploy/install.sh`). `id carheadsup` lists the `i2c` group? |
 | Buttons do nothing | `gpiod` installed? BCM numbers (not header pins) in the config? The log names the GPIO chip and lines it watches. |
 | Backlight never dims | `ls /sys/class/backlight` — HDMI panels usually have no backlight device (the page is dimmed instead). For DSI panels: `ls -l /sys/class/backlight/*/brightness` should show group `video` writable (udev rule; reboot after installing). `journalctl -u carheadsup -b \| grep Backlight`: "no backlight device found" or "no usable device" at start-up is fine if a later line says "controlling …" — the HUD looks again every 10 s, so a display driver or udev rule that comes up after the server is picked up by itself. If "controlling" never follows, fix the permissions (`sudo udevadm trigger --subsystem-match=backlight --action=add` applies the rule without a reboot). |
-| Wrong clock / dates | See [hardware.md](hardware.md#clock): network time or an RTC. |
+| Wrong clock / dates, or no clock on the HUD | Without network time the HUD takes the time from the companion app once it connects, and hides the clock until then if the system clock went back ([hardware.md](hardware.md#clock)); the log says `Clock: …`. For the time before the phone connects: network time or an RTC. |
 | Hotspot not visible | Wi-Fi country set (`--country`)? `nmcli device status`, `rfkill list`. |
 | Port 8080 taken | Set `server.port` (or `CARHEADSUP_PORT` in `/etc/default/carheadsup`) to a free port of 1024 or above, restart, point the kiosk at it (`CARHEADSUP_KIOSK_URL`; it stays black until then) and re-run the installer if it uses the static Avahi file (it picks up either setting). Port 8443 (the phone's) likewise: `server.tlsPort` or `CARHEADSUP_TLS_PORT`. |
 

@@ -24,8 +24,9 @@ class ApiTest {
         fuel: Double? = 0.8,
         cost: Double? = 1.5,
         currency: String = "EUR",
+        seq: Long? = null,
     ) = TripRecord(
-        id = id, startedAt = endedAt - 1_200_000, endedAt = endedAt, distanceKm = distanceKm, durationS = 1_200.0,
+        id = id, seq = seq, startedAt = endedAt - 1_200_000, endedAt = endedAt, distanceKm = distanceKm, durationS = 1_200.0,
         movingS = 1_000.0, idleS = 200.0, fuelUsedL = fuel, avgLPer100km = fuel?.let { it / distanceKm * 100 },
         maxSpeedKph = 95.0, avgMovingSpeedKph = 36.0, cost = cost, currency = currency,
         startOdometerKm = null, endOdometerKm = null,
@@ -126,9 +127,22 @@ class ApiTest {
         }
 
         @Test
-        fun `sync cursor is the newest end time`() {
+        fun `sync cursor is the newest end time of trips without a sequence number`() {
             assertEquals(0L, TripLog.syncCursor(emptyList()))
             assertEquals(3_000L, TripLog.syncCursor(listOf(trip("a", 1_000), trip("c", 3_000))))
+            // Numbered trips are synced by number: their end times say nothing.
+            assertEquals(1_000L, TripLog.syncCursor(listOf(trip("a", 1_000), trip("n", 9_000, seq = 4))))
+            assertEquals(0L, TripLog.syncCursor(listOf(trip("n", 9_000, seq = 4))))
+        }
+
+        @Test
+        fun `a trip's sequence number is read when present and absent from older HUDs`() {
+            val numbered = ProtocolJson.decodeFromString(
+                TripRecord.serializer(),
+                ProtocolJson.encodeToString(TripRecord.serializer(), trip("n", 9_000, seq = 4)),
+            )
+            assertEquals(4L, numbered.seq)
+            assertNull(TripLog.decode(TripLog.encode(listOf(trip("a", 1_000)))).single().seq)
         }
 
         @Test

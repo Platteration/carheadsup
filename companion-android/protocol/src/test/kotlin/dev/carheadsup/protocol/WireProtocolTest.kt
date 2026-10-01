@@ -94,6 +94,24 @@ class WireProtocolTest {
         }
 
         @Test
+        fun `hello and ping carry the phone's clock when given, and leave it out otherwise`() {
+            val time = 1_790_000_000_123L
+            val hello = encode(PhoneMessages.hello("Pixel 9", DEVICE_ID, "1.2.0", NONCE, PROOF, time = time))
+            assertEquals(JsonPrimitive(time), hello["time"])
+            assertEquals(JsonPrimitive(time), encode(PhoneMessages.ping(7, time))["time"])
+            assertFalse("time" in encode(PhoneMessages.ping(7)))
+        }
+
+        @Test
+        fun `trips-request sends sinceSeq only when given`() {
+            assertEquals(
+                mapOf("t" to JsonPrimitive("trips-request"), "since" to JsonPrimitive(5)),
+                encode(PhoneMessages.tripsRequest(5)),
+            )
+            assertEquals(JsonPrimitive(41), encode(PhoneMessages.tripsRequest(5, sinceSeq = 41))["sinceSeq"])
+        }
+
+        @Test
         fun `road always sends unlimited and uses contract enum names`() {
             val json =
                 encode(

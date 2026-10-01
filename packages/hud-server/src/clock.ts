@@ -97,3 +97,145 @@ export class EngineClock {
     return wall === null ? null : Math.round(wall - this.read());
   }
 }
+
+/** Where {@link WallClock} takes the time from. */
+export type WallClockSource =
+  /** The system clock, which gave no reason for doubt (it has not gone back). */
+  | 'system'
+  /** The system clock had gone back: counting on from the time the HUD last saved. */
+  | 'saved'
+  /** The paired phone's clock (the system clock is not synchronised to network time). */
+  | 'phone'
+  /** The system clock, synchronised to network time. */
+  | 'network';
+
+/** One reading of the phone's clock (`hello.time`, `ping.time`) as it arrived. */
+export interface PhoneTimeSample {
+  /** The phone's clock when it sent the message, epoch ms. */
+  phoneMs: number;
+  /** Estimated time the message took to arrive (half the round trip), ms. */
+  delayMs: number;
+}
+
+/** What {@link WallClock.phoneTime} did with a sample. */
+export type PhoneTimeResult =
+  /** Not used: network time rules, the sample is implausible, or its delay too uncertain. */
+  | 'ignored'
+  /** The wall clock already agreed (within the tolerance); now trusted, if it was not. */
+  | 'confirmed'
+  /** The wall clock was set from it. */
+  | 'set';
+
+/** A phone clock before this is not set (or the message is garbage): never used. */
+export const PHONE_TIME_MIN_MS = Date.UTC(2024, 0, 1);
+/** Phone samples within this of the wall clock (or of their own delay, if larger) change nothing. */
+export const PHONE_TIME_TOLERANCE_MS = 2000;
+/** Samples whose estimated delay is longer than this are too uncertain to use. */
+export const PHONE_TIME_MAX_DELAY_MS = 10_000;
+
+/**
+ * The HUD's wall clock: the system clock, corrected where it is known to be wrong. The HUD never
+ * sets the system clock; it keeps a correction instead, which {@link EngineClock} sees as an
+ * ordinary step of the wall clock.
+ *
+ * - Synchronised to network time ({@link setSynchronized}), the system clock is right: no
+ *   correction, trusted.
+ * - Otherwise a system clock that reads earlier than the time the HUD last saved at start-up
+ *   ({@link startFrom}) has gone back — a Pi without a real-time clock or network time, whose
+ *   read-only root restores the same time at every boot. The wall clock then counts on from the
+ *   saved time, which is only a lower bound: untrusted.
+ * - The paired phone's clock ({@link phoneTime}) is right whenever the system clock is not
+ *   synchronised: the phone has network time. Its readings set the correction (trusted) when
+ *   they disagree by more than {@link PHONE_TIME_TOLERANCE_MS}, and confirm it otherwise.
+ *
+ * Pure (no I/O, browser-safe): the server tells it about network time and the phone.
+ */
+export class WallClock {
+  private readonly system: Clock;
+  private correction = 0;
+  private trustedNow = true;
+  private synchronised = false;
+  private sourceNow: WallClockSource = 'system';
+
+  /** @param system the system clock, epoch ms. */
+  constructor(system: Clock) {
+    this.system = system;
+  }
+
+  /** The wall clock now, epoch ms (non-finite when the system clock reads non-finite). */
+  now(): number {
+    return this.system() + this.correction;
+  }
+
+  /** Whether the wall clock is known to be right (see the class): `ClockState.trusted`. */
+  get trusted(): boolean {
+    return this.trustedNow;
+  }
+
+  get source(): WallClockSource {
+    return this.sourceNow;
+  }
+
+  /** Wall clock − system clock, ms. */
+  get correctionMs(): number {
+    return this.correction;
+  }
+
+  /**
+   * At start-up: the wall time the HUD last saved (`PersistedState.lastWallMs`). When the system
+   * clock reads earlier (and is not synchronised), count on from there, untrusted; returns
+   * whether it did.
+   */
+  startFrom(savedWallMs: number | null | undefined): boolean {
+    if (this.synchronised || typeof savedWallMs !== 'number' || !Number.isFinite(savedWallMs)) {
+      return false;
+    }
+    const system = this.system();
+    if (!Number.isFinite(system) || system >= savedWallMs) return false;
+    this.correction = Math.round(savedWallMs - system);
+    this.trustedNow = false;
+    this.sourceNow = 'saved';
+    return true;
+  }
+
+  /**
+   * Whether the system clock is synchronised to network time. Once it is, the correction is
+   * dropped and the clock is trusted; returns whether that changed anything. (It is not undone
+   * when synchronisation is lost: the clock keeps running right.)
+   */
+  setSynchronized(synchronised: boolean): boolean {
+    if (!synchronised || this.synchronised) return false;
+    this.synchronised = true;
+    this.correction = 0;
+    this.trustedNow = true;
+    this.sourceNow = 'network';
+    return true;
+  }
+
+  /** A reading of the phone's clock as it arrived (see the class). */
+  phoneTime(sample: PhoneTimeSample): PhoneTimeResult {
+    if (this.synchronised) return 'ignored';
+    const { phoneMs, delayMs } = sample;
+    if (!Number.isFinite(phoneMs) || phoneMs < PHONE_TIME_MIN_MS || phoneMs > 8.64e15) {
+      return 'ignored';
+    }
+    if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > PHONE_TIME_MAX_DELAY_MS) {
+      return 'ignored';
+    }
+    const system = this.system();
+    if (!Number.isFinite(system)) return 'ignored';
+    const correction = Math.round(phoneMs + delayMs - system);
+    const tolerance = Math.max(PHONE_TIME_TOLERANCE_MS, delayMs);
+    if (Math.abs(correction - this.correction) <= tolerance) {
+      if (!this.trustedNow) {
+        this.trustedNow = true;
+        this.sourceNow = 'phone';
+      }
+      return 'confirmed';
+    }
+    this.correction = correction;
+    this.trustedNow = true;
+    this.sourceNow = 'phone';
+    return 'set';
+  }
+}

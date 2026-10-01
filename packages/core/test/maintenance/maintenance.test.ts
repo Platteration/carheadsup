@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createMaintenanceState,
+  dateUndatedServices,
   defaultMaintenanceItems,
   maintenanceStatus,
   recordService,
@@ -266,6 +267,7 @@ describe('maintenance state', () => {
       ],
       status: [],
       checkedAt: null,
+      undated: [],
     });
   });
 
@@ -291,6 +293,30 @@ describe('maintenance state', () => {
       remainingKm: 8000,
       remainingDays: 365,
     });
+  });
+
+  it('dates services recorded while the clock was untrusted once it is confirmed', () => {
+    const lowerBound = NOW - 40 * DAY; // the untrusted clock: the time it last saved
+    let state = createMaintenanceState([{ itemId: 'coolant', odometerKm: 10_000, at: NOW - DAY }]);
+    // Recorded at engine time 5000 while the wall clock read `lowerBound`.
+    state = recordService(state, 'oil', 47_900, lowerBound, 5000);
+    state = recordService(state, 'air-filter', 47_900, lowerBound, 6000);
+    expect(state.undated).toEqual([
+      { itemId: 'oil', recordedAt: 5000, at: lowerBound },
+      { itemId: 'air-filter', recordedAt: 6000, at: lowerBound },
+    ]);
+    // The air filter is recorded again once the clock is trusted: that date stands.
+    state = recordService(state, 'air-filter', 47_950, NOW);
+    expect(state.undated.map((u) => u.itemId)).toEqual(['oil']);
+    const dated = dateUndatedServices({ ...state, checkedAt: NOW }, NOW - 5000);
+    expect(dated.records).toEqual([
+      { itemId: 'coolant', odometerKm: 10_000, at: NOW - DAY },
+      { itemId: 'oil', odometerKm: 47_900, at: NOW },
+      { itemId: 'air-filter', odometerKm: 47_950, at: NOW },
+    ]);
+    expect(dated.undated).toEqual([]);
+    expect(dated.checkedAt).toBeNull();
+    expect(dateUndatedServices(dated, 0)).toBe(dated);
   });
 
   it('recordService appends a first record and sanitises the odometer', () => {

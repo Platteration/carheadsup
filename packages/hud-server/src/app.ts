@@ -15,10 +15,12 @@ import type {
 } from '@carheadsup/core';
 import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
+import { SYSTEM_MONOTONIC, WallClock, monotonicView } from './clock.ts';
+import type { PhoneTimeSample } from './clock.ts';
 import { advertiseHud as defaultAdvertiseHud } from './discovery/mdns.ts';
 import type { MdnsAdvert } from './discovery/mdns.ts';
 import { PAIRING_HOSTS_REFRESH_MS, pairingHosts } from './discovery/pairing-hosts.ts';
-import { HudEngine, maintenanceDueMessage } from './engine.ts';
+import { HudEngine, describeDuration, maintenanceDueMessage } from './engine.ts';
 import { createApiRouter } from './http/api.ts';
 import type { ConfigChange } from './http/api.ts';
 import { hudHostNames, isAllowedHost, isAuthorized, isLoopbackAddress } from './http/auth.ts';
@@ -51,6 +53,7 @@ import { HUD_ID_FILE, loadHudId } from './store/hud-id.ts';
 import { PersistStore } from './store/persist-store.ts';
 import { TripStore } from './store/trip-store.ts';
 import type { CertificateBundle } from './tls/certificate.ts';
+import { systemClockSynchronized } from './time-sync.ts';
 import { TLS_FILE, loadTlsIdentity } from './tls/identity.ts';
 import { PhoneChannel } from './ws/phone-channel.ts';
 import { RendererChannel } from './ws/renderer-channel.ts';
@@ -62,6 +65,8 @@ export const STOP_STEP_TIMEOUT_MS = 5000;
 const HTTP_CLOSE_GRACE_MS = 1000;
 /** Refused connections (over the per-device limits) are logged at most this often. */
 const REFUSAL_LOG_INTERVAL_MS = 60_000;
+/** How often to look whether the system clock has been synchronised to network time. */
+export const CLOCK_SYNC_CHECK_MS = 30_000;
 
 export const CONFIG_FILE = 'config.json';
 export const STATE_FILE = 'state.json';
@@ -116,6 +121,12 @@ export interface HudServerOptions {
    * `performance.now()`, or `now` without its backward steps when only `now` is given.
    */
   monotonic?: Clock;
+  /**
+   * Whether the system clock is synchronised to network time (checked at start-up and every
+   * {@link CLOCK_SYNC_CHECK_MS}). Default: `systemd-timesyncd`'s flag file (`time-sync.ts`).
+   * Until it is, the HUD's wall clock follows the paired phone's (see `WallClock`).
+   */
+  clockSynchronized?: () => boolean;
   timers?: Timers;
   logger?: Logger;
   // Injection seams for the pluggable modules (tests pass fakes).
@@ -192,6 +203,14 @@ export function createHudServer(options: HudServerOptions): HudServer {
   const configPath = resolve(options.configPath ?? join(dataDir, CONFIG_FILE));
   const rendererDir = resolve(options.rendererDir ?? DEFAULT_RENDERER_DIR);
   const stopTimeoutMs = tuning.stopTimeoutMs ?? STOP_STEP_TIMEOUT_MS;
+
+  // The HUD's wall clock: the system clock, corrected from the phone while it is not
+  // synchronised, and never earlier at start-up than the time the HUD last saved.
+  const wallClock = new WallClock(now);
+  const monotonic =
+    options.monotonic ?? (options.now === undefined ? SYSTEM_MONOTONIC : monotonicView(now));
+  const clockSynchronized = options.clockSynchronized ?? (() => systemClockSynchronized());
+  let clockCheckTimer: unknown = null;
 
   const configStore = new ConfigStore(configPath, logger);
   const persistStore = new PersistStore(join(dataDir, STATE_FILE), logger);
@@ -274,6 +293,47 @@ export function createHudServer(options: HudServerOptions): HudServer {
       mdns = null;
       logger.warn(`mDNS: advertising failed: ${describe(err)}`);
     }
+  }
+
+  /** Note network time: from then on the system clock is right as it is. */
+  function checkClockSync(): void {
+    let synchronized = false;
+    try {
+      synchronized = clockSynchronized();
+    } catch (err) {
+      logger.debug(`Clock: cannot tell whether the system clock is synchronised: ${describe(err)}`);
+    }
+    if (wallClock.setSynchronized(synchronized)) {
+      logger.info('Clock: the system clock is synchronised to network time');
+      engine?.dispatch({ type: 'clock/sync', wallOffsetMs: 0, at: 0 });
+    }
+  }
+
+  function scheduleClockCheck(): void {
+    clockCheckTimer = timers.setTimeout(() => {
+      clockCheckTimer = null;
+      if (stopping !== null) return;
+      checkClockSync();
+      if (wallClock.source !== 'network') scheduleClockCheck();
+    }, CLOCK_SYNC_CHECK_MS);
+  }
+
+  /** The phone's clock (`hello.time`, `ping.time`): the wall clock while there is no network time. */
+  function applyPhoneTime(sample: PhoneTimeSample): void {
+    const before = wallClock.correctionMs;
+    const wasTrusted = wallClock.trusted;
+    const result = wallClock.phoneTime(sample);
+    if (result === 'ignored' || (result === 'confirmed' && wasTrusted)) return;
+    if (result === 'set') {
+      const step = wallClock.correctionMs - before;
+      logger.info(
+        `Clock: no network time; the phone's clock is ${describeDuration(Math.abs(step))} ` +
+          `${step > 0 ? 'ahead of' : 'behind'} the HUD's, so the HUD follows the phone`,
+      );
+    } else {
+      logger.info("Clock: the phone's clock confirms the HUD's");
+    }
+    engine?.dispatch({ type: 'clock/sync', wallOffsetMs: 0, at: 0 });
   }
 
   /** When the HUD's addresses for the pairing QR code were last looked up (wall clock). */
@@ -484,6 +544,15 @@ export function createHudServer(options: HudServerOptions): HudServer {
       tripStore.load(),
     ]);
     hudId = id;
+    checkClockSync();
+    if (wallClock.startFrom(persisted.lastWallMs)) {
+      logger.warn(
+        `Clock: the system clock (${new Date(now()).toISOString()}) is earlier than the time the ` +
+          `HUD last saved; starting from that, until network time or the phone gives the real time`,
+      );
+    }
+    // Never number a trip twice, even if state.json was lost while the trip log was not.
+    const seeded = { ...persisted, tripSeq: Math.max(persisted.tripSeq ?? 0, tripStore.maxSeq) };
     stored = loaded.config;
     effective = effectiveConfig(loaded.config, overrides);
     const config = effective;
@@ -503,10 +572,11 @@ export function createHudServer(options: HudServerOptions): HudServer {
 
     const hudEngine = new HudEngine({
       config,
-      persisted,
+      persisted: seeded,
       simulated,
-      now,
-      ...(options.monotonic !== undefined ? { monotonic: options.monotonic } : {}),
+      now: () => wallClock.now(),
+      monotonic,
+      clockTrusted: () => wallClock.trusted,
       timers,
       logger,
       outputs: {
@@ -553,7 +623,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
       certFingerprint: identity?.fingerprint ?? null,
       dispatch: (event) => hudEngine.dispatch(event),
       getConfig: currentEffective,
-      tripsEndedAfter: (since, limit) => tripStore.endedAfter(since, limit),
+      tripsMissed: (query, limit) => tripStore.missedBy(query, limit),
+      onPhoneTime: applyPhoneTime,
       dueMaintenance: () => maintenanceDueMessage(hudEngine.state.maintenance.status),
       // With the simulator, a real phone takes precedence over the simulated one.
       onPhoneChange: (connected) => simulation?.setRealPhoneConnected(connected),
@@ -703,6 +774,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
     boundPort = await listen(server, config.server.host, config.server.port, 'HTTP');
 
     hudEngine.start();
+    if (wallClock.source !== 'network') scheduleClockCheck();
     listenHost = config.server.host;
     refreshPairingEndpoint();
     obd.start();
@@ -795,6 +867,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
     // Let a start in progress reach a consistent point first (never the wrapper: it awaits us).
     if (startAttempt !== null) await startAttempt.catch(() => {});
     logger.info('HUD server stopping');
+    if (clockCheckTimer !== null) timers.clearTimeout(clockCheckTimer);
+    clockCheckTimer = null;
     if (engine !== null) {
       // Save the odometer, service records and trip in progress first: the steps below may take
       // seconds each, and a supercap / UPS HAT may not last until the end. (engine.stop() writes

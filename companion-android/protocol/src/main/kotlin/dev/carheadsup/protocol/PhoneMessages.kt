@@ -8,17 +8,27 @@ public object PhoneMessages {
     /** `nav.source` for guidance parsed from Google Maps notifications. */
     public const val SOURCE_GOOGLE_MAPS: String = "google-maps"
 
-    /** A `hello`; normally built by [dev.carheadsup.protocol.auth.HudHandshake], which computes [proof]. */
-    public fun hello(device: String, deviceId: String, appVersion: String, nonce: String, proof: String): PhoneHello =
-        PhoneHello(
-            v = PROTOCOL_VERSION,
-            device = device,
-            deviceId = deviceId,
-            app = APP_NAME,
-            appVersion = appVersion,
-            nonce = nonce,
-            proof = proof,
-        )
+    /**
+     * A `hello`; normally built by [dev.carheadsup.protocol.auth.HudHandshake], which computes
+     * [proof] and adds the phone's clock as [time].
+     */
+    public fun hello(
+        device: String,
+        deviceId: String,
+        appVersion: String,
+        nonce: String,
+        proof: String,
+        time: Long? = null,
+    ): PhoneHello = PhoneHello(
+        v = PROTOCOL_VERSION,
+        device = device,
+        deviceId = deviceId,
+        app = APP_NAME,
+        appVersion = appVersion,
+        nonce = nonce,
+        proof = proof,
+        time = time,
+    )
 
     /** Ends guidance on the HUD. */
     public fun navEnded(source: String): PhoneNav = PhoneNav(active = false, source = source)
@@ -35,7 +45,8 @@ public object PhoneMessages {
 
     public fun input(action: InputAction): PhoneInput = PhoneInput(action)
 
-    public fun tripsRequest(since: Long): PhoneTripsRequest = PhoneTripsRequest(since)
+    public fun tripsRequest(since: Long, sinceSeq: Long? = null): PhoneTripsRequest =
+        PhoneTripsRequest(since, sinceSeq)
 
-    public fun ping(id: Long): PhonePing = PhonePing(id)
+    public fun ping(id: Long, time: Long? = null): PhonePing = PhonePing(id, time)
 }

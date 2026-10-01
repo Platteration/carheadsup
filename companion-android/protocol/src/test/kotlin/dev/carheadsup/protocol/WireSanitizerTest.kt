@@ -180,6 +180,9 @@ class WireSanitizerTest {
         val hello = WireSanitizer.sanitize(PhoneMessages.hello("d".repeat(200), id, "1", nonce, proof)) as PhoneHello
         assertEquals(WireLimits.NAME, hello.device.length)
         val valid = PhoneMessages.hello("d", id, "1", nonce, proof)
+        // A clock reading the HUD would refuse is left out rather than spoiling the hello.
+        assertNull((WireSanitizer.sanitize(valid.copy(time = -1)) as PhoneHello).time)
+        assertEquals(5L, (WireSanitizer.sanitize(valid.copy(time = 5)) as PhoneHello).time)
         assertEquals(valid, WireSanitizer.sanitize(valid))
         // The proof covers the id and nonce: nothing to repair, the HUD would refuse it.
         assertNull(WireSanitizer.sanitize(PhoneMessages.hello("d", "Pixel", "1", nonce, proof)))
@@ -190,6 +193,15 @@ class WireSanitizerTest {
     @Test
     fun `trips request cursor is clamped`() {
         assertEquals(0L, (WireSanitizer.sanitize(PhoneTripsRequest(-5)) as PhoneTripsRequest).since)
+        assertEquals(PhoneTripsRequest(0, 0), WireSanitizer.sanitize(PhoneTripsRequest(-5, sinceSeq = -1)))
+        assertEquals(PhoneTripsRequest(7, null), WireSanitizer.sanitize(PhoneTripsRequest(7)))
+    }
+
+    @Test
+    fun `a ping's clock reading is kept when valid and left out otherwise`() {
+        assertEquals(PhonePing(1, 5), WireSanitizer.sanitize(PhonePing(1, 5)))
+        assertEquals(PhonePing(1, null), WireSanitizer.sanitize(PhonePing(1, -5)))
+        assertEquals(PhonePing(1, null), WireSanitizer.sanitize(PhonePing(1, WireLimits.MAX_EPOCH_MS + 1)))
     }
 
     @Test

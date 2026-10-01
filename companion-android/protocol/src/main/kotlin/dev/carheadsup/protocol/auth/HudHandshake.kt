@@ -103,6 +103,8 @@ public class HudHandshake(
     pin: HudPin?,
     private val certFingerprint: String,
     private val newNonce: () -> String = { PhoneAuth.newId() },
+    /** The phone's clock, epoch ms, sent as `hello.time` (a HUD without network time uses it). */
+    private val wallClock: () -> Long = System::currentTimeMillis,
 ) {
     private val pin: HudPin? = HudPin.active(pin, pairingToken)
     private var challenge: HudChallenge? = null
@@ -167,7 +169,7 @@ public class HudHandshake(
             deviceId,
             certFingerprint,
         )
-        val hello = PhoneMessages.hello(device, deviceId, appVersion, nonce, proof)
+        val hello = PhoneMessages.hello(device, deviceId, appVersion, nonce, proof, time = wallClock())
         this.hello = hello
         return ChallengeResult.SendHello(hello)
     }

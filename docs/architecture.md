@@ -113,8 +113,15 @@ So there are two clocks:
   persistence, call timers, trip durations and trip ends, and `HudFrame.at` (the renderer's
   "frames keep coming" check).
 - **The wall clock** reaches the core as an offset: the engine dispatches
-  `{ type: 'clock/sync', wallOffsetMs, at }` (system clock − engine time) on start and before
-  the next event once the offset has moved by more than 2 s, and logs the step. The reducer keeps
+  `{ type: 'clock/sync', wallOffsetMs, trusted, at }` (wall clock − engine time) on start and
+  before the next event once the offset has moved by more than 2 s or the trust changed, and logs
+  the step. The wall clock is the system clock unless the server knows better (`WallClock`, same
+  file): without network time it follows the authenticated phone's clock (`hello.time`,
+  `ping.time`, [details](protocol.md#the-huds-clock)), and a start whose system clock reads
+  earlier than the time the HUD last saved (`state.json`'s `lastWallMs`) counts on from that
+  saved time — a Pi without a real-time clock under a read-only root restores the same time at
+  every boot. Such a clock is only a lower bound: `state.clock.trusted` is false until the phone or
+  network time confirms it, and meanwhile the clock widget is hidden. The reducer keeps
   it in `state.clock` and converts (`toWallTime`, `wallNow`) only where the absolute time
   matters: the clock widget; the sun (night mode); service records and due dates; the ETA's
   remaining minutes (the phone's ETA is wall-clock time); trip records — start, end and id, so
@@ -134,7 +141,13 @@ at shutdown, so every break looks short and the trip is continued. The core ther
 trip as restored, and what was driven since the start as a trip of its own
 (`TripState.resumed`), until the trip ends: if a `clock/sync` then shows that the break was long
 after all, the trip from before the restart is completed with its saved times and today's drive
-goes on as a new trip (`reconcileResumedTrip`).
+goes on as a new trip (`reconcileResumedTrip`). A start with an untrusted clock (see above)
+cannot measure the break at all, and most restarts are an ignition cycle: the trip is continued
+only provisionally, and unless a trusted `clock/sync` within 3 minutes (`RESUME_CONFIRM_MS`)
+shows a short break, it is split then all the same. A service recorded while the clock is
+untrusted is dated with the lower bound and dated again once the real time arrives
+(`MaintenanceState.undated`); after a restart the lower bound stays, so the reminder comes early
+rather than late.
 
 ## Staleness safety
 
@@ -332,7 +345,7 @@ default `~/.local/share/carheadsup`, and its `sim` subdirectory with `--sim`) ho
 | File | Contents | Written |
 | --- | --- | --- |
 | `config.json` | The configuration (unless `--config` points elsewhere). Pretty-printed and hand-editable; if the server has to correct it on load, the original is kept as `config.json.bak`. A new file gets a random pairing token (24 letters and digits, about 139 bits), so a new HUD is never open to every phone; an existing file never gets one. | When missing at start; on every change from the API |
-| `state.json` | Odometer, learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, and the trip in progress (`PersistedState.activeTrip`, with wall-clock times). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
+| `state.json` | Odometer, learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, the trip in progress (`PersistedState.activeTrip`, with wall-clock times), the last trip's sequence number (`tripSeq`) and the HUD's wall clock at the write (`lastWallMs`, the next start's [floor](#engine-time-and-the-wall-clock)). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
 | `trips.jsonl` | One completed trip per line, oldest first; at most 5,000 trips (the oldest are dropped). | Appended when a trip ends |
 | `hud-id` | The HUD's identity on the phone link (22 base64url characters), which paired phones pin. A corrupt file is moved to `hud-id.corrupt` and replaced; phones then report a different HUD until paired again. | Once, on the first start |
 | `tls.pem` | The HUD's TLS private key (ECDSA P-256) and self-signed certificate, which paired phones pin; mode `0600` (made so if it was readable by others). Made by the server itself (`hud-server/src/tls`), without the openssl command. A corrupt file (no key, no certificate, or a certificate for another key) is moved to `tls.pem.corrupt` (also `0600`) and replaced; phones then report "HUD certificate changed" until paired again. Not made while `server.tlsPort` is null. | Once, on the first start |
@@ -344,7 +357,10 @@ closed — with its last activity as the end time, then saved to `trips.jsonl` a
 phone if one is connected (a phone can also ask for missed trips with `trips-request`) — when
 the HUD was off longer than that, or continued after a shorter break. Its times are saved on the
 wall clock and it is closed as well when it was saved later than the new start's clock (see
-[Engine time and the wall clock](#engine-time-and-the-wall-clock)).
+[Engine time and the wall clock](#engine-time-and-the-wall-clock)). Completed trips are numbered
+1, 2, 3 … (`TripRecord.seq`, from `tripSeq`, never below the highest number in `trips.jsonl`), and
+the phone catches up by number, not by end time, so no trip is skipped or overwritten however
+wrong the clock was.
 
 The Pi loses power whenever the ignition goes off, so every write is crash-safe: whole files are
 written to a temporary file, `fsync`ed and renamed over the original, then the directory is

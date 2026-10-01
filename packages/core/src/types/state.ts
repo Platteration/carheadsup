@@ -98,6 +98,15 @@ export interface UiState {
 export interface ClockState {
   /** Wall-clock epoch ms − engine time, from the latest `clock/sync` (0 until then). */
   wallOffsetMs: number;
+  /**
+   * Whether the wall clock is known to be right. False while the server started with a system
+   * clock that had gone back (earlier than the time it last saved, `PersistedState.lastWallMs`:
+   * a Pi without a real-time clock or network time) and neither network time nor the phone's
+   * clock has set it since: the wall clock is then only a lower bound. Until then the clock
+   * widget is hidden, a trip resumed at start-up waits for the real time before it is continued
+   * (see `resumeTripState`), and services recorded meanwhile are dated again once it arrives.
+   */
+  trusted: boolean;
 }
 
 export interface HudState {

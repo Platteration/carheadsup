@@ -16,6 +16,8 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
+private const val PHONE_TIME = 1_790_000_000_000L
+
 class HudHandshakeTest {
     private val deviceId = "8PHy8_T19vf4-fr7_P3-_w"
     private val myHud = "AAECAwQFBgcICQoLDA0ODw"
@@ -54,6 +56,7 @@ class HudHandshakeTest {
         appVersion = "1.0",
         pin = pin,
         certFingerprint = cert,
+        wallClock = { PHONE_TIME },
     )
 
     private fun helloFor(handshake: HudHandshake, hud: FakeHud) =
@@ -70,6 +73,8 @@ class HudHandshakeTest {
         assertTrue(hud.accepts(hello))
         assertEquals(deviceId, hello.deviceId)
         assertEquals(PROTOCOL_VERSION, hello.v)
+        // The phone's clock, for a HUD without network time.
+        assertEquals(PHONE_TIME, hello.time)
         assertTrue(PhoneAuth.isValidId(hello.nonce))
         assertFalse(PhoneWire.encodeUnchecked(hello).contains("s3cret"))
         assertFalse(phone.verified)

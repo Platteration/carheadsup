@@ -49,9 +49,12 @@ const NULLABLE_NUMBERS = [
 /** Structural check of a trip read from disk (or handed to `append`). */
 export function isTripRecord(value: unknown): value is TripRecord {
   if (!isRecord(value)) return false;
-  const { id, currency } = value;
+  const { id, currency, seq } = value;
   if (typeof id !== 'string' || id === '' || id.length > MAX_ID_LENGTH) return false;
   if (typeof currency !== 'string' || currency.length > 16) return false;
+  if (seq !== undefined && !(typeof seq === 'number' && Number.isSafeInteger(seq) && seq > 0)) {
+    return false;
+  }
   return (
     REQUIRED_NUMBERS.every((key) => isFiniteNumber(value[key])) &&
     NULLABLE_NUMBERS.every((key) => isNullableNumber(value[key]))
@@ -62,6 +65,7 @@ export function isTripRecord(value: unknown): value is TripRecord {
 function pickTrip(trip: TripRecord): TripRecord {
   return {
     id: trip.id,
+    ...(trip.seq === undefined ? {} : { seq: trip.seq }),
     startedAt: trip.startedAt,
     endedAt: trip.endedAt,
     distanceKm: trip.distanceKm,
@@ -84,6 +88,14 @@ function newestFirst(a: TripRecord, b: TripRecord): number {
   return (
     b.startedAt - a.startedAt || b.endedAt - a.endedAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
   );
+}
+
+/** Which trips the phone asks for (`trips-request`). */
+export interface TripSyncQuery {
+  /** Trips that ended after this epoch ms — only those without a sequence number with `sinceSeq`. */
+  since: number;
+  /** Trips whose sequence number is greater than this (a phone that knows them). */
+  sinceSeq?: number;
 }
 
 export interface TripListQuery {
@@ -214,6 +226,37 @@ export class TripStore {
       if (trip.endedAt > since) out.push({ ...trip });
     }
     return out;
+  }
+
+  /**
+   * What a phone asking for `query` is missing, at most `limit`: without `sinceSeq` (an older
+   * app), the trips that ended after `since`, newest first. With it, the trips numbered after
+   * `sinceSeq` and those recorded without a number (by older HUD versions) that ended after
+   * `since`, oldest first — so one that gets `limit` trips asks again from the last of them, and
+   * none is skipped however wrong the clock was when they were recorded.
+   */
+  missedBy(query: TripSyncQuery, limit: number): TripRecord[] {
+    const { since, sinceSeq } = query;
+    if (sinceSeq === undefined) return this.endedAfter(since, limit);
+    const legacy: TripRecord[] = [];
+    const numbered: TripRecord[] = [];
+    for (const trip of this.ordered()) {
+      if (trip.seq === undefined) {
+        if (trip.endedAt > since) legacy.push(trip);
+      } else if (trip.seq > sinceSeq) {
+        numbered.push(trip);
+      }
+    }
+    legacy.sort((a, b) => a.endedAt - b.endedAt);
+    numbered.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    return [...legacy, ...numbered].slice(0, Math.max(0, Math.floor(limit))).map((t) => ({ ...t }));
+  }
+
+  /** The highest sequence number of any trip kept (0 when none has one). */
+  get maxSeq(): number {
+    let max = 0;
+    for (const trip of this.byId.values()) max = Math.max(max, trip.seq ?? 0);
+    return max;
   }
 
   /** Every trip as CSV (oldest first, like a logbook), via core's `tripsToCsv`. */

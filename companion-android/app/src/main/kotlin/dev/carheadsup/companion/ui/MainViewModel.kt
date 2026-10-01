@@ -220,12 +220,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Pulls trips from `GET /api/trips` (and asks over the socket when connected). */
     fun syncTrips() {
         tripSyncState.value = Remote.Loading
-        if (linkStatus.value is LinkStatus.Connected) {
-            graph.hub.publish(
-                PhoneMessages.tripsRequest(graph.trips.syncCursor),
-            )
-        }
+        val connected = linkStatus.value as? LinkStatus.Connected
         viewModelScope.launch {
+            if (connected != null) graph.hub.publish(graph.trips.syncRequest(connected.hudId))
             tripSyncState.value =
                 try {
                     val fetched = graph.api.trips()

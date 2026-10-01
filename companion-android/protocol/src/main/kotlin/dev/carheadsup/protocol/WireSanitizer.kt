@@ -34,6 +34,9 @@ public object WireLimits {
     public const val MAX_ACCURACY_M: Double = 100_000.0
     public const val MAX_SPEED_MPS: Double = 200.0
     public const val MAX_EPOCH_MS: Long = 8_640_000_000_000_000L
+
+    /** JavaScript's `Number.MAX_SAFE_INTEGER` (2^53 − 1): the largest `trips-request.sinceSeq`. */
+    public const val MAX_SAFE_INTEGER: Long = 9_007_199_254_740_991L
     public const val MAX_ROUNDABOUT_EXIT: Int = 32
 }
 
@@ -66,8 +69,12 @@ public object WireSanitizer {
         is PhoneMessage -> textMessage(message)
         is PhoneLocation -> location(message)
         is PhoneInput -> message
-        is PhoneTripsRequest -> PhoneTripsRequest(message.since.coerceIn(0L, WireLimits.MAX_EPOCH_MS))
-        is PhonePing -> message
+        is PhoneTripsRequest ->
+            PhoneTripsRequest(
+                message.since.coerceIn(0L, WireLimits.MAX_EPOCH_MS),
+                message.sinceSeq?.coerceIn(0L, WireLimits.MAX_SAFE_INTEGER),
+            )
+        is PhonePing -> message.copy(time = epochOrNull(message.time))
     }
 
     /**
@@ -120,8 +127,12 @@ public object WireSanitizer {
             device = label(m.device, WireLimits.NAME),
             app = label(m.app, WireLimits.NAME),
             appVersion = label(m.appVersion, WireLimits.VERSION),
+            time = epochOrNull(m.time),
         )
     }
+
+    /** An epoch-ms reading the HUD accepts (`time` of hello and ping), else null (left out). */
+    private fun epochOrNull(value: Long?): Long? = value?.takeIf { it in 0L..WireLimits.MAX_EPOCH_MS }
 
     private fun maneuver(m: Maneuver): Maneuver = m.copy(
         roundaboutExit = m.roundaboutExit?.takeIf { it in 1..WireLimits.MAX_ROUNDABOUT_EXIT },

@@ -459,7 +459,12 @@ function tpmsWidget({ state, config, moving }: WidgetEnv, zone: Zone): TpmsWidge
   return { id: 'tpms', zone, unit: pressureUnitLabel(unit), fl, fr, rl, rr, anyLow };
 }
 
-function clockWidget({ state, config }: WidgetEnv, zone: Zone): ClockWidget {
+/**
+ * The time of day — not while the wall clock is untrusted (`ClockState.trusted`: it went back
+ * at start-up and only a lower bound is known): no clock is better than a wrong one.
+ */
+function clockWidget({ state, config }: WidgetEnv, zone: Zone): ClockWidget | null {
+  if (!state.clock.trusted) return null;
   return { id: 'clock', zone, epochMs: wallNow(state), format: config.units.clock };
 }
 

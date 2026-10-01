@@ -69,8 +69,10 @@ drops a peer that did not answer the previous one; the companion additionally se
 messages every 5 s and reconnects when the HUD is silent for 15 s. A phone that stops reading
 (more than 1 MiB of unsent messages) is closed with 1008.
 
-The HUD stamps every message with its own clock on receipt. The phone's clock is used only for
-absolute times such as the ETA.
+The HUD stamps every message with its own clock on receipt. The phone's clock is used for
+absolute times such as the ETA — and as the HUD's wall clock while the HUD's system clock is not
+synchronised to network time: the `hello` and every `ping` carry it (`time`, see
+[the HUD's clock](#the-huds-clock)).
 
 ### `challenge` → `hello` → `welcome`
 
@@ -87,7 +89,8 @@ fresh random bytes (22 base64url characters) per connection.
 {
   "t": "hello", "v": 3, "device": "Pixel 9", "deviceId": "8PHy8_T19vf4-fr7_P3-_w",
   "app": "carheadsup-companion", "appVersion": "1.0.0",
-  "nonce": "ICEiIyQlJicoKSorLC0uLw", "proof": "llVyYellZIIYR5tEC9APzsA-YTGRKi45irjLwiuenwc"
+  "nonce": "ICEiIyQlJicoKSorLC0uLw", "proof": "llVyYellZIIYR5tEC9APzsA-YTGRKi45irjLwiuenwc",
+  "time": 1790187600000
 }
 ```
 
@@ -99,6 +102,7 @@ fresh random bytes (22 base64url characters) per connection.
 | `appVersion` | Up to 64 characters. |
 | `nonce` | Exactly 22 base64url characters: 16 fresh random bytes per connection. |
 | `proof` | Exactly 43 base64url characters; must be the phone proof below for `phone.pairingToken` and this connection's certificate (compared in constant time), otherwise `error bad-token` and close 4001. |
+| `time` | Optional (older apps leave it out): the phone's clock when it sent the hello, epoch ms (a whole number, 0 to 8.64e15). Used only once the proof checks out ([the HUD's clock](#the-huds-clock)). |
 
 ```json
 {
@@ -437,13 +441,38 @@ actions `primary`, `secondary`, `next-page`, `prev-page`, `toggle-blank`, `brigh
 `brightness-down` ([meaning](architecture.md#driver-input): e.g. at a stop, `next-page` opens the
 diagnostics dashboard and `secondary` closes it).
 
-**`trips-request`** — ask for trips that ended after an epoch-ms time:
-`{ "t": "trips-request", "since": 1790000000000 }`. Answered with `trips` (newest first, at most
-1,000; older ones through `GET /api/trips`). Up to 3 requests in a row are answered, then one per
-5 s; the excess ones get `error bad-message` ("Too many trip requests").
+**`trips-request`** — ask for the trips the phone is missing:
+`{ "t": "trips-request", "since": 1790000000000, "sinceSeq": 41 }`. With `sinceSeq` (a whole
+number ≥ 0), the answer has the trips the HUD numbered after it (`TripRecord.seq`) and, from older
+HUD versions' trips that carry no number, those that ended after `since` — oldest first, at most
+1,000, so a phone that gets 1,000 asks again from the last one. Without `sinceSeq` (older apps;
+older HUDs ignore it), it has the trips that ended after `since`, newest first, at most 1,000
+(older ones through `GET /api/trips`). Sequence numbers are per HUD, so the companion keeps one
+cursor per HUD id; end times are no cursor at all on a HUD whose clock went back (a Pi without a
+real-time clock can restore the same time at every boot). Up to 3 requests in a row are
+answered, then one per 5 s; the excess ones get `error bad-message` ("Too many trip requests").
 
-**`ping`** — `{ "t": "ping", "id": 7 }` (the `id` is optional); answered with
-`{ "t": "pong", "id": 7 }`.
+**`ping`** — `{ "t": "ping", "id": 7, "time": 1790187605000 }` (`id` and `time` are optional;
+`time` is the phone's clock as in `hello`); answered with `{ "t": "pong", "id": 7 }`.
+
+### The HUD's clock
+
+A HUD without a real-time clock that is the phone's access point never gets network time, and
+under a read-only root it restores the same time at every boot. So the HUD keeps its own wall
+clock (`WallClock`, `hud-server/src/clock.ts`; it never sets the system clock):
+
+- While `systemd-timesyncd` has synchronised the system clock (`/run/systemd/timesync/synchronized`
+  exists; checked at start-up and every 30 s), the system clock is right as it is.
+- Otherwise the phone's clock is: each `time` of the authenticated phone, plus half the
+  `challenge` → `hello` round trip, is compared with the HUD's wall clock, and when they differ by
+  more than 2 s (or the round trip's uncertainty, if larger) the HUD follows the phone. Readings
+  before 2024, or with a round trip over 20 s, are ignored.
+- At start-up, a system clock that reads earlier than the time the HUD last saved
+  (`lastWallMs` in `state.json`) has gone back: the HUD counts on from that saved time and treats
+  its clock as *untrusted* until the phone or network time confirms it — the clock widget is
+  hidden, a trip in progress before the restart waits up to 3 minutes for the real time to tell
+  whether the break was long, and services recorded meanwhile are dated again
+  ([details](architecture.md#engine-time-and-the-wall-clock)).
 
 ### HUD → phone
 
@@ -462,7 +491,8 @@ A trip record (also returned by `GET /api/trips`):
 
 ```json
 {
-  "id": "trip-1790187600000",
+  "id": "trip-15-muefh4lc",
+  "seq": 41,
   "startedAt": 1790187600000,
   "endedAt": 1790190720000,
   "distanceKm": 42.7,
@@ -481,7 +511,10 @@ A trip record (also returned by `GET /api/trips`):
 ```
 
 `fuelUsedL`, `avgLPer100km` and `cost` are null when the car provides no usable fuel data; the
-odometer fields are null when unknown.
+odometer fields are null when unknown. `seq` numbers the HUD's trips 1, 2, 3 … whatever its clock
+does (absent from trips recorded before it existed); `id` is opaque — `trip-<seq>-<start time>`,
+both base 36, which keeps it unique on the HUD and apart from another HUD's trips in the phone's
+log.
 
 ### Validation, limits and errors
 

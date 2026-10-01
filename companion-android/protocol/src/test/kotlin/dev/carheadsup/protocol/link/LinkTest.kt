@@ -221,6 +221,14 @@ class LinkTest {
         }
 
         @Test
+        fun `pings carry the phone's clock when given`() {
+            val heartbeat = Heartbeat(intervalMs = 5_000, timeoutMs = 15_000)
+            heartbeat.start(0)
+            assertEquals(1_790_000_000_000L, heartbeat.onTick(0, wallMs = 1_790_000_000_000L)!!.time)
+            assertNull(heartbeat.onTick(5_000)!!.time)
+        }
+
+        @Test
         fun `pong yields the round-trip time`() {
             val heartbeat = Heartbeat()
             heartbeat.start(0)
