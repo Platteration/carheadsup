@@ -8,6 +8,7 @@ import type { AdasState } from './adas.ts';
 import type { Alert } from './alerts.ts';
 import type { Hazard, NavInfo, RoadInfo } from './nav.ts';
 import type { CallInfo, MediaInfo, MessageInfo, PhoneLinkStatus } from './phone.ts';
+import type { OdometerCalibration } from './records.ts';
 import type { VehicleState } from './vehicle.ts';
 
 /**
@@ -23,6 +24,13 @@ export interface OdometerState {
   /** Timestamp and speed of the last integrated sample. */
   lastSampleAt: number | null;
   lastSpeedKph: number | null;
+  /** Keeping an estimated odometer in line with the dash (persisted). */
+  calibration: OdometerCalibration;
+  /**
+   * The last phone location fix accurate enough to measure distance with, for bridging what the
+   * speed PID cannot measure (the OBD link down or not up yet); not persisted.
+   */
+  gpsFix: { lat: number; lon: number; at: number } | null;
 }
 
 export interface NavState {

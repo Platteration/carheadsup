@@ -84,6 +84,16 @@ export function freshSupplyVoltage(state: HudState): number | null {
   return freshSignal(state, 'batteryVoltage') ?? freshSignal(state, 'controlModuleVoltage');
 }
 
+/**
+ * Kilometres the odometer estimate has run on since the dash reading was last entered by hand,
+ * or null when it is not an estimate (the car reports its odometer) or no reading was entered.
+ */
+export function kmSinceConfirmed(state: HudState): number | null {
+  const { source, calibration } = state.odometer;
+  if (source !== 'estimated' || calibration.confirmedKm === null) return null;
+  return calibration.rawKmSince * calibration.scale;
+}
+
 /** Distance the vehicle has covered since `integratedKm` was sampled, metres (≥ 0). */
 export function travelledSinceM(state: HudState, integratedKmAtUpdate: number): number {
   const m = (state.odometer.integratedKm - integratedKmAtUpdate) * 1000;

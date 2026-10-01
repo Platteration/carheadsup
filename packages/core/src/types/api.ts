@@ -85,6 +85,24 @@ export interface ApiDiagnostics {
   /** Latest canonical values and when they were received. */
   signals: Partial<Record<SignalId, { value: number; at: number }>>;
   vin: string | null;
+  /** The HUD's odometer, which distance-based service reminders count from. */
+  odometer: ApiOdometer;
+}
+
+export interface ApiOdometer {
+  /** km; null while unknown — distance-based service reminders are off then. */
+  km: number | null;
+  /**
+   * 'pid': the car reports it; 'estimated': the last dash reading entered by hand (or the
+   * car's last report) plus the distance driven since, measured from the speed.
+   */
+  source: 'pid' | 'estimated' | null;
+  /**
+   * Estimated km driven since the dash reading was last entered by hand; null when the car
+   * reports its odometer or no reading was entered. Confirming the dash reading now and then
+   * keeps the estimate (and the reminders) honest.
+   */
+  kmSinceConfirmed: number | null;
 }
 
 export interface ApiClearDtcsResult {

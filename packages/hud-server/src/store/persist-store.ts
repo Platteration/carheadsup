@@ -1,5 +1,9 @@
 import { rename } from 'node:fs/promises';
-import { EMPTY_PERSISTED_STATE, parseGearAnchor } from '@carheadsup/core';
+import {
+  EMPTY_PERSISTED_STATE,
+  parseGearAnchor,
+  restoreOdometerCalibration,
+} from '@carheadsup/core';
 import type { MaintenanceRecord, PersistedState, PersistedStateWithTrip } from '@carheadsup/core';
 import type { Logger } from '@carheadsup/obd';
 import { SerialQueue, isNotFound, readJsonFile, writeFileAtomic } from './atomic.ts';
@@ -39,6 +43,12 @@ export function parsePersistedState(
   const odometer = value['odometerKm'];
   if (finiteNonNegative(odometer) && odometer <= MAX_ODOMETER_KM) state.odometerKm = odometer;
   else if (odometer !== null && odometer !== undefined) errors.push('odometerKm: invalid');
+
+  const calibration = value['odometerCalibration'];
+  if (isRecord(calibration)) state.odometerCalibration = restoreOdometerCalibration(calibration);
+  else if (calibration !== null && calibration !== undefined) {
+    errors.push('odometerCalibration: invalid');
+  }
 
   const ratios = value['learnedGearRatios'];
   if (
@@ -97,10 +107,10 @@ function emptyState(): PersistedState {
 }
 
 /**
- * `state.json`: the odometer, learned gear ratios and their numbering anchor, long-run
- * consumption, service records (dated on the wall clock), the trip in progress (with
- * wall-clock times), the last trip's sequence number and the wall time of the write (the next
- * start's clock floor).
+ * `state.json`: the odometer and how its estimate is kept in line with the dash, learned gear
+ * ratios and their numbering anchor, long-run consumption, service records (dated on the wall
+ * clock), the trip in progress (with wall-clock times), the last trip's sequence number and the
+ * wall time of the write (the next start's clock floor).
  *
  * Every save keeps the previous file as `state.json.bak` before the new one takes its place
  * (both steps atomic, see `writeFileAtomic`), so there is always a complete earlier copy.

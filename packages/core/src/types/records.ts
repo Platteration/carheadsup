@@ -74,12 +74,37 @@ export interface MaintenanceItemStatus {
 }
 
 /**
+ * Keeps the odometer estimate in line with the dash when the car does not report its odometer
+ * (PID A6). The estimate grows with the distance integrated from the speed PID, which reads a few
+ * per cent off (tyre size, the speedometer's built-in lead) and misses the distance driven while
+ * the OBD link is down. Every dash reading entered by hand (a service, "Correct the odometer")
+ * confirms the estimate: it restarts from that reading and, measured against the previous one,
+ * corrects `scale`.
+ */
+export interface OdometerCalibration {
+  /** The dash reading last entered by hand, km; null before the first. */
+  confirmedKm: number | null;
+  /** Distance integrated from the speed PID since then, before scaling, km. */
+  rawKmSince: number;
+  /**
+   * Learned ratio of the dash's distance to the speed-integrated one, 0.9–1.1 (1 until two dash
+   * readings far enough apart have measured it).
+   */
+  scale: number;
+}
+
+/**
  * State that survives restarts, written by the server to the data directory.
  * The reducer seeds itself from this and exposes an updated copy via `extractPersisted`.
  */
 export interface PersistedState {
   /** Best-known odometer and when it was known. */
   odometerKm: number | null;
+  /**
+   * How the odometer estimate is kept in line with the dash (see {@link OdometerCalibration}).
+   * Absent in files written before it existed.
+   */
+  odometerCalibration?: OdometerCalibration | null;
   /** Automatically learned gear ratios (rpm per km/h, 1st gear first). */
   learnedGearRatios: number[] | null;
   /**

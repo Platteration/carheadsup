@@ -187,6 +187,27 @@ describe('dashboard pages', () => {
     expect(textOf(html)).toContain('+2 more');
   });
 
+  it('marks an estimated odometer with ≈', () => {
+    const odometer: DiagnosticGauge = {
+      signal: 'odometer',
+      label: 'Odometer',
+      value: 58_100,
+      unit: 'km',
+      decimals: 0,
+      min: 0,
+      max: 999_999,
+      status: 'ok',
+    };
+    const overview = SAMPLE_FRAMES['parked-overview']!;
+    const page = (gauge: DiagnosticGauge) =>
+      textOf(
+        renderHud({ ...overview, diagnostics: { ...overview.diagnostics!, gauges: [gauge] } }),
+      );
+    expect(page({ ...odometer, estimated: true })).toMatch(/Odometer ≈ 58\s?100 km/);
+    expect(page(odometer)).not.toContain('≈');
+    expect(page({ ...odometer, value: null, estimated: true })).not.toContain('≈');
+  });
+
   it('says so when there are no trouble codes', () => {
     const html = renderHud({ ...parked, diagnostics: { ...diag, dtcs: [], milOn: false } });
     expect(textOf(html)).toContain('No trouble codes Check-engine light off');

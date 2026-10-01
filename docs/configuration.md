@@ -282,10 +282,20 @@ or whichever comes first. Defaults:
 | `warnBeforeKm` / `warnBeforeDays` | ≥ 0 | "SERVICE DUE" (info) this early; "SERVICE OVERDUE" (caution) once past. |
 
 An item stays *unknown* until its last service is recorded: in the settings app (*Maintenance* →
-mark done, with the odometer) or `POST /api/maintenance/<id>/done`. The odometer comes from the car
-(PID `A6`, on newer cars) or is carried forward by the HUD from the speed; set it once in the
-settings app (`POST /api/odometer`) if your car does not report it. Due items are also pushed to
+mark done, with the odometer) or `POST /api/maintenance/<id>/done`. Due items are also pushed to
 the phone.
+
+**The odometer** comes from the car (PID `A6`, on newer cars). Most cars do not report it: then
+the HUD carries forward the last dash reading entered — with a service, or under *Correct the
+odometer* (`POST /api/odometer`) — with the distance driven, measured from the speed, and while
+the OBD link is down (or before it is up) from the phone's location fixes when they are accurate
+to 30 m. Until a reading has been entered the odometer is unknown and distance-based reminders are
+off; the settings app says so. The speed PID typically reads a few per cent off (tyre size, the
+speedometer's lead), so each dash reading entered at least 200 km after the previous one corrects
+the estimate's scale (by half the measured error each time, within ±10 %; a reading that implies
+more than −20 %/+25 % is taken as a typo and corrects nothing). The settings app shows the HUD's
+odometer and where it comes from, and asks for the dash reading again after 2,000 estimated km;
+the parked dashboard marks an estimated odometer with "≈".
 
 ### trip
 

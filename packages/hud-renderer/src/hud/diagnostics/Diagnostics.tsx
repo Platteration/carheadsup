@@ -44,6 +44,11 @@ function Gauge({ gauge }: { gauge: DiagnosticGauge }) {
         <div class="hud-gauge__label">{gauge.label}</div>
         <div class="hud-gauge__value">
           <span class="hud-num">
+            {hasValue && gauge.estimated === true && (
+              <span class="hud-gauge__approx" title="Estimated">
+                ≈
+              </span>
+            )}
             {hasValue ? formatNumber(gauge.value, gauge.decimals) : MISSING}
           </span>
           {gauge.unit && <span class="hud-unit">{gauge.unit}</span>}

@@ -4,10 +4,11 @@ import type { HudConfig } from '../types/config.ts';
 import type { HudEvent } from '../types/events.ts';
 import { SIGNAL_IDS } from '../types/signals.ts';
 import type { SignalId, SignalMap } from '../types/signals.ts';
+import type { OdometerCalibration } from '../types/records.ts';
 import type { HudState, OdometerState } from '../types/state.ts';
 import type { DtcEntry, DtcKind, ObdLinkStatus } from '../types/vehicle.ts';
 import { advanceContext, advanceFuel, advanceGear, advanceTrip } from './derived.ts';
-import { ODOMETER_MAX_GAP_MS, freshSignal } from './selectors.ts';
+import { ODOMETER_MAX_GAP_MS, freshSignal, freshSpeedKph } from './selectors.ts';
 
 /** Reducer handlers for OBD-II events. */
 
@@ -122,9 +123,9 @@ function trustOdometerReading(
  * Integrate distance trapezoidally between consecutive speed samples (gaps over 5 s are not
  * bridged). The odometer snaps to trusted PID 0xA6 readings (see `trustOdometerReading`;
  * `previousPid` is the last fresh reading before this batch) and is extrapolated with integrated
- * distance in between; it is 'pid'-sourced while that PID is fresh and trusted, otherwise an
- * estimate from the last known reading (the persisted baseline, a manual setting or an older
- * PID value).
+ * distance in between — scaled by the learned `calibration.scale` — ; it is 'pid'-sourced while
+ * that PID is fresh and trusted, otherwise an estimate from the last known reading (the
+ * persisted baseline, a dash reading entered by hand or an older PID value).
  */
 export function integrateOdometer(
   state: HudState,
@@ -134,20 +135,25 @@ export function integrateOdometer(
 ): OdometerState {
   const odo = state.odometer;
   const { now } = state;
-  let { integratedKm, lastSampleAt, lastSpeedKph } = odo;
+  let { integratedKm, lastSampleAt, lastSpeedKph, calibration } = odo;
+  let deltaKm = 0;
   if (speedSample !== null && speedSample >= 0) {
     if (lastSampleAt !== null && lastSpeedKph !== null) {
       const dt = now - lastSampleAt;
       if (dt > 0 && dt <= ODOMETER_MAX_GAP_MS) {
-        integratedKm += (((lastSpeedKph + speedSample) / 2) * dt) / 3_600_000;
+        deltaKm = (((lastSpeedKph + speedSample) / 2) * dt) / 3_600_000;
+        integratedKm += deltaKm;
       }
     }
     lastSampleAt = now;
     lastSpeedKph = speedSample;
   }
+  if (deltaKm > 0) {
+    calibration = { ...calibration, rawKmSince: calibration.rawKmSince + deltaKm };
+  }
 
   let { km, source } = odo;
-  const extrapolated = km === null ? null : km + (integratedKm - odo.integratedKm);
+  const extrapolated = km === null ? null : km + deltaKm * calibration.scale;
   if (
     odometerSample !== null &&
     trustOdometerReading(odometerSample, extrapolated, previousPid, now)
@@ -166,11 +172,147 @@ export function integrateOdometer(
     source === odo.source &&
     integratedKm === odo.integratedKm &&
     lastSampleAt === odo.lastSampleAt &&
-    lastSpeedKph === odo.lastSpeedKph
+    lastSpeedKph === odo.lastSpeedKph &&
+    calibration === odo.calibration
   ) {
     return odo;
   }
-  return { km, source, integratedKm, lastSampleAt, lastSpeedKph };
+  return { ...odo, km, source, integratedKm, lastSampleAt, lastSpeedKph, calibration };
+}
+
+/** Phone fixes measure distance only when at least this accurate (metres) … */
+export const GPS_BRIDGE_MAX_ACCURACY_M = 30;
+/** … at most this far apart … */
+export const GPS_BRIDGE_MAX_GAP_MS = 30_000;
+/**
+ * … and implying a speed within this range: below it the car stands still in the fixes' noise,
+ * above it one of them jumped.
+ */
+const GPS_BRIDGE_MIN_KPH = 5;
+const GPS_BRIDGE_MAX_KPH = 250;
+const EARTH_RADIUS_KM = 6371.0088;
+
+/** Great-circle distance between two points, km (haversine). */
+function greatCircleKm(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+  const rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad;
+  const dLon = (b.lon - a.lon) * rad;
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/**
+ * Bridge with the phone's location what the speed PID cannot measure — the OBD link down, or not
+ * up yet at the start of a drive: the distance between two accurate fixes (see the
+ * `GPS_BRIDGE_*` limits) is added to the odometer when no speed sample at all arrived between
+ * them, so nothing is counted twice. It enters the calibration as the speed-integrated distance
+ * it stands for (÷ scale), so the scale is learnt from the speed PID alone.
+ */
+export function bridgeOdometerWithGps(
+  state: HudState,
+  fix: { lat: number; lon: number; accuracyM: number | null },
+): HudState {
+  const odo = state.odometer;
+  const { lat, lon, accuracyM } = fix;
+  const usable =
+    Number.isFinite(lat) &&
+    Number.isFinite(lon) &&
+    Math.abs(lat) <= 90 &&
+    Math.abs(lon) <= 180 &&
+    accuracyM !== null &&
+    Number.isFinite(accuracyM) &&
+    accuracyM >= 0 &&
+    accuracyM <= GPS_BRIDGE_MAX_ACCURACY_M;
+  if (!usable)
+    return odo.gpsFix === null ? state : { ...state, odometer: { ...odo, gpsFix: null } };
+  const { now } = state;
+  const previous = odo.gpsFix;
+  let { km, calibration } = odo;
+  const speedSince =
+    odo.lastSampleAt !== null && previous !== null && odo.lastSampleAt > previous.at;
+  if (previous !== null && !speedSince && freshSpeedKph(state) === null) {
+    const dt = now - previous.at;
+    if (dt > 0 && dt <= GPS_BRIDGE_MAX_GAP_MS) {
+      const dKm = greatCircleKm(previous, fix);
+      const kph = dKm / (dt / 3_600_000);
+      if (kph >= GPS_BRIDGE_MIN_KPH && kph <= GPS_BRIDGE_MAX_KPH) {
+        if (km !== null) km += dKm;
+        calibration = {
+          ...calibration,
+          rawKmSince: calibration.rawKmSince + dKm / calibration.scale,
+        };
+      }
+    }
+  }
+  return { ...state, odometer: { ...odo, km, calibration, gpsFix: { lat, lon, at: now } } };
+}
+
+/** The learned distance scale stays within this range … */
+export const ODOMETER_SCALE_MIN = 0.9;
+export const ODOMETER_SCALE_MAX = 1.1;
+/**
+ * … is measured only over at least this much speed-integrated distance (dash readings are whole
+ * kilometres) …
+ */
+export const ODOMETER_SCALE_MIN_KM = 200;
+/**
+ * … from a dash distance / integrated distance ratio within this range (outside it the reading
+ * was mistyped, or the OBD link was down for a large part of the way: no measurement) …
+ */
+const ODOMETER_SCALE_ACCEPT: readonly [number, number] = [0.8, 1.25];
+/** … and each measurement moves it this far towards the measured value. */
+const ODOMETER_SCALE_WEIGHT = 0.5;
+
+/** No dash reading entered yet, nothing learned. */
+export const INITIAL_ODOMETER_CALIBRATION: OdometerCalibration = Object.freeze({
+  confirmedKm: null,
+  rawKmSince: 0,
+  scale: 1,
+});
+
+/** A calibration read back from disk, validated (a fresh copy); defaults for anything invalid. */
+export function restoreOdometerCalibration(value: unknown): OdometerCalibration {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return INITIAL_ODOMETER_CALIBRATION;
+  }
+  const { confirmedKm, rawKmSince, scale } = value as Record<string, unknown>;
+  const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  return {
+    confirmedKm:
+      finite(confirmedKm) && confirmedKm >= 0 && confirmedKm <= ODOMETER_PID_MAX_KM
+        ? confirmedKm
+        : null,
+    rawKmSince: finite(rawKmSince) && rawKmSince >= 0 ? rawKmSince : 0,
+    scale: finite(scale) && scale >= ODOMETER_SCALE_MIN && scale <= ODOMETER_SCALE_MAX ? scale : 1,
+  };
+}
+
+/**
+ * The driver entered the dash reading (`odometer/set`, or a service recorded with one): the
+ * odometer becomes `km` — an estimate until a PID 0xA6 reading takes over — and the calibration
+ * restarts from it. With a previous reading at least `ODOMETER_SCALE_MIN_KM` of integrated
+ * distance ago, the two measure the speed PID's error: the scale moves halfway towards the
+ * measured ratio (clamped to 0.9–1.1; a ratio beyond 0.8–1.25 is a typo or a long outage and
+ * is not used).
+ */
+export function confirmOdometer(odo: OdometerState, km: number): OdometerState {
+  const { calibration } = odo;
+  let { scale } = calibration;
+  if (calibration.confirmedKm !== null && calibration.rawKmSince >= ODOMETER_SCALE_MIN_KM) {
+    const measured = (km - calibration.confirmedKm) / calibration.rawKmSince;
+    if (measured >= ODOMETER_SCALE_ACCEPT[0] && measured <= ODOMETER_SCALE_ACCEPT[1]) {
+      const target = Math.min(ODOMETER_SCALE_MAX, Math.max(ODOMETER_SCALE_MIN, measured));
+      scale = Math.round((scale + ODOMETER_SCALE_WEIGHT * (target - scale)) * 10_000) / 10_000;
+    }
+  }
+  return {
+    ...odo,
+    km,
+    source: 'estimated',
+    calibration: { confirmedKm: km, rawKmSince: 0, scale },
+  };
 }
 
 /** Adapter link state; `since` moves only when the state changes. */

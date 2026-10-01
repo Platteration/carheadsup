@@ -254,6 +254,9 @@ export function bestKnownOdometerKm(
   trips: readonly TripRecord[],
   maintenance: readonly MaintenanceItemStatus[],
 ): number | null {
+  // The HUD's own odometer: the car's reading, or its estimate from the last dash reading.
+  const fromHud = diagnostics?.odometer?.km;
+  if (fromHud !== null && fromHud !== undefined && Number.isFinite(fromHud)) return fromHud;
   const fromCar = diagnostics?.signals.odometer?.value;
   if (fromCar !== undefined && Number.isFinite(fromCar)) return fromCar;
   const newestTrip = [...trips].sort((a, b) => b.startedAt - a.startedAt)[0];

@@ -180,6 +180,7 @@ export function mockDiagnostics(): ApiDiagnostics {
       odometer: { value: 58_012.4, at: at - 5000 },
     },
     vin: 'WVWZZZAUZKW123456',
+    odometer: { km: 58_012.4, source: 'pid', kmSinceConfirmed: null },
   };
 }
 
@@ -321,8 +322,16 @@ export class MockHud {
         };
       case 'GET /api/maintenance':
         return json(200, this.maintenance);
-      case 'POST /api/odometer':
+      case 'POST /api/odometer': {
+        const km = (body as { odometerKm?: number } | null)?.odometerKm ?? null;
+        if (km !== null && this.diagnostics.odometer.source !== 'pid') {
+          this.diagnostics = {
+            ...this.diagnostics,
+            odometer: { km, source: 'estimated', kmSinceConfirmed: 0 },
+          };
+        }
         return json(200, { ok: true });
+      }
       case 'POST /api/input':
         return json(200, { ok: true });
       case 'GET /api/sim':

@@ -18,6 +18,7 @@ import {
   MESSAGE_TTL_MS,
   PHONE_DATA_GRACE_MS,
   ROAD_TTL_MS,
+  kmSinceConfirmed,
 } from '../../src/state/selectors.ts';
 import type { HudEvent } from '../../src/types/events.ts';
 import type { Hazard } from '../../src/types/nav.ts';
@@ -85,6 +86,8 @@ describe('createInitialState', () => {
       integratedKm: 0,
       lastSampleAt: null,
       lastSpeedKph: null,
+      calibration: { confirmedKm: null, rawKmSince: 0, scale: 1 },
+      gpsFix: null,
     });
     expect(state.gear.learnedRatios).toEqual([120, 70, 48, 36, 29]);
     expect(state.fuel.readings.averageLPer100km).toBeCloseTo(7.2);
@@ -1828,6 +1831,111 @@ describe('gear numbering across a restart', () => {
     );
     expect(alone.state.gear.anchor).toBeNull();
     expect(extractPersisted(alone.state).gearAnchor).toBeNull();
+  });
+});
+
+describe('odometer from the dash (no PID 0xA6)', () => {
+  /** Drive `km` of speed-integrated distance at `kph`, a speed sample every 5 s. */
+  function drive(h: Harness, km: number, kph = 200): void {
+    const stepMs = 5000;
+    const steps = Math.round((km / kph) * 3_600_000) / stepMs;
+    h.samples(h.now + 100, { speed: kph });
+    for (let i = 0; i < steps; i++) h.samples(h.now + stepMs, { speed: kph });
+  }
+  const oil = (h: Harness) => h.state.maintenance.status.find((i) => i.itemId === 'oil');
+
+  it('turns distance reminders on when a service is logged with the dash reading', () => {
+    const h = new Harness();
+    expect(h.state.odometer.km).toBeNull();
+    h.send({ type: 'maintenance/done', itemId: 'oil', odometerKm: 50_000, at: T0 + 1000 });
+    expect(h.state.odometer).toMatchObject({ km: 50_000, source: 'estimated' });
+    expect(h.lastEffects).toContainEqual({ type: 'persist' });
+    drive(h, 100);
+    expect(h.state.odometer.km).toBeCloseTo(50_100, 0);
+    h.tick(h.now + 61_000);
+    expect(oil(h)).toMatchObject({ lastDoneKm: 50_000, remainingKm: 7900, status: 'ok' });
+    expect(kmSinceConfirmed(h.state)).toBeCloseTo(100, 0);
+  });
+
+  it('leaves an odometer the car reports alone', () => {
+    const h = new Harness(makeConfig(), persisted({ odometerKm: 48_213.4 }));
+    h.samples(T0, { speed: 50, odometer: 48_213.5 });
+    h.send({ type: 'maintenance/done', itemId: 'oil', odometerKm: 40_000, at: T0 + 1000 });
+    expect(h.state.odometer).toMatchObject({ km: 48_213.5, source: 'pid' });
+    expect(h.state.maintenance.records.at(-1)).toMatchObject({ odometerKm: 40_000 });
+    expect(kmSinceConfirmed(h.state)).toBeNull();
+  });
+
+  it('learns the speed PID error from two dash readings and applies it', () => {
+    const h = new Harness();
+    h.send({ type: 'odometer/set', odometerKm: 10_000, at: T0 });
+    drive(h, 300); // the dash says 309: the speed PID reads 3 % low
+    expect(h.state.odometer.km).toBeCloseTo(10_300, 0);
+    h.send({ type: 'odometer/set', odometerKm: 10_309, at: h.now + 1000 });
+    expect(h.state.odometer.calibration).toEqual({
+      confirmedKm: 10_309,
+      rawKmSince: 0,
+      scale: 1.015, // halfway to the measured 1.03
+    });
+    drive(h, 100);
+    expect(h.state.odometer.km).toBeCloseTo(10_309 + 101.5, 0);
+    expect(kmSinceConfirmed(h.state)).toBeCloseTo(101.5, 0);
+    // Persisted and restored with the odometer.
+    const saved = extractPersisted(h.state);
+    expect(saved.odometerCalibration).toMatchObject({ confirmedKm: 10_309, scale: 1.015 });
+    const again = createInitialState(h.config, saved, T0);
+    expect(again.odometer.calibration).toEqual(saved.odometerCalibration);
+  });
+
+  it('measures nothing from a typo, a short distance or a large error, and clamps the scale', () => {
+    const h = new Harness();
+    h.send({ type: 'odometer/set', odometerKm: 10_000, at: T0 });
+    drive(h, 300);
+    h.send({ type: 'odometer/set', odometerKm: 13_000, at: h.now + 1000 }); // a typo: 3000 km
+    expect(h.state.odometer.calibration).toMatchObject({ confirmedKm: 13_000, scale: 1 });
+    drive(h, 100);
+    h.send({ type: 'odometer/set', odometerKm: 13_120, at: h.now + 1000 }); // too short to tell
+    expect(h.state.odometer.calibration.scale).toBe(1);
+    drive(h, 300);
+    h.send({ type: 'odometer/set', odometerKm: 13_120 + 360, at: h.now + 1000 }); // +20 %
+    expect(h.state.odometer.calibration.scale).toBe(1.05); // halfway to the clamped 1.1
+  });
+
+  it('bridges OBD gaps with accurate phone fixes, never counting a stretch twice', () => {
+    const h = new Harness();
+    h.send({ type: 'odometer/set', odometerKm: 10_000, at: T0 });
+    // 1 km north per 30 s (120 km/h) along a meridian: 1/111.2 ° of latitude.
+    const fix = (at: number, step: number, accuracyM: number | null = 8) =>
+      h.send({ type: 'location/update', lat: 48 + step / 111.195, lon: 11, accuracyM, at });
+    fix(T0 + 1000, 0); // the OBD link is not up yet
+    fix(T0 + 31_000, 1);
+    fix(T0 + 61_000, 2);
+    expect(h.state.odometer.km).toBeCloseTo(10_002, 1);
+    expect(h.state.odometer.calibration.rawKmSince).toBeCloseTo(2, 1);
+    // Inaccurate fixes measure nothing (and break the chain) …
+    fix(T0 + 91_000, 3, 60);
+    fix(T0 + 121_000, 4);
+    expect(h.state.odometer.km).toBeCloseTo(10_002, 1);
+    // … nor does standing still in the fixes' noise …
+    fix(T0 + 151_000, 4.001);
+    expect(h.state.odometer.km).toBeCloseTo(10_002, 1);
+    // … and once speed samples arrive, they measure the distance instead.
+    h.samples(T0 + 160_000, { speed: 120 });
+    h.samples(T0 + 165_000, { speed: 120 });
+    fix(T0 + 166_000, 5);
+    expect(h.state.odometer.km).toBeCloseTo(10_002 + (120 * 5) / 3600, 2);
+  });
+
+  it('restores a damaged calibration as nothing learned', () => {
+    const state = createInitialState(
+      makeConfig(),
+      persisted({
+        odometerKm: 1000,
+        odometerCalibration: { confirmedKm: -5, rawKmSince: Number.NaN, scale: 2 },
+      }),
+      T0,
+    );
+    expect(state.odometer.calibration).toEqual({ confirmedKm: null, rawKmSince: 0, scale: 1 });
   });
 });
 

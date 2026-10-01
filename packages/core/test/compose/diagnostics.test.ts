@@ -158,8 +158,22 @@ describe('overview', () => {
         min: 0,
         max: 999_999,
         status: 'ok',
+        estimated: true, // restored from state.json: not read from the car
       },
     ]);
+  });
+
+  it('flags only an odometer the car does not report as an estimate', () => {
+    const estimated = parked({ coolantTemp: 90 });
+    expect(page(estimated, 0).gauges.find((g) => g.signal === 'odometer')?.estimated).toBe(true);
+    const reported = parked({ coolantTemp: 90, odometer: 52_310.2 });
+    const odometer = page(reported, 0).gauges.find((g) => g.signal === 'odometer');
+    expect(odometer).toMatchObject({ value: 52_310 });
+    expect(odometer?.estimated).toBeUndefined();
+    const unknown = parked({ coolantTemp: 90 }, makeConfig(), null);
+    const missing = page(unknown, 0).gauges.find((g) => g.signal === 'odometer');
+    expect(missing).toMatchObject({ value: null, status: 'unknown' });
+    expect(missing?.estimated).toBeUndefined();
   });
 
   it('converts to imperial units', () => {

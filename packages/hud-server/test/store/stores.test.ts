@@ -342,6 +342,21 @@ describe('PersistStore', () => {
     ).toEqual({ state: EMPTY_PERSISTED_STATE, errors: ['gearAnchor: invalid'] });
   });
 
+  it('round-trips the odometer calibration and repairs a damaged one', async () => {
+    const store = new PersistStore(join(dir, 'state.json'), logger);
+    const odometerCalibration = { confirmedKm: 48_000, rawKmSince: 213.4, scale: 1.015 };
+    await store.save({ ...sample, odometerCalibration });
+    expect(await store.load()).toEqual({ ...sample, odometerCalibration });
+    expect(
+      parsePersistedState({ odometerCalibration: { confirmedKm: 'x', rawKmSince: 5, scale: 9 } })
+        ?.state.odometerCalibration,
+    ).toEqual({ confirmedKm: null, rawKmSince: 5, scale: 1 });
+    expect(parsePersistedState({ odometerCalibration: 7 })?.errors).toEqual([
+      'odometerCalibration: invalid',
+    ]);
+    expect(parsePersistedState({ odometerCalibration: null })?.errors).toEqual([]);
+  });
+
   it('recovers from a corrupt file via the backup and moves the corrupt one aside', async () => {
     const store = new PersistStore(join(dir, 'state.json'), logger);
     await store.save(sample);

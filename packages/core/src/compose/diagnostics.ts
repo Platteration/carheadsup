@@ -241,7 +241,7 @@ function overviewGauges(state: HudState, config: HudConfig): DiagnosticGauge[] {
     gauge(state, config, 'fuelLevel', fuelLevel),
     gauge(state, config, 'oilTemp', freshSignal(state, 'oilTemp')),
     gauge(state, config, 'ambientTemp', freshSignal(state, 'ambientTemp')),
-    gauge(state, config, 'odometer', state.odometer.km),
+    odometerGauge(state, config),
   ];
   if (config.vehicle.hasTpms && TYRE_SIGNALS.some((s) => freshSignal(state, s) !== null)) {
     const unavailable = unavailableTyres(state);
@@ -251,6 +251,14 @@ function overviewGauges(state: HudState, config: HudConfig): DiagnosticGauge[] {
     }
   }
   return gauges;
+}
+
+/** The odometer, flagged as an estimate unless the car reports it (PID 0xA6). */
+function odometerGauge(state: HudState, config: HudConfig): DiagnosticGauge {
+  const odometer = gauge(state, config, 'odometer', state.odometer.km);
+  return state.odometer.km !== null && state.odometer.source === 'estimated'
+    ? { ...odometer, estimated: true }
+    : odometer;
 }
 
 function presentGauges(

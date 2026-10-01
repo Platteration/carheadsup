@@ -154,7 +154,19 @@ describe('maintenance', () => {
   it('pre-fills the odometer from the car, the last trip, or the last service', () => {
     const diag = mockDiagnostics();
     expect(bestKnownOdometerKm(diag, mockTrips(), [oil])).toBe(58_012.4);
-    const noOdo: ApiDiagnostics = { ...diag, signals: {} };
+    // The HUD's own odometer (here an estimate) comes first …
+    const estimated: ApiDiagnostics = {
+      ...diag,
+      signals: {},
+      odometer: { km: 58_100, source: 'estimated', kmSinceConfirmed: 88 },
+    };
+    expect(bestKnownOdometerKm(estimated, mockTrips(), [oil])).toBe(58_100);
+    // … then the car's reading, the last trip and the last service.
+    const noOdo: ApiDiagnostics = {
+      ...diag,
+      signals: {},
+      odometer: { km: null, source: null, kmSinceConfirmed: null },
+    };
     expect(bestKnownOdometerKm(noOdo, mockTrips(), [oil])).toBeCloseTo(58_042.7, 6);
     expect(bestKnownOdometerKm(null, [], [oil, tyres])).toBe(54_000);
     expect(bestKnownOdometerKm(null, [{ ...TRIP, endOdometerKm: null }], [cabin])).toBeNull();

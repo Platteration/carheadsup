@@ -603,9 +603,22 @@ describe('maintenance, odometer and input API', () => {
       status: expect.not.stringMatching(/unknown/) as unknown,
     });
 
-    // Without a body the HUD's own odometer is used (unknown here → null).
+    // The dash reading of a service also sets the odometer the car does not report …
+    const diag = (await call(t, 'GET', '/api/diagnostics')).body as ApiDiagnostics;
+    expect(diag.odometer).toEqual({ km: 42000, source: 'estimated', kmSinceConfirmed: 0 });
+    // … so without a body the HUD's own odometer is used.
     const noBody = await call(t, 'POST', '/api/maintenance/oil/done');
     expect(noBody.status).toBe(200);
+    expect(
+      (noBody.body as MaintenanceItemStatus[]).find((m) => m.itemId === 'oil')?.lastDoneKm,
+    ).toBe(42000);
+  });
+
+  it('records a service without a reading while the odometer is unknown', async () => {
+    const t = await start();
+    const diag = (await call(t, 'GET', '/api/diagnostics')).body as ApiDiagnostics;
+    expect(diag.odometer).toEqual({ km: null, source: null, kmSinceConfirmed: null });
+    const noBody = await call(t, 'POST', '/api/maintenance/oil/done');
     expect(
       (noBody.body as MaintenanceItemStatus[]).find((m) => m.itemId === 'oil')?.lastDoneKm,
     ).toBeNull();

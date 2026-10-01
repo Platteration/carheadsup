@@ -487,6 +487,55 @@ describe('settings app', () => {
     });
   });
 
+  it('says where the HUD odometer comes from and asks for the dash reading when needed', async () => {
+    // Read from the car: just the reading.
+    const car = new MockHud();
+    const carRoot = start(car);
+    await ready(carRoot);
+    await waitFor(() => section(carRoot, 'maintenance').querySelector('.odometer-status'));
+    expect(text(section(carRoot, 'maintenance'))).toMatch(
+      /HUD odometer: 58\s?012 km, read from the car\./,
+    );
+
+    // Unknown: distance reminders are off until a dash reading is entered.
+    const unknown = new MockHud();
+    unknown.diagnostics = {
+      ...unknown.diagnostics,
+      odometer: { km: null, source: null, kmSinceConfirmed: null },
+    };
+    const root = start(unknown);
+    await ready(root);
+    const maintenance = () => section(root, 'maintenance');
+    await waitFor(() => text(maintenance()).includes('Odometer unknown'));
+    expect(text(maintenance())).toContain('Odometer unknown – distance reminders are off');
+    await type(root.querySelector<HTMLInputElement>('#set-odometer')!, '58100');
+    await click(button(maintenance(), 'Set'));
+    await waitFor(() => unknown.writes().length === 1);
+    expect(unknown.writes()[0]).toMatchObject({
+      path: '/api/odometer',
+      body: { odometerKm: 58_100 },
+    });
+    await waitFor(() => maintenance().querySelector('.odometer-status'));
+    expect(text(maintenance())).toMatch(/HUD odometer: ≈ 58\s?100 km, estimated from the speed/);
+    expect(text(maintenance())).not.toContain('Odometer unknown');
+  });
+
+  it('asks to confirm an odometer estimated for 2000 km', async () => {
+    const hud = new MockHud();
+    hud.diagnostics = {
+      ...hud.diagnostics,
+      odometer: { km: 61_400, source: 'estimated', kmSinceConfirmed: 2350 },
+    };
+    const root = start(hud);
+    await ready(root);
+    const maintenance = section(root, 'maintenance');
+    await waitFor(() => text(maintenance).includes('Check the odometer'));
+    expect(text(maintenance)).toMatch(
+      /≈ 61\s?400 km, estimated from the speed since you entered the dash reading 2\s?350 km ago/,
+    );
+    expect(text(maintenance)).toMatch(/The HUD has estimated 2\s?350 km since/);
+  });
+
   it('shows a clear offline state and recovers when the HUD answers', async () => {
     const hud = new MockHud();
     hud.offline = true;

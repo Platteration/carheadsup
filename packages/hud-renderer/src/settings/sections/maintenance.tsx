@@ -1,4 +1,5 @@
 import type {
+  ApiOdometer,
   HudConfig,
   MaintenanceItemConfig,
   MaintenanceItemStatus,
@@ -27,6 +28,9 @@ import type { Tone } from '../ui/common.tsx';
 import { FieldGrid, NumberField, TextField } from '../ui/fields.tsx';
 import { useForm } from '../ui/form-context.ts';
 import { useArmed, useResource } from '../ui/hooks.ts';
+
+/** After this many estimated km the settings app asks for the dash reading again. */
+export const CONFIRM_ODOMETER_AFTER_KM = 2000;
 
 const STATUS_TONE: Readonly<Record<MaintenanceStatusKind, Tone>> = {
   ok: 'ok',
@@ -243,6 +247,9 @@ function OdometerCard({
   const input = useOdometerInput(unit, '');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const diagnostics = useResource((signal) => api.getDiagnostics({ signal }));
+  // Absent from a HUD that predates it.
+  const odometer = diagnostics.data?.odometer ?? null;
   const submit = async () => {
     if (input.km === null) return;
     setBusy(true);
@@ -255,6 +262,7 @@ function OdometerCard({
       setResult({ ok: true, message: `Odometer set to ${shown} ${unit.label}.` });
       input.setText('');
       onSaved();
+      diagnostics.reload();
     } catch (err) {
       setResult({ ok: false, message: describeError(err) });
     } finally {
@@ -263,6 +271,7 @@ function OdometerCard({
   };
   return (
     <Card>
+      {odometer !== null && <OdometerStatus odometer={odometer} unit={unit} />}
       <form
         class="odometer-form"
         onSubmit={(event) => {
@@ -299,6 +308,45 @@ function OdometerCard({
       </form>
       {result && <Notice tone={result.ok ? 'ok' : 'critical'}>{result.message}</Notice>}
     </Card>
+  );
+}
+
+/**
+ * What the HUD's odometer is: unknown (distance reminders off), the car's reading, or an
+ * estimate — and, after `CONFIRM_ODOMETER_AFTER_KM` estimated km, a request for the dash reading.
+ */
+function OdometerStatus({ odometer, unit }: { odometer: ApiOdometer; unit: UnitSpec }) {
+  const distance = (km: number) => `${formatNumber(unit.toDisplay(km), 0)} ${unit.label}`;
+  if (odometer.km === null) {
+    return (
+      <Notice tone="caution" title="Odometer unknown – distance reminders are off">
+        The car does not report its odometer. Enter the reading on the dash below (or with a
+        service) and the HUD keeps counting from it.
+      </Notice>
+    );
+  }
+  const since = odometer.kmSinceConfirmed;
+  return (
+    <>
+      <p class="odometer-status" data-source={odometer.source ?? 'unknown'}>
+        HUD odometer:{' '}
+        <strong>
+          {odometer.source === 'estimated' ? '≈ ' : ''}
+          {distance(odometer.km)}
+        </strong>
+        {odometer.source === 'pid'
+          ? ', read from the car.'
+          : since !== null
+            ? `, estimated from the speed since you entered the dash reading ${distance(since)} ago.`
+            : ', estimated from the speed.'}
+      </p>
+      {since !== null && since >= CONFIRM_ODOMETER_AFTER_KM && (
+        <Notice tone="caution" title="Check the odometer">
+          The HUD has estimated {distance(since)} since the dash reading was last entered. Enter it
+          again to keep service reminders accurate.
+        </Notice>
+      )}
+    </>
   );
 }
 

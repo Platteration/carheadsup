@@ -2,8 +2,10 @@ import {
   INPUT_ACTIONS,
   composePairing,
   diagnosticDtcs,
+  kmSinceConfirmed,
   mergeConfig,
   parseConfig,
+  roundTo,
   toWallTime,
 } from '@carheadsup/core';
 import type {
@@ -129,6 +131,7 @@ function diagnostics(state: HudState, now: number): ApiDiagnostics {
     }
   }
   const checkedAt = state.vehicle.dtcsCheckedAt;
+  const since = kmSinceConfirmed(state);
   return {
     now: toWallTime(state, Math.max(now, state.now)),
     link: linkStatus(state),
@@ -138,6 +141,11 @@ function diagnostics(state: HudState, now: number): ApiDiagnostics {
     supported: state.vehicle.supported === null ? null : [...state.vehicle.supported],
     signals,
     vin: state.vehicle.vin,
+    odometer: {
+      km: state.odometer.km === null ? null : roundTo(state.odometer.km, 1),
+      source: state.odometer.source,
+      kmSinceConfirmed: since === null ? null : Math.round(since),
+    },
   };
 }
 

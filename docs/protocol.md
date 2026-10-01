@@ -855,9 +855,16 @@ clock says:
   "dtcsCheckedAt": 1790190236831,
   "supported": ["speed", "rpm", "coolantTemp", "fuelLevel", "batteryVoltage"],
   "signals": { "rpm": { "value": 880.25, "at": 1790190245128 }, "coolantTemp": { "value": 91, "at": 1790190244300 } },
-  "vin": "WVWZZZAUZKW123456"
+  "vin": "WVWZZZAUZKW123456",
+  "odometer": { "km": 48253.1, "source": "estimated", "kmSinceConfirmed": 43 }
 }
 ```
+
+`odometer` is the HUD's own odometer, which distance-based service reminders count from: `km`
+(null while unknown — those reminders are off then), its `source` (`pid`: the car reports it;
+`estimated`: the last dash reading entered, carried forward with the distance driven) and, for an
+estimate, `kmSinceConfirmed` — the km estimated since the dash reading was last entered (the
+settings app asks for it again after 2,000 km).
 
 `POST /api/diagnostics/clear-dtcs` clears the trouble codes (OBD service 04). It is **refused
 with 409 unless the car is parked with the engine off** (ignition on), and while another clear is
@@ -889,7 +896,8 @@ See [obd.md](obd.md#clearing-trouble-codes) before using it.
   `unknown` until a service is recorded).
 - `POST /api/maintenance/oil/done` with `{"odometerKm": 48210}` (optional; defaults to the
   current odometer) records a service now and returns the updated list; 404 for an unknown item,
-  400 for an odometer outside 0–9,999,999.
+  400 for an odometer outside 0–9,999,999. The reading is today's dash reading, so on a car that
+  does not report its odometer it also sets the HUD's.
 - `POST /api/odometer` with `{"odometerKm": 48210}` sets the odometer (cars that do not report
   PID `A6`).
 

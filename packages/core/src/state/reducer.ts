@@ -41,7 +41,16 @@ import {
   applyPhoneLink,
 } from './phone.ts';
 import { applyTick } from './tick.ts';
-import { applyDtcs, applyObdLink, applySamples, applySupported, applyVin } from './vehicle.ts';
+import {
+  applyDtcs,
+  applyObdLink,
+  applySamples,
+  applySupported,
+  applyVin,
+  bridgeOdometerWithGps,
+  confirmOdometer,
+  restoreOdometerCalibration,
+} from './vehicle.ts';
 
 export const EMPTY_PERSISTED_STATE: PersistedState = {
   odometerKm: null,
@@ -128,6 +137,8 @@ export function createInitialState(
       integratedKm: 0,
       lastSampleAt: null,
       lastSpeedKph: null,
+      calibration: restoreOdometerCalibration(persisted.odometerCalibration),
+      gpsFix: null,
     },
     maintenance: createMaintenanceState(persisted.maintenanceRecords),
     nav: null,
@@ -257,7 +268,7 @@ function apply(state: HudState, event: HudEvent, config: HudConfig): HudState {
     case 'message/received':
       return applyMessage(state, event.message);
     case 'location/update':
-      return applyLocation(state, event);
+      return bridgeOdometerWithGps(applyLocation(state, event), event);
 
     case 'sensor/light':
       return Number.isFinite(event.lux) && event.lux >= 0
@@ -367,7 +378,10 @@ function applyConfig(state: HudState, config: HudConfig, previous: HudConfig): H
 /**
  * Record a service for a configured item (unknown ids are ignored), dated with the wall-clock
  * time — while that is untrusted, provisionally (see `MaintenanceState.undated`). Without an
- * explicit odometer reading the current best-known odometer is used.
+ * explicit odometer reading the current best-known odometer is used. An explicit reading is the
+ * dash's today: unless the car reports its odometer (PID 0xA6) it also sets the odometer (see
+ * `confirmOdometer`) — logging an oil change with the dash reading is all it takes to turn
+ * distance-based reminders on.
  */
 function applyMaintenanceDone(
   state: HudState,
@@ -377,9 +391,14 @@ function applyMaintenanceDone(
 ): HudState {
   if (!config.maintenance.items.some((item) => item.id === itemId)) return state;
   const current = state.odometer.km;
-  const km = validKm(odometerKm) ?? (current === null ? null : roundTo(current, 1));
+  const explicit = validKm(odometerKm);
+  const km = explicit ?? (current === null ? null : roundTo(current, 1));
   const recorded: HudState = {
     ...state,
+    odometer:
+      explicit !== null && state.odometer.source !== 'pid'
+        ? confirmOdometer(state.odometer, explicit)
+        : state.odometer,
     maintenance: recordService(
       state.maintenance,
       itemId,
@@ -391,11 +410,14 @@ function applyMaintenanceDone(
   return { ...recorded, maintenance: refreshMaintenance(recorded, config) };
 }
 
-/** The driver set the odometer by hand; a fresh PID reading still takes precedence later. */
+/**
+ * The driver set the odometer by hand (see `confirmOdometer`); a fresh PID reading still takes
+ * precedence later.
+ */
 function applyOdometerSet(state: HudState, odometerKm: number, config: HudConfig): HudState {
   const km = validKm(odometerKm);
   if (km === null) return state;
-  const updated: HudState = { ...state, odometer: { ...state.odometer, km, source: 'estimated' } };
+  const updated: HudState = { ...state, odometer: confirmOdometer(state.odometer, km) };
   return { ...updated, maintenance: refreshMaintenance(updated, config) };
 }
 
@@ -416,8 +438,14 @@ export function extractActiveTrip(state: HudState): ActiveTrip | null {
 export function extractPersisted(state: HudState): PersistedState {
   const km = state.odometer.km;
   const avg = state.fuel.readings.averageLPer100km;
+  const { calibration } = state.odometer;
   return {
     odometerKm: km === null || !Number.isFinite(km) ? null : roundTo(km, 3),
+    odometerCalibration: {
+      confirmedKm: calibration.confirmedKm,
+      rawKmSince: roundTo(calibration.rawKmSince, 3),
+      scale: calibration.scale,
+    },
     learnedGearRatios: state.gear.learnedRatios === null ? null : [...state.gear.learnedRatios],
     gearAnchor:
       state.gear.learnedRatios === null || state.gear.anchor === null

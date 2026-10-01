@@ -272,6 +272,11 @@ export interface DiagnosticGauge {
   min: number;
   max: number;
   status: GaugeStatus;
+  /**
+   * The value is an estimate, shown as "≈": the odometer of a car that does not report it (the
+   * last dash reading entered plus the distance driven since). Absent: a reading.
+   */
+  estimated?: boolean;
 }
 
 export interface DiagnosticDtc {
