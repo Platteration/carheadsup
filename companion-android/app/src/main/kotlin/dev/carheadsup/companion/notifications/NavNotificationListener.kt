@@ -194,12 +194,12 @@ class NavNotificationListener : NotificationListenerService() {
     }
 
     /** Whether Android Auto's ongoing notification is among [active]; then re-check projection. */
-    private fun updateAndroidAuto(active: Array<StatusBarNotification>) {
+    private fun updateAndroidAuto(active: Array<out StatusBarNotification>) {
         graph.androidAutoNotification = active.any { it.packageName == AndroidAuto.PACKAGE && it.isOngoing }
         graph.refreshProjection()
     }
 
-    private fun activeOrEmpty(): Array<StatusBarNotification> = try {
+    private fun activeOrEmpty(): Array<out StatusBarNotification> = try {
         activeNotifications.orEmpty()
     } catch (e: SecurityException) {
         emptyArray()

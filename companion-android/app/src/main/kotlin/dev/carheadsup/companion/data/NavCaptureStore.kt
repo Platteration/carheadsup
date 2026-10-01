@@ -53,7 +53,7 @@ class NavCaptureStore(private val file: File) {
         return if (cases.isEmpty()) null else NavCaptureLog.export(cases)
     }
 
-    /** Forget everything captured (also when the capture is switched off). */
+    /** Forget everything captured (Setup → *Delete*; switching the capture off keeps it). */
     @Synchronized
     fun clear() {
         if (file.exists() && !file.delete()) Log.w(TAG, "Cannot delete the navigation capture")
