@@ -33,7 +33,8 @@ function Kiosk({
   const feed = useHudFeed({ enabled: live, token });
   const sample = useFixture(fixture);
   useKioskKeyboard(feed.send, live);
-  useKioskHeartbeat(feed.send, live);
+  // Only the projected display: a preview is no proof that the windshield shows anything.
+  useKioskHeartbeat(feed.send, live && !preview);
   usePageErrorSender(pageErrors, feed.send, live && feed.connected);
   useWakeLock();
 
