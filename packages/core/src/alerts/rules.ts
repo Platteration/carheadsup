@@ -304,6 +304,9 @@ export function maintenanceRule({ state, config }: RuleContext): AlertSpec[] {
 // ---------------------------------------------------------------------------------------------
 // Tyres
 
+/** Key of the caution for tyres without sensor readings (see `unavailableTyres`). */
+export const TPMS_UNAVAILABLE_KEY = 'tpms-unavailable';
+
 /** A tyre stays "low" for the alert until it is this much above the threshold (kPa). */
 export const TPMS_HYSTERESIS_KPA = 7;
 /**
@@ -324,8 +327,59 @@ export function tpmsLowLimitKpa(config: HudConfig, alerting: boolean): number {
   return config.alerts.tpmsLowKpa + (alerting ? TPMS_HYSTERESIS_KPA : 0);
 }
 
+/**
+ * All tyres that read at most this (kPa gauge) at the same time are not four punctures but a
+ * receiver that has no sensor readings.
+ */
+export const TPMS_UNAVAILABLE_KPA = 5;
+
+/**
+ * Tyres whose fresh reading is a TPMS sensor fault rather than a pressure: every known tyre (at
+ * least two) at {@link TPMS_UNAVAILABLE_KPA} or less at once — the receiver has no readings —,
+ * or a tyre that has read exactly 0 ever since start-up (`VehicleState.tyresReporting`): a
+ * missing or sleeping sensor, e.g. winter wheels without sensors or before driving off wakes
+ * them. A tyre that read a pressure before and then drops is a puncture, not a fault.
+ */
+export function unavailableTyres(state: HudState): Set<SignalId> {
+  const known = TYRES.flatMap((tyre) => {
+    const kpa = freshSignal(state, tyre.signal);
+    return kpa === null ? [] : [{ signal: tyre.signal, kpa }];
+  });
+  if (known.length >= 2 && known.every((t) => t.kpa <= TPMS_UNAVAILABLE_KPA)) {
+    return new Set(known.map((t) => t.signal));
+  }
+  const reporting = state.vehicle.tyresReporting;
+  return new Set(
+    known.filter((t) => t.kpa === 0 && !reporting.includes(t.signal)).map((t) => t.signal),
+  );
+}
+
+/**
+ * Low tyres: a warning naming the lowest, critical below 75 % of the threshold (a puncture).
+ * Sensor faults (see {@link unavailableTyres}) are left out of that and raise a dismissible
+ * caution instead, so a missing sensor never becomes a permanent, flashing critical alert.
+ */
 export function tpmsRule({ state, config, previous }: RuleContext): AlertSpec[] {
   if (!config.vehicle.hasTpms) return NONE;
+  const unavailable = unavailableTyres(state);
+  const specs: AlertSpec[] = [];
+  if (unavailable.size > 0) {
+    const names = TYRES.filter((tyre) => unavailable.has(tyre.signal)).map((tyre) => tyre.name);
+    const known = TYRES.filter((tyre) => freshSignal(state, tyre.signal) !== null).length;
+    specs.push({
+      key: TPMS_UNAVAILABLE_KEY,
+      kind: 'tpms',
+      severity: 'caution',
+      title: 'TPMS UNAVAILABLE',
+      detail:
+        names.length === known && known > 1
+          ? 'No tyre sensor readings'
+          : names.length === 1
+            ? `${names[0]} – no reading`
+            : `${names.length} tyres – no reading`,
+      code: null,
+    });
+  }
   const prev = previous('tpms');
   const limit = tpmsLowLimitKpa(config, prev !== undefined);
   const criticalLimit =
@@ -335,11 +389,11 @@ export function tpmsRule({ state, config, previous }: RuleContext): AlertSpec[] 
   let lowCount = 0;
   for (const tyre of TYRES) {
     const kpa = freshSignal(state, tyre.signal);
-    if (kpa === null || kpa >= limit) continue;
+    if (kpa === null || kpa >= limit || unavailable.has(tyre.signal)) continue;
     lowCount++;
     if (lowest === null || kpa < lowest.kpa) lowest = { name: tyre.name, kpa };
   }
-  if (lowest === null) return NONE;
+  if (lowest === null) return specs;
   const more = lowCount > 1 ? ` +${lowCount - 1}` : '';
   const critical = lowest.kpa < criticalLimit;
   return [
@@ -351,6 +405,7 @@ export function tpmsRule({ state, config, previous }: RuleContext): AlertSpec[] 
       detail: `${lowest.name} ${formatPressure(lowest.kpa, config)}${more}`,
       code: null,
     },
+    ...specs,
   ];
 }
 

@@ -54,4 +54,10 @@ export interface VehicleState {
   /** Epoch ms of the last successful DTC read, or null if never. */
   dtcsCheckedAt: number | null;
   vin: string | null;
+  /**
+   * Tyre-pressure signals that have read anything but exactly 0 since start-up. A TPMS receiver
+   * reports 0 for a sensor that is missing or asleep (winter wheels without sensors, sensors not
+   * yet woken by driving off): a tyre that has only ever read 0 is not a puncture.
+   */
+  tyresReporting: SignalId[];
 }

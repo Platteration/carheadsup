@@ -837,6 +837,21 @@ describe('obd/samples', () => {
     expect(h.state.gear.estimate.gear).toBe(3);
   });
 
+  it('drops readings a signal cannot have, so they read as missing', () => {
+    const h = new Harness();
+    h.obdConnected(T0);
+    h.samples(T0 + 100, { coolantTemp: 90, rpm: 800 });
+    expect(h.state.vehicle.signals.coolantTemp?.value).toBe(90);
+    // A sensor fault (0xFF: 215 °C) is no reading: no OVERHEATING, and not the old 90 °C either.
+    h.samples(T0 + 200, { coolantTemp: 215, rpm: 16_383.75 });
+    expect(h.state.vehicle.signals.coolantTemp).toBeUndefined();
+    expect(h.state.vehicle.signals.rpm).toBeUndefined();
+    expect(h.state.alerts.filter((a) => a.kind === 'coolant')).toEqual([]);
+    // A real overheating reading still raises the alert.
+    h.samples(T0 + 300, { coolantTemp: 135 });
+    expect(h.state.alerts.find((a) => a.kind === 'coolant')?.severity).toBe('critical');
+  });
+
   it('treats the engine as running only from 300 rpm', () => {
     const h = new Harness();
     h.obdConnected(T0);

@@ -102,6 +102,7 @@ export function createInitialState(
       dtcs: [],
       dtcsCheckedAt: null,
       vin: null,
+      tyresReporting: [],
     },
     context: createContextState(now),
     gear: createGearState(

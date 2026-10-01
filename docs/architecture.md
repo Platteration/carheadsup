@@ -159,6 +159,12 @@ received, and every consumer reads it through `freshValue()` (`core/src/stalenes
 selectors built on it. Samples older than their limit count as absent: the widget disappears,
 the alert rule stops firing, the fuel and trip integrators stop integrating.
 
+Readings a signal cannot physically have (`core/src/obd/plausibility.ts`: e.g. coolant beyond
+200 °C, which is what a sensor fault's `0xFF` decodes to, rpm beyond 12 000, a tyre outside
+−20…700 kPa) are not stored at all, and remove the signal's previous value: they read as missing
+too, never as an alert or as the last good value. The ranges reject the impossible, not the
+alarming — a real overheating reading always gets through.
+
 | Signal(s) | Stale after |
 | --- | --- |
 | `speed`, `rpm`, `throttle`, `relativeThrottle`, `acceleratorPedal` | 2 s |
@@ -246,7 +252,7 @@ a stable key (e.g. `check-engine:P0420`), a severity (`info` < `caution` < `warn
 | `coolant` | Coolant ≥ `coolantHighC` (110 °C); cleared `coolantHysteresisC` below. | `warning` "ENGINE HOT", `critical` "OVERHEATING – STOP" at ≥ `coolantCriticalC` (118 °C) |
 | `voltage` | Engine running and ≤ `voltageLowRunningV` for 60 s; engine off and ≤ `voltageLowOffV` for 10 s; ≥ `voltageHighV` for 10 s. | `warning` "CHARGING FAULT", `caution` "BATTERY LOW", `warning` "OVERVOLTAGE" |
 | `check-engine` | One alert per trouble code; one more ("Lamp on – no code read") while the MIL is on and no confirmed code is known — e.g. the adapter could only read the MIL. | From the DTC database for stored and permanent codes; `info` while a code is only pending; `warning` for the MIL alone |
-| `tpms` | A tyre (when `vehicle.hasTpms`) below `tpmsLowKpa`; cleared 7 kPa above. | `warning` |
+| `tpms` | A tyre (when `vehicle.hasTpms`) below `tpmsLowKpa`; cleared 7 kPa above. Sensor faults (every tyre ≤ 5 kPa at once, or one that has only ever read 0) raise "TPMS UNAVAILABLE" instead. | `warning`; `critical` below 75 % of the threshold; `caution` for sensor faults |
 | `fuel-low` | Fuel level ≤ `fuelLowPct`; cleared 2 points above. | `caution` |
 | `ice-risk` | Outside temperature ≤ `iceRiskC`; shown for 10 s, re-armed after it warms up by 2 °C. | `caution` |
 | `maintenance-due` | A service item is due soon / overdue. | `info` / `caution` |

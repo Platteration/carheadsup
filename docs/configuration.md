@@ -252,7 +252,7 @@ flashing, it keeps flashing until the engine speed drops below `flashRpm` minus 
 | `alerts.overspeedToleranceKph` | `3` | 0–50 | The speed turns red above limit + max(this, limit × pct/100)… |
 | `alerts.overspeedTolerancePct` | `5` | 0–50 | …e.g. 50 km/h → red above 53, 120 km/h → above 126. |
 | `alerts.fuelLowPct` | `12` | 0–100 | "FUEL LOW" (caution) at or below this tank level; clears 2 points above. At half this level, or 30 km of range left, it escalates to "FUEL VERY LOW" (warning), which comes back even if the driver dismissed the caution. |
-| `alerts.tpmsLowKpa` | `180` | 0–1000 | Tyre (gauge) pressure below which "TYRE PRESSURE LOW" warns (it clears 7 kPa above; the tyre readout uses the same limit). Below 75 % of this — a puncture — it turns into "TYRE PRESSURE CRITICAL", critical and not dismissible. A sensor or custom-PID formula that reports 0 when it fails therefore raises the critical alert: fix it or switch `vehicle.hasTpms` off. |
+| `alerts.tpmsLowKpa` | `180` | 0–1000 | Tyre (gauge) pressure below which "TYRE PRESSURE LOW" warns (it clears 7 kPa above; the tyre readout uses the same limit). Below 75 % of this — a puncture — it turns into "TYRE PRESSURE CRITICAL", critical and not dismissible. Sensor faults do not: see [TPMS sensor faults](#custom-pids-and-tpms). |
 | `alerts.iceRiskC` | `3` | −30–15 | Outside temperature at or below which "ICE RISK" shows for 10 s. |
 | `alerts.showDtcWhileDriving` | `false` | | Show informational and caution check-engine alerts while moving (warnings and worse always show). |
 
@@ -573,6 +573,20 @@ result to kPa gauge in the formula: psi × 6.895, bar × 100, and subtract the a
 pressure (about 101 kPa) from absolute values. Tyre pressures change slowly, so poll every 10–30
 seconds to leave the adapter's time for the fast PIDs. A PID that keeps getting no answer is
 polled less and less often (back-off up to a minute).
+
+**TPMS sensor faults.** Receivers commonly report 0 (or `FF`) for a sensor that is missing, has
+a flat battery or has not woken up yet — winter wheels without sensors, or the first minutes
+before driving off. So:
+
+- a pressure outside −20…700 kPa (e.g. −101 kPa: an absolute-pressure formula on a fault 0, or
+  9999 kPa) is no reading at all, like any [impossible value](architecture.md#staleness-safety);
+- every tyre at 5 kPa or less at once, or a tyre that has read exactly 0 ever since the HUD
+  started, raises a dismissible caution, "TPMS UNAVAILABLE" (naming the wheel), instead of a
+  tyre-pressure alert, and its readout stays empty;
+- a tyre that read a pressure and then loses it is a puncture: "TYRE PRESSURE CRITICAL".
+
+A real flat tyre that reads exactly 0 from the moment the HUD starts therefore shows as
+"TPMS UNAVAILABLE" for that wheel — still a tyre caution naming it, not silence.
 
 ## Command line and environment
 

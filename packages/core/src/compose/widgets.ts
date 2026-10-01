@@ -1,4 +1,4 @@
-import { tpmsLowLimitKpa, voltageFaultOf } from '../alerts/rules.ts';
+import { tpmsLowLimitKpa, unavailableTyres, voltageFaultOf } from '../alerts/rules.ts';
 import { resolveLayout } from '../config/config.ts';
 import {
   ENGINE_RUNNING_RPM,
@@ -447,9 +447,11 @@ function tpmsWidget({ state, config, moving }: WidgetEnv, zone: Zone): TpmsWidge
   const limit = tpmsLowLimitKpa(config, alerting);
   let anyLow = false;
   let anyValue = false;
+  // A sensor fault is no reading (the 'TPMS UNAVAILABLE' caution says so), not a flat tyre.
+  const unavailable = unavailableTyres(state);
   const tyre = (signal: SignalId): TireReading => {
     const kpa = freshSignal(state, signal);
-    if (kpa === null) return { value: null, low: false };
+    if (kpa === null || unavailable.has(signal)) return { value: null, low: false };
     anyValue = true;
     const low = kpa < limit;
     anyLow ||= low;

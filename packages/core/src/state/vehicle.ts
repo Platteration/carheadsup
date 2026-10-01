@@ -1,4 +1,5 @@
 import { isValidDtc, normalizeDtc } from '../obd/dtc.ts';
+import { isPlausible } from '../obd/plausibility.ts';
 import type { HudConfig } from '../types/config.ts';
 import type { HudEvent } from '../types/events.ts';
 import { SIGNAL_IDS } from '../types/signals.ts';
@@ -19,9 +20,18 @@ const isSignalId = (value: unknown): value is SignalId =>
 /** Signals that drive the gear estimator; other samples do not count as a new gear sample. */
 const DRIVETRAIN_SIGNALS: ReadonlySet<SignalId> = new Set(['speed', 'rpm', 'transmissionGear']);
 
+const TYRE_SIGNALS: ReadonlySet<SignalId> = new Set([
+  'tirePressureFL',
+  'tirePressureFR',
+  'tirePressureRL',
+  'tirePressureRR',
+]);
+
 /**
  * Store a batch of samples (stamped with the event time; non-finite values and unknown signals
  * are ignored), integrate distance, then advance gear, fuel, context and trip from fresh values.
+ * A reading the signal cannot physically have (`isPlausible`: a sensor fault, a garbled answer)
+ * removes the signal's value, so it reads as missing rather than as its last good value.
  */
 export function applySamples(
   state: HudState,
@@ -33,14 +43,22 @@ export function applySamples(
   let speed: number | null = null;
   let odometer: number | null = null;
   let drivetrain = false;
+  let tyresReporting = state.vehicle.tyresReporting;
   for (const sample of samples) {
     const { signal, value } = sample;
     if (!isSignalId(signal) || typeof value !== 'number' || !Number.isFinite(value)) continue;
     signals ??= { ...state.vehicle.signals };
+    if (DRIVETRAIN_SIGNALS.has(signal)) drivetrain = true;
+    if (!isPlausible(signal, value)) {
+      delete signals[signal];
+      continue;
+    }
     signals[signal] = { value, at: now };
     if (signal === 'speed') speed = value;
     else if (signal === 'odometer') odometer = value;
-    if (DRIVETRAIN_SIGNALS.has(signal)) drivetrain = true;
+    else if (TYRE_SIGNALS.has(signal) && value !== 0 && !tyresReporting.includes(signal)) {
+      tyresReporting = [...tyresReporting, signal];
+    }
   }
   if (signals === null) return state;
 
@@ -49,7 +67,7 @@ export function applySamples(
     lastPid !== undefined && freshSignal(state, 'odometer') !== null
       ? { km: lastPid.value, at: lastPid.at }
       : null;
-  let next: HudState = { ...state, vehicle: { ...state.vehicle, signals } };
+  let next: HudState = { ...state, vehicle: { ...state.vehicle, signals, tyresReporting } };
   next = { ...next, odometer: integrateOdometer(next, speed, odometer, previousPid) };
   if (drivetrain) next = { ...next, gear: advanceGear(next, config) };
   next = { ...next, fuel: advanceFuel(next, config) };

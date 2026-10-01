@@ -9,6 +9,7 @@ import {
   OBD_LINK_ALERT_AFTER_MS,
   TPMS_CRITICAL_FRACTION,
   TPMS_HYSTERESIS_KPA,
+  TPMS_UNAVAILABLE_KEY,
 } from '../../src/alerts/rules.ts';
 import { isAlertLive } from '../../src/alerts/visibility.ts';
 import { lookupDtc } from '../../src/obd/dtc-lookup.ts';
@@ -18,7 +19,14 @@ import type { HudConfig } from '../../src/types/config.ts';
 import type { MaintenanceItemStatus } from '../../src/types/records.ts';
 import type { HudState } from '../../src/types/state.ts';
 import type { DtcEntry } from '../../src/types/vehicle.ts';
-import { T0, freezeDeep, makeConfig, persisted, type SignalValues } from '../state/fixtures.ts';
+import {
+  Harness,
+  T0,
+  freezeDeep,
+  makeConfig,
+  persisted,
+  type SignalValues,
+} from '../state/fixtures.ts';
 
 const DAY = 86_400_000;
 
@@ -585,6 +593,74 @@ describe('tyre pressure', () => {
     const b = new Bench();
     b.at(T0 + 100, { tirePressureFL: 100 });
     expect(b.state.alerts).toEqual([]);
+  });
+});
+
+describe('tyre sensor faults (the reducer path)', () => {
+  const tpms = makeConfig({ vehicle: { hasTpms: true } });
+  const tyres = (fl: number, fr: number, rl: number, rr: number): SignalValues => ({
+    tirePressureFL: fl,
+    tirePressureFR: fr,
+    tirePressureRL: rl,
+    tirePressureRR: rr,
+  });
+  const alertsOf = (h: Harness) =>
+    h.state.alerts.map((a) => [a.key, a.severity, a.title, a.detail, a.dismissible]);
+
+  it('reports a receiver without readings (all tyres 0) as unavailable, not four punctures', () => {
+    const h = new Harness(tpms);
+    h.samples(T0, tyres(0, 0, 0, 0));
+    expect(alertsOf(h)).toEqual([
+      [TPMS_UNAVAILABLE_KEY, 'caution', 'TPMS UNAVAILABLE', 'No tyre sensor readings', true],
+    ]);
+    // Also when they read a little above 0, and after they had read pressures.
+    const woken = new Harness(tpms);
+    woken.samples(T0, tyres(230, 231, 229, 230));
+    woken.samples(T0 + 1000, tyres(2, 0, 3, 1));
+    expect(alertsOf(woken)).toEqual([
+      [TPMS_UNAVAILABLE_KEY, 'caution', 'TPMS UNAVAILABLE', 'No tyre sensor readings', true],
+    ]);
+    // The widget shows no values rather than four flat tyres.
+    const widget = woken.frame().widgets.find((w) => w.id === 'tpms');
+    expect(widget === undefined || (widget.id === 'tpms' && widget.fl.value === null)).toBe(true);
+  });
+
+  it('reports a wheel that has only ever read 0 (no sensor) as unavailable', () => {
+    const h = new Harness(tpms);
+    h.samples(T0, tyres(230, 0, 229, 231));
+    expect(alertsOf(h)).toEqual([
+      [TPMS_UNAVAILABLE_KEY, 'caution', 'TPMS UNAVAILABLE', 'Front right – no reading', true],
+    ]);
+    h.send({ type: 'input', action: 'secondary', at: T0 + 500 });
+    expect(h.state.alerts.find((a) => a.key === TPMS_UNAVAILABLE_KEY)?.dismissedAt).toBe(T0 + 500);
+    // Rear left had read a pressure: losing it is a puncture, next to the missing sensor.
+    h.samples(T0 + 1000, tyres(230, 0, 0, 231));
+    expect(alertsOf(h).map(([key, severity, , detail]) => [key, severity, detail])).toEqual([
+      ['tpms', 'critical', 'Rear left 0 kPa'],
+      [TPMS_UNAVAILABLE_KEY, 'caution', 'Front right – no reading'],
+    ]);
+    const two = new Harness(tpms);
+    two.samples(T0, tyres(230, 0, 0, 231));
+    expect(two.state.alerts.find((a) => a.key === TPMS_UNAVAILABLE_KEY)?.detail).toBe(
+      '2 tyres – no reading',
+    );
+  });
+
+  it('keeps the critical alert for a tyre that loses its pressure', () => {
+    const h = new Harness(tpms);
+    h.samples(T0, tyres(230, 232, 229, 231));
+    h.samples(T0 + 60_000, tyres(230, 0, 229, 231));
+    expect(alertsOf(h)).toEqual([
+      ['tpms', 'critical', 'TYRE PRESSURE CRITICAL', 'Front right 0 kPa', false],
+    ]);
+  });
+
+  it('ignores impossible pressures (a formula on a fault value) instead of alerting', () => {
+    const h = new Harness(tpms);
+    h.samples(T0, tyres(-101.3, 230, 9999, 231));
+    expect(h.state.alerts).toEqual([]);
+    expect(h.state.vehicle.signals.tirePressureFL).toBeUndefined();
+    expect(h.state.vehicle.signals.tirePressureRL).toBeUndefined();
   });
 });
 

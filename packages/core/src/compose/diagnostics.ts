@@ -9,6 +9,7 @@ import {
   pairingPayloadProblem,
 } from '../protocol/pairing.ts';
 import { shortFingerprint } from '../protocol/phone-auth.ts';
+import { unavailableTyres } from '../alerts/rules.ts';
 import { freshSignal, isEngineRunning } from '../state/selectors.ts';
 import { ALERT_SEVERITY_RANK } from '../types/alerts.ts';
 import type { HudConfig } from '../types/config.ts';
@@ -243,8 +244,11 @@ function overviewGauges(state: HudState, config: HudConfig): DiagnosticGauge[] {
     gauge(state, config, 'odometer', state.odometer.km),
   ];
   if (config.vehicle.hasTpms && TYRE_SIGNALS.some((s) => freshSignal(state, s) !== null)) {
-    for (const tyre of TYRE_SIGNALS)
-      gauges.push(gauge(state, config, tyre, freshSignal(state, tyre)));
+    const unavailable = unavailableTyres(state);
+    for (const tyre of TYRE_SIGNALS) {
+      const kpa = unavailable.has(tyre) ? null : freshSignal(state, tyre);
+      gauges.push(gauge(state, config, tyre, kpa));
+    }
   }
   return gauges;
 }
