@@ -1062,6 +1062,25 @@ describe('tick', () => {
       expect(next.state.env.brightness.night).toBe(true);
     });
 
+    it('asks for one write, not one a second, while GPS jitters across a rounding boundary', () => {
+      // Waiting with the phone on the 52.45° N line (midway between 52.4 and 52.5): a metre of
+      // GPS noise each second must not rewrite state.json every time the fix crosses it.
+      const h = new Harness();
+      let writes = 0;
+      for (let i = 0; i < 120; i++) {
+        const lat = 52.45 + (i % 2 === 0 ? 1e-5 : -1e-5);
+        h.send({ type: 'location/update', lat, lon: 13.4, accuracyM: 5, at: T0 + i * 1000 });
+        if (h.lastEffects.some((e) => e.type === 'persist')) writes++;
+      }
+      expect(writes).toBe(1);
+      const kept = h.state.env.lastLocation;
+      expect(kept === null ? null : Math.abs(kept.lat - 52.45)).toBeCloseTo(0.05, 9);
+      // Driving on, the remembered location follows (and is written) once it is clearly off.
+      h.send({ type: 'location/update', lat: 52.63, lon: 13.4, accuracyM: 5, at: T0 + 200_000 });
+      expect(h.state.env.lastLocation).toEqual({ lat: 52.6, lon: 13.4 });
+      expect(h.lastEffects).toEqual([{ type: 'persist' }]);
+    });
+
     it('ranks the configured fallback location above the time zone’s city', () => {
       // At 12:00 UTC it is night in Honolulu (fallback) and day in Berlin (time zone).
       const h = new Harness(

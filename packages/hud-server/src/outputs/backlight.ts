@@ -6,9 +6,10 @@
  * over DDC/CI (`backlight-ddc.ts`) or a PWM channel wired to the panel's dimming input
  * (`backlight-pwm.ts`).
  *
- *  - Blanked frames drive the backlight to its minimum (sysfs never writes 0, because some panels
- *    switch off completely and take seconds to come back) — unless something breaks through the
- *    blank (a critical alert, a collision cue): that is lit as brightly as ever.
+ *  - Blanked frames drive the backlight to its minimum (sysfs and DDC/CI never write 0, and PWM
+ *    keeps its minimum duty, because some panels switch off completely and take seconds to come
+ *    back) — unless something breaks through the blank (a critical alert, a collision cue): that
+ *    is lit as brightly as ever.
  *  - Writes happen only when the level moves by at least the driver's minimum change (sysfs: 1 %
  *    of the brightness range), and at most once per its minimum interval (sysfs: 10 times per
  *    second); the latest value always lands eventually.

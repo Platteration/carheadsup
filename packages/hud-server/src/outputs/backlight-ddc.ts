@@ -81,10 +81,15 @@ export function parseVcpBrightness(text: string): { current: number; max: number
   return max >= 1 && current <= max ? { current, max } : null;
 }
 
-/** DDC/CI brightness level for a frame brightness (0–1): `max × brightness^γ`, rounded. */
+/**
+ * DDC/CI brightness level for a frame brightness (0–1): `max × brightness^γ`, rounded, never
+ * below 1 — as with a sysfs backlight, since some driver boards switch the backlight off at 0
+ * (the night minimum of 0.08 would round to 0, and the HUD, critical alerts included, would go
+ * dark).
+ */
 export function ddcLevel(brightness: number, max: number, gamma = BACKLIGHT_GAMMA): number {
   const b = Number.isFinite(brightness) ? Math.min(1, Math.max(0, brightness)) : 1;
-  return Math.min(max, Math.max(0, Math.round(max * b ** gamma)));
+  return Math.min(max, Math.max(1, Math.round(max * b ** gamma)));
 }
 
 /** The first meaningful line of a command's output, for a log line. */

@@ -115,10 +115,13 @@ describe('ddcutil output', () => {
     expect(parseVcpBrightness('VCP 10 C 0 0\n')).toBeNull();
   });
 
-  it('maps brightness through the gamma onto the display’s range, 0 included', () => {
+  it('maps brightness through the gamma onto the display’s range, never down to 0', () => {
     expect(ddcLevel(1, 100)).toBe(100);
     expect(ddcLevel(0.5, 100)).toBe(22);
-    expect(ddcLevel(0, 100)).toBe(0);
+    // Some driver boards switch the backlight off at 0, like some sysfs panels: the night
+    // minimum (0.08 → 0.39) and blanking stay at the lowest level that is still lit.
+    expect(ddcLevel(0.08, 100)).toBe(1);
+    expect(ddcLevel(0, 100)).toBe(1);
     expect(ddcLevel(Number.NaN, 100)).toBe(100);
     expect(ddcLevel(2, 255)).toBe(255);
   });
@@ -249,7 +252,7 @@ describe('DdcBacklightDriver', () => {
 });
 
 describe('BacklightSink over DDC/CI', () => {
-  it('writes at most once a second, only for changes of 3 % or more, and 0 while blanked', async () => {
+  it('writes at most once a second, only for changes of 3 % or more, and 1 while blanked', async () => {
     const { clock, deps, logger } = setup();
     const ddc = new FakeDdc();
     ddc.monitors.set(20, { current: 100, max: 100, appliesWrites: true });
@@ -275,8 +278,8 @@ describe('BacklightSink over DDC/CI', () => {
     backlight.onFrame(frame(0.3, true));
     await clock.advance(DDC_MIN_INTERVAL_MS);
     await backlight.whenIdle();
-    // The probe (99), then 22 (0.5), 7 (0.3), 0 (blanked).
-    expect(ddc.writes(20)).toEqual([99, 22, 7, 0]);
+    // The probe (99), then 22 (0.5), 7 (0.3), 1 (blanked: the lowest level, never 0).
+    expect(ddc.writes(20)).toEqual([99, 22, 7, 1]);
     expect(
       ddc.spawn.children
         .filter((c) => c.args.includes('setvcp'))

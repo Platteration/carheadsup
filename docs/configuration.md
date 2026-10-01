@@ -187,8 +187,11 @@ taken at the first location known of:
    `state.json`), so night mode is right from the first frame, before the phone connects;
 3. `sensors.fallbackLocation`;
 4. the principal city of the HUD's system time zone (from the tz database's `zone1970.tab` and
-   `zone.tab`; e.g. Berlin for `Europe/Berlin`) — a few hundred kilometres off at worst, which
-   moves sunset by minutes. The server logs which zone it found at start-up.
+   `zone.tab`; e.g. Berlin for `Europe/Berlin`) — for most zones within a few hundred
+   kilometres, which moves sunset by minutes. A zone that spans a large country is the
+   exception: `Asia/Shanghai` (all of China) or `Asia/Kolkata` (all of India) put sunset up to
+   hours early or late at the far end of the country, so set `sensors.fallbackLocation` there.
+   The server logs which zone it found at start-up.
 
 With none of these (the system time zone is UTC or another zone without a city), it goes by the
 local time against `nightHours`, and with that off it keeps the last level. So set the system

@@ -103,11 +103,14 @@ at most once a second and only for changes of 3 % or more (DDC/CI is slow, and s
 every change to EEPROM), and keeps the page dimmed while the display does not answer.
 
 **PWM.** The Pi's hardware PWM on GPIO 18 (header pin 12): add `dtoverlay=pwm,pin=18,func=2` to
-`/boot/firmware/config.txt` and reboot; it appears as `pwmchip0`, channel 0 (on a Pi 5 the chip
-number can differ: `ls /sys/class/pwm`). On a Pi 3 or 4 this takes over the PWM that the analog
-audio jack uses; the HUD needs no audio. Wire GPIO 18 to the board's dimming input and its ground
-to the Pi's ground — directly only when the input takes 3.3 V logic; a 5 V or 12 V input needs a
-transistor or MOSFET stage, which usually inverts it (`,inverted`). Then set
+`/boot/firmware/config.txt` and reboot; on a Pi 3 or 4 it appears as `pwmchip0`, channel 0. A
+Pi 5 has its PWM in the RP1 chip, where the pin function, the chip and the channel all differ
+(GPIO 18 is not channel 0 there): check `/boot/firmware/overlays/README` and
+`ls /sys/class/pwm/pwmchip*/`, and set `pwm:<chip>/<channel>` to match. On a Pi 3 or 4 this
+takes over the PWM that the analog audio jack uses; the HUD needs no audio. Wire GPIO 18 to the
+board's dimming input and its ground to the Pi's ground — directly only when the input takes
+3.3 V logic; a 5 V or 12 V input needs a transistor or MOSFET stage, which usually inverts it
+(`,inverted`). Then set
 `CARHEADSUP_BACKLIGHT=pwm:0/0` — options: `hz=` the frequency (default 25 kHz: above hearing and
 flicker-free; some inputs want 1–20 kHz, see the board's data sheet), `min=` the lowest duty cycle
 in per cent (default 1; raise it if the LEDs flicker or switch off near the bottom),

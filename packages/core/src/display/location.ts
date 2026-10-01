@@ -24,6 +24,29 @@ export function roundLocation(point: GeoPoint): GeoPoint {
   return { lat: round(point.lat), lon: round(point.lon) };
 }
 
+/**
+ * How far a fix must be from the remembered location (degrees, in latitude or in longitude)
+ * before that moves on: three quarters of a step. A fix jittering across the boundary between
+ * two rounded values is half a step from each, so standing there never flips the remembered
+ * location — and rewrites `state.json` — with every GPS update.
+ */
+export const LAST_LOCATION_KEEP_DEG = 0.75 * LAST_LOCATION_STEP_DEG;
+
+/**
+ * The remembered location after the fix `point`: `prev` itself (the same object) while the fix
+ * stays within {@link LAST_LOCATION_KEEP_DEG} of it, else the fix rounded with `roundLocation`.
+ * Longitude is compared across the antimeridian.
+ */
+export function nextLastLocation(prev: GeoPoint | null, point: GeoPoint): GeoPoint {
+  if (prev !== null) {
+    const dLat = Math.abs(point.lat - prev.lat);
+    const lon = Math.abs(point.lon - prev.lon) % 360;
+    const dLon = Math.min(lon, 360 - lon);
+    if (dLat < LAST_LOCATION_KEEP_DEG && dLon < LAST_LOCATION_KEEP_DEG) return prev;
+  }
+  return roundLocation(point);
+}
+
 export function sameGeoPoint(a: GeoPoint | null, b: GeoPoint | null): boolean {
   if (a === b) return true;
   return a !== null && b !== null && a.lat === b.lat && a.lon === b.lon;

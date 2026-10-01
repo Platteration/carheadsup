@@ -68,8 +68,9 @@ export interface TimeZoneInfo {
   utcOffsetMin: number;
   /**
    * The zone's principal location (tz database `zone1970.tab` / `zone.tab`): within a few hundred
-   * kilometres for most zones, good enough for sunset and sunrise. Null for zones without one
-   * (UTC, Etc/GMT+5).
+   * kilometres for most zones, good enough for sunset and sunrise — though not across a zone that
+   * spans a large country (Asia/Shanghai, Asia/Kolkata). Null for zones without one (UTC,
+   * Etc/GMT+5).
    */
   location: GeoPoint | null;
 }
@@ -79,9 +80,9 @@ export interface EnvironmentState {
   luxAt: number | null;
   location: { lat: number; lon: number; at: number } | null;
   /**
-   * The phone's last location rounded to {@link LAST_LOCATION_STEP_DEG} (about 11 km): kept
-   * across restarts (`PersistedState.lastLocation`), so night mode knows the sun before the
-   * phone connects.
+   * The phone's last location rounded to {@link LAST_LOCATION_STEP_DEG} (about 11 km), and
+   * updated only once the phone is clearly elsewhere (`nextLastLocation`): kept across restarts
+   * (`PersistedState.lastLocation`), so night mode knows the sun before the phone connects.
    */
   lastLocation: GeoPoint | null;
   /** The system time zone (`clock/zone`); null until the server reports it. */
