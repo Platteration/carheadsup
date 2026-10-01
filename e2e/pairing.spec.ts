@@ -39,9 +39,50 @@ function watchErrors(page: Page): string[] {
   return errors;
 }
 
+interface Pixels {
+  width: number;
+  height: number;
+  /** RGBA, row by row. */
+  data: Uint8Array;
+}
+
+/** The image turned a quarter clockwise. */
+function quarterTurn(image: Pixels): Pixels {
+  const { width, height, data } = image;
+  const turned = new Uint8Array(data.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const from = (y * width + x) * 4;
+      turned.set(data.subarray(from, from + 4), (x * height + (height - 1 - y)) * 4);
+    }
+  }
+  return { width: height, height: width, data: turned };
+}
+
+/**
+ * Decode a QR code in any of the four orientations, upright first. @paulmillr/qr mistakes a
+ * finder-like run of modules in the data area for a finder pattern in a few codes in a thousand
+ * (about 1 in 140 of the HUD's pairing codes; every run draws a different one, with a random HUD
+ * id, certificate and port), and then fails; turned, the same code reads. A QR code means the
+ * same in every orientation, so this loosens nothing; a mirror image reads in none of them.
+ */
+function decodeTurned(image: Pixels): string {
+  const errors: unknown[] = [];
+  let turned = image;
+  for (let turn = 0; turn < 4; turn++) {
+    try {
+      return decodeQR(turned);
+    } catch (err) {
+      errors.push(err);
+    }
+    turned = quarterTurn(turned);
+  }
+  throw new AggregateError(errors, 'the QR code reads in no orientation');
+}
+
 /**
  * Read the QR code in a PNG screenshot: its pixels through a canvas (optionally flipped back
- * left-to-right), decoded in Node.js.
+ * left-to-right), decoded in Node.js in any orientation (`decodeTurned`).
  */
 async function decodeScreenshot(browser: Browser, png: Buffer, unmirror: boolean): Promise<string> {
   const page = await browser.newPage();
@@ -66,7 +107,7 @@ async function decodeScreenshot(browser: Browser, png: Buffer, unmirror: boolean
       },
       { base64: png.toString('base64'), flip: unmirror },
     );
-    return decodeQR({ ...image, data: Uint8Array.from(image.data) });
+    return decodeTurned({ ...image, data: Uint8Array.from(image.data) });
   } finally {
     await page.close();
   }
@@ -107,8 +148,11 @@ test('the settings app shows the pairing code on the parked HUD, and it decodes'
       hudName: 'Golf HUD',
     },
   });
-  // As shown, it is the mirror image (which phone decoders that handle mirroring read too).
-  await expect(decodeScreenshot(browser, png, false)).rejects.toThrow();
+  // As shown, it is the mirror image (which phone decoders that handle mirroring read too):
+  // it reads in no orientation here.
+  await expect(decodeScreenshot(browser, png, false)).rejects.toThrow(
+    'the QR code reads in no orientation',
+  );
   expect([...kioskErrors, ...phoneErrors]).toEqual([]);
   await phone.close();
   await kiosk.close();
@@ -131,4 +175,29 @@ test('the code goes as the car drives off and cannot be shown while moving', asy
   await expect(page.locator('svg[aria-label="Pairing QR code"]')).toHaveCount(0);
   expect(await show()).toMatchObject({ status: 409, body: { ok: false, status: null } });
   expect(errors).toEqual([]);
+});
+
+test('reads a code the decoder cannot read upright (a kiosk screenshot from a failed run)', async ({
+  browser,
+}) => {
+  // Each run draws a different code (random HUD id, certificate and port). @paulmillr/qr cannot
+  // read this one upright ("invalid format pattern"): the screenshot of a run that failed so.
+  const png = await readFile(
+    new URL('fixtures/pairing-qr-unreadable-upright.png', import.meta.url),
+  );
+  const text = await decodeScreenshot(browser, png, true);
+  expect(parsePairingUri(text)).toEqual({
+    ok: true,
+    payload: {
+      hudId: 'eu7jg0am-Cnzu9rUeOHKvA',
+      certFingerprint: '9c59f9c990bc8363f49a70a5f25abca969bca0b29d2d5151a4fec8c6057b98f7',
+      pairingToken: TOKEN,
+      hosts: HOSTS,
+      tlsPort: 36959,
+      hudName: 'Golf HUD',
+    },
+  });
+  await expect(decodeScreenshot(browser, png, false)).rejects.toThrow(
+    'the QR code reads in no orientation',
+  );
 });

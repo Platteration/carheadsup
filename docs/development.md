@@ -149,6 +149,10 @@ kiosk page, the settings app and the developer console against a real server run
 simulator on a free port, with the renderer built into a temporary directory first — including
 pairing: the settings app shows the pairing code on the parked HUD, and the QR code in a
 screenshot of the (mirrored) kiosk decodes to the HUD's id, certificate, token and addresses.
+The test's decoder (`@paulmillr/qr`) cannot read a few codes in a thousand upright, and every run
+draws a different code, so the spec tries all four orientations (a mirror image reads in none);
+`e2e/fixtures/pairing-qr-unreadable-upright.png`, a screenshot from a run that failed, keeps that
+path tested.
 
 ```sh
 npm run test:e2e                    # = npx playwright test -c e2e/playwright.config.ts
