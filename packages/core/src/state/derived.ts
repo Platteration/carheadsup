@@ -134,17 +134,25 @@ const DAY_MS = 24 * HOUR_MS;
  * Advance auto-brightness / night mode: a light-sensor reading counts while ≤ 5 s old; the sun
  * elevation (at the wall-clock time) comes from `sunLocation`; the local time (for
  * `nightHours`, when there is no location at all) from the system time zone.
+ *
+ * Neither the sun nor the local time is used while the wall clock is untrusted
+ * (`ClockState.trusted`): it is then only a lower bound (on a Pi without a real-time clock, the
+ * end of the last drive), so the time of day is unknown, and taking night from it would start
+ * the next morning's drive at the night level. Only a light reading decides then; without one
+ * the level and palette are held (the visible daytime default at start-up), and the first
+ * trusted `clock/sync` snaps them to the sun.
  */
 export function advanceBrightness(state: HudState, config: HudConfig): BrightnessState {
   const { env, now } = state;
   const lux =
     env.lux !== null && env.luxAt !== null && now - env.luxAt <= LUX_FRESH_MS ? env.lux : null;
-  const location = sunLocation(state, config);
+  const timeKnown = state.clock.trusted;
+  const location = timeKnown ? sunLocation(state, config) : null;
   const sun =
     location === null ? null : sunElevationDeg(location.lat, location.lon, wallNow(state));
   return updateBrightness(
     env.brightness,
-    { at: now, lux, sunElevationDeg: sun, localHour: localHour(state) },
+    { at: now, lux, sunElevationDeg: sun, localHour: timeKnown ? localHour(state) : null },
     config.display.brightness,
   );
 }

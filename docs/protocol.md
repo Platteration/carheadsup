@@ -470,8 +470,9 @@ clock (`WallClock`, `hud-server/src/clock.ts`; it never sets the system clock):
 - At start-up, a system clock that reads earlier than the time the HUD last saved
   (`lastWallMs` in `state.json`) has gone back: the HUD counts on from that saved time and treats
   its clock as *untrusted* until the phone or network time confirms it — the clock widget is
-  hidden, a trip in progress before the restart waits up to 3 minutes for the real time to tell
-  whether the break was long, and services recorded meanwhile are dated again
+  hidden, night mode ignores the time of day (only a light sensor dims the HUD), a trip in
+  progress before the restart waits up to 3 minutes for the real time to tell whether the break
+  was long, and services recorded meanwhile are dated again
   ([details](architecture.md#engine-time-and-the-wall-clock)).
 - While the HUD follows the phone or its saved time, the system clock being set (network time
   arriving before the 30 s check sees it, measured against a monotonic clock) does not move the

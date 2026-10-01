@@ -196,7 +196,11 @@ taken at the first location known of:
    The server logs which zone it found at start-up.
 
 With none of these (the system time zone is UTC or another zone without a city), it goes by the
-local time against `nightHours`, and with that off it keeps the last level. So set the system
+local time against `nightHours`, and with that off it keeps the last level. The sun and
+`nightHours` both need the time of day: while the HUD's clock is only a lower bound (a Pi without
+a real-time clock that has not yet heard from the phone or network time, see
+[the HUD's clock](protocol.md#the-huds-clock)) neither is used, and without a light reading the
+HUD stays at the daytime level until the real time arrives. So set the system
 time zone (`sudo timedatectl set-timezone Europe/Berlin`); the server warns at start-up when it
 has no location and nothing else tells day from night. The driver's
 brightness-up/down input trims the result by ±0.1 per step (at most ±0.5), and the final value

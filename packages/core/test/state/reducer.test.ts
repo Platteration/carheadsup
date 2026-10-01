@@ -559,6 +559,65 @@ describe('the wall clock (clock/sync)', () => {
       h.send({ type: 'maintenance/done', itemId: 'oil', odometerKm: null, at: T0 + 1000 });
       expect(h.state.maintenance.undated).toEqual([]);
     });
+
+    describe('night mode (no light sensor)', () => {
+      // The saved time of the last drive: 21:30 in Berlin, after sunset. On an RTC-less Pi
+      // the HUD starts from it the next morning, its real time unknown until the phone links.
+      const LAST_WALL = Date.UTC(2026, 9, 1, 19, 30);
+      const BERLIN = { lat: 52.5, lon: 13.4 };
+      const BERLIN_ZONE = { name: 'Europe/Berlin', utcOffsetMin: 120, location: BERLIN };
+      const nextMorning = (): Harness =>
+        new Harness(makeConfig(), persisted({ lastLocation: BERLIN }), LAST_WALL, {
+          clockTrusted: false,
+        });
+
+      it('does not take the time of day from it: holds a daylight-readable level', () => {
+        // Trusted, that wall time is night (the sun at the remembered location).
+        const trusted = new Harness(makeConfig(), persisted({ lastLocation: BERLIN }), LAST_WALL);
+        expect(trusted.state.env.brightness.night).toBe(true);
+
+        const h = nextMorning();
+        expect(h.state.clock.trusted).toBe(false);
+        expect(h.state.env.brightness).toMatchObject({ night: false, level: 1 });
+        // Neither the time zone (its city, or nightHours by the local time) nor time passing
+        // brings night on while the time is only a lower bound.
+        h.send({ type: 'clock/zone', zone: BERLIN_ZONE, at: h.now + 10 });
+        h.send({ type: 'clock/zone', zone: { ...BERLIN_ZONE, location: null }, at: h.now + 20 });
+        h.tick(h.now + 1000);
+        h.send({ type: 'clock/sync', wallOffsetMs: 5000, at: h.now + 10 });
+        h.tick(h.now + 1000);
+        expect(h.state.env.brightness).toMatchObject({ night: false, level: 1 });
+        expect(h.frame().theme).toEqual({ night: false, brightness: 1 });
+      });
+
+      it('lets a light reading decide meanwhile', () => {
+        const h = nextMorning();
+        h.send({ type: 'sensor/light', lux: 0.5, at: h.now + 100 });
+        h.tick(h.now + 100);
+        expect(h.state.env.brightness.night).toBe(true);
+        expect(h.state.env.brightness.level).toBeLessThan(0.5);
+      });
+
+      it('follows the sun as soon as the real time arrives', () => {
+        // The phone: it is 08:30 the next morning — day, at full level.
+        const morning = nextMorning();
+        const morningOffset = Date.UTC(2026, 9, 2, 6, 30) - LAST_WALL;
+        morning.send({
+          type: 'clock/sync',
+          wallOffsetMs: morningOffset,
+          trusted: true,
+          at: LAST_WALL + 50,
+        });
+        expect(morning.state.env.brightness).toMatchObject({ night: false, level: 1 });
+
+        // The saved time was right after all (a short stop at night): night at once, no fade.
+        const night = nextMorning();
+        night.send({ type: 'clock/sync', wallOffsetMs: 60_000, trusted: true, at: LAST_WALL + 50 });
+        expect(night.state.env.brightness.night).toBe(true);
+        expect(night.state.env.brightness.level).toBeLessThanOrEqual(0.2);
+        expect(night.frame().theme.night).toBe(true);
+      });
+    });
   });
 
   it('asks for a write when the clock moves while a trip is in progress', () => {

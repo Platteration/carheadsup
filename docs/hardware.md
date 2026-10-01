@@ -246,7 +246,8 @@ clock when it connects and with every heartbeat, and the HUD follows it (it neve
 system clock; [details](protocol.md#the-huds-clock)). Before the phone has connected, the HUD
 never runs earlier than the time it last saved in its data directory (which the read-only root
 leaves writable): a start whose system clock reads earlier counts on from there, and treats its
-clock as only a lower bound — the clock widget stays hidden, a trip from before the restart is
+clock as only a lower bound — the clock widget stays hidden, night mode goes by the light sensor
+alone (without one the HUD stays at its daytime level), a trip from before the restart is
 completed after 3 minutes unless the phone shows the break was short, and a service recorded
 meanwhile is dated again once the real time is known. Trips are numbered, so none is lost or
 overwritten in the phone's log whatever the clock did. Without the phone, the clock widget, the

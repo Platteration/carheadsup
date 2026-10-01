@@ -122,7 +122,10 @@ So there are two clocks:
   saved time — a Pi without a real-time clock under a read-only root restores the same time at
   every boot. Such a clock is only a lower bound: `state.clock.trusted` is false until the phone or
   network time confirms it, and meanwhile the clock widget is hidden (and the ETA's remaining
-  minutes come only from the phone's own count). A step of the system
+  minutes come only from the phone's own count), and night mode takes the time of day from
+  neither the sun nor `nightHours` — only a light sensor decides; without one the level and
+  palette are held (the daytime level at start-up) until a trusted sync snaps them to the sun,
+  since the lower bound is usually the end of the last evening's drive. A step of the system
   clock while the server follows the phone or the saved time (network time setting it before the
   server notices) is absorbed rather than added to the correction. The reducer keeps
   it in `state.clock` and converts (`toWallTime`, `wallNow`) only where the absolute time
