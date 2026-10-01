@@ -281,7 +281,11 @@ function lanesWidget(env: WidgetEnv, zone: Zone): LanesWidget | null {
   return { id: 'lanes', zone, lanes };
 }
 
-/** The phone's ETA is a wall-clock time, so the remaining minutes are counted on the wall clock. */
+/**
+ * The phone's ETA is a wall-clock time, so the remaining minutes are counted on the wall clock —
+ * not while that is untrusted (`ClockState.trusted`: only a lower bound, possibly days behind):
+ * then only the phone's own count of the remaining time gives them.
+ */
 function etaWidget({ state, config }: WidgetEnv, zone: Zone): EtaWidget | null {
   if (state.nav === null) return null;
   const { etaEpochMs, remainingSeconds, remainingDistanceM } = state.nav.info;
@@ -289,7 +293,7 @@ function etaWidget({ state, config }: WidgetEnv, zone: Zone): EtaWidget | null {
   let remainingMinutes: number | null = null;
   if (remainingSeconds !== null && Number.isFinite(remainingSeconds)) {
     remainingMinutes = Math.max(0, Math.round(remainingSeconds / 60));
-  } else if (etaEpochMs !== null && Number.isFinite(etaEpochMs)) {
+  } else if (etaEpochMs !== null && Number.isFinite(etaEpochMs) && state.clock.trusted) {
     remainingMinutes = Math.max(0, Math.round((etaEpochMs - wallNow(state)) / 60_000));
   }
   const remainingM = navRemainingM(state);

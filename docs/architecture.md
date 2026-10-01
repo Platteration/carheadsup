@@ -121,7 +121,8 @@ So there are two clocks:
   earlier than the time the HUD last saved (`state.json`'s `lastWallMs`) counts on from that
   saved time — a Pi without a real-time clock under a read-only root restores the same time at
   every boot. Such a clock is only a lower bound: `state.clock.trusted` is false until the phone or
-  network time confirms it, and meanwhile the clock widget is hidden. A step of the system
+  network time confirms it, and meanwhile the clock widget is hidden (and the ETA's remaining
+  minutes come only from the phone's own count). A step of the system
   clock while the server follows the phone or the saved time (network time setting it before the
   server notices) is absorbed rather than added to the correction. The reducer keeps
   it in `state.clock` and converts (`toWallTime`, `wallNow`) only where the absolute time

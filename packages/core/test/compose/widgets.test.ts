@@ -455,6 +455,27 @@ describe('navigation widgets', () => {
     expect(widget(h.frame(), 'eta')).toBeUndefined();
   });
 
+  it('does not count the ETA down on a wall clock that is only a lower bound', () => {
+    const h = cityDrive(makeConfig(), { speed: 36 });
+    // The start-up clock went back (untrusted): the phone's ETA is a real wall-clock time, so the
+    // minutes to it are unknown — not "days" because the HUD's clock is behind.
+    h.send({ type: 'clock/sync', wallOffsetMs: 0, trusted: false, at: h.now });
+    const eta = h.now + 3 * 86_400_000;
+    h.send({
+      type: 'nav/update',
+      nav: navInfo({ etaEpochMs: eta, remainingSeconds: null, remainingDistanceM: null }),
+      at: h.now,
+    });
+    expect(widget(h.frame(), 'eta')).toMatchObject({ etaEpochMs: eta, remainingMinutes: null });
+    // The phone's own count still shows.
+    h.send({
+      type: 'nav/update',
+      nav: navInfo({ etaEpochMs: eta, remainingSeconds: 600, remainingDistanceM: null }),
+      at: h.now,
+    });
+    expect(widget(h.frame(), 'eta')).toMatchObject({ remainingMinutes: 10 });
+  });
+
   it('shows the nearest hazard ahead within range', () => {
     const h = highwayDrive(makeConfig(), { speed: 108 });
     h.send({
