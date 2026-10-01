@@ -6,10 +6,11 @@
  */
 import { homedir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
-import { SYSTEM_TIMERS } from '@carheadsup/obd';
+import { SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
 import { createHudServer } from './app.ts';
 import type { HudServer } from './app.ts';
 import { USAGE, pageUrls, parseCli, serverUrls } from './cli.ts';
+import { SYSTEM_MONOTONIC, WallClock } from './clock.ts';
 import { LOG_DIR, LogFiles } from './log-files.ts';
 import { LOG_LEVEL_RANK, createLogger } from './logger.ts';
 import type { LogLevel } from './logger.ts';
@@ -27,6 +28,20 @@ function lanAddresses(): string[] {
     }
   }
   return out;
+}
+
+/** What the times in a debug dump are worth, by where the HUD's wall clock takes them from. */
+function clockNote(clock: WallClock): string {
+  switch (clock.source) {
+    case 'network':
+      return 'the system clock, synchronised to network time';
+    case 'phone':
+      return "the phone's clock";
+    case 'saved':
+      return 'counted on from the time the HUD last saved (only a lower bound)';
+    case 'system':
+      return 'the system clock (not known to be synchronised)';
+  }
 }
 
 function describe(err: unknown): string {
@@ -106,8 +121,14 @@ async function main(): Promise<void> {
   }
 
   const options = parsed.options;
+  // The HUD's wall clock, shared with the server: on a Pi without a real-time clock the system
+  // clock restores the same time at every boot, but this one never reads earlier than the time
+  // the HUD last saved (once the server has read it, at start). Log lines, debug dump names and
+  // OBD transcript names then sort by age and agree with trip and service times.
+  const wallClock = new WallClock(SYSTEM_CLOCK, SYSTEM_MONOTONIC);
+  const wallNow = (): number => wallClock.now();
   // Problems with the log files themselves go to the journal only.
-  const terminal = createLogger({ level: options.logLevel });
+  const terminal = createLogger({ level: options.logLevel, now: wallNow });
   // The file gets info and above — and debug too while the log level is debug.
   const fileLevel: LogLevel =
     LOG_LEVEL_RANK[options.logLevel] < LOG_LEVEL_RANK.info ? options.logLevel : 'info';
@@ -115,10 +136,11 @@ async function main(): Promise<void> {
     dir: join(options.dataDir, LOG_DIR),
     level: fileLevel,
     timers: SYSTEM_TIMERS,
-    now: Date.now,
+    now: wallNow,
+    clockNote: () => clockNote(wallClock),
     onProblem: (message) => terminal.warn(message),
   });
-  const logger = createLogger({ level: options.logLevel, sinks: logFiles.sinks });
+  const logger = createLogger({ level: options.logLevel, sinks: logFiles.sinks, now: wallNow });
   process.title = 'carheadsup';
 
   /** Write the recent debug log to a file (rate-limited), and say where. */
@@ -184,6 +206,7 @@ async function main(): Promise<void> {
     backlight: options.backlight,
     allowedHosts: options.allowedHosts,
     record: options.record,
+    wallClock,
     logger,
     dumpDebugLog: (reason) => void dumpDebugLog(reason),
     ...(options.configPath !== undefined ? { configPath: options.configPath } : {}),

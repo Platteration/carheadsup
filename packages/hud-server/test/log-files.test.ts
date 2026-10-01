@@ -170,7 +170,7 @@ describe('createLogger with sinks', () => {
 });
 
 describe('LogFiles', () => {
-  function files(options: { now?: () => number } = {}) {
+  function files(options: { now?: () => number; clockNote?: () => string | null } = {}) {
     const fs = new MemoryFs();
     const clock = new FakeClock(Date.UTC(2026, 9, 1, 7, 30));
     const problems: string[] = [];
@@ -182,6 +182,7 @@ describe('LogFiles', () => {
       ringLines: 3,
       dumpsKept: 2,
       onProblem: (message) => problems.push(message),
+      ...(options.clockNote !== undefined ? { clockNote: options.clockNote } : {}),
     });
     const logger = createLogger({ level: 'error', write: () => undefined, sinks: logs.sinks });
     return { fs, clock, problems, logs, logger };
@@ -208,6 +209,24 @@ describe('LogFiles', () => {
     await logs.close();
     expect(fs.synced.get('/data/logs/hud.log')).not.toContain('OBD →');
     expect(fs.synced.get('/data/logs/hud.log')).toContain('started');
+  });
+
+  it("says in a debug log's header what its times are worth, as they are when it is written", async () => {
+    let note: string | null = 'counted on from the time the HUD last saved (only a lower bound)';
+    let now = Date.UTC(2026, 9, 1, 7, 30);
+    const { fs, logs, logger } = files({ now: () => now, clockNote: () => note });
+    logger.error('OBD: connection to the adapter lost');
+    const first = await logs.dumpDebug('OBD link lost');
+    expect((fs.synced.get(first ?? '') ?? '').split('\n').slice(0, 3)).toEqual([
+      '# carheadsup debug log: OBD link lost',
+      '# clock: counted on from the time the HUD last saved (only a lower bound)',
+      expect.stringMatching(/ERROR OBD: connection to the adapter lost$/),
+    ]);
+    // Nothing to say: no such line.
+    note = null;
+    now += 120_000;
+    const second = await logs.dumpDebug('page error');
+    expect((fs.synced.get(second ?? '') ?? '').split('\n')[1]).toMatch(/ERROR OBD: connection/);
   });
 
   it('writes at most one debug log a minute, and keeps the newest few', async () => {

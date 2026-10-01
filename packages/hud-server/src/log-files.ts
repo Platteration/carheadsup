@@ -260,8 +260,16 @@ export interface LogFilesOptions {
   level?: LogLevel;
   fs?: LogFs;
   timers: Timers;
-  /** Wall clock, for the dump file names and the dump rate limit. */
+  /**
+   * Wall clock, for the dump file names and the dump rate limit: the HUD's (`WallClock`), so
+   * that the names sort by age on a Pi without a real-time clock and agree with trip times.
+   */
   now: Clock;
+  /**
+   * What the dump's times are worth (e.g. only a lower bound), for its header; null or absent:
+   * nothing said.
+   */
+  clockNote?: () => string | null;
   onProblem?: (message: string) => void;
   ringLines?: number;
   maxBytes?: number;
@@ -343,7 +351,10 @@ export class LogFiles {
       await this.fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
       const handle = await this.fs.open(path, 'w');
       try {
-        const header = `# carheadsup debug log: ${reason.replace(/\s*\r?\n\s*/g, ' | ')}\n`;
+        const note = this.options.clockNote?.() ?? null;
+        const header =
+          `# carheadsup debug log: ${reason.replace(/\s*\r?\n\s*/g, ' | ')}\n` +
+          (note === null ? '' : `# clock: ${note}\n`);
         await handle.write(`${header}${lines.map((line) => `${line}\n`).join('')}`);
         await handle.sync();
       } finally {
@@ -359,8 +370,10 @@ export class LogFiles {
 
   /**
    * Delete all but the newest debug dumps — always keeping `written`, the one just written. The
-   * names carry the wall-clock time, which on a Pi without a real-time clock can be behind that
-   * of an earlier drive's dumps; by name alone the new dump would be the first to go.
+   * names carry the wall-clock time, which on a Pi without a real-time clock is only a lower
+   * bound: the HUD's wall clock never reads earlier than the time it last saved, but a dump
+   * written after that could still be ahead of this one; by name alone it would be the first
+   * to go.
    */
   private async prune(written: string): Promise<void> {
     const keep = Math.max(1, this.options.dumpsKept ?? DEBUG_DUMPS_KEPT);

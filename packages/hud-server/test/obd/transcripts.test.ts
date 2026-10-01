@@ -267,4 +267,58 @@ describe('recording on the HUD', () => {
       ),
     ).toBe(true);
   }, 30_000);
+
+  it("names a transcript by the HUD's wall clock: never earlier than the time it last saved", async () => {
+    // A Pi without a real-time clock: the system clock restored an older time than the HUD
+    // saved at the end of the last drive. Named by the system clock, this drive's recording
+    // would sort before (and be deleted before) that drive's.
+    adapter = await emulatedWifiAdapter();
+    temp = await makeTempDir();
+    const dataDir = temp.dir;
+    const savedWallMs = Date.now() + 40 * 86_400_000;
+    await writeFile(
+      join(dataDir, 'config.json'),
+      JSON.stringify(
+        testConfig({
+          obd: { transport: 'tcp', tcpHost: '127.0.0.1', tcpPort: adapter.port },
+          server: { mdns: false },
+        }),
+      ),
+    );
+    await writeFile(
+      join(dataDir, 'state.json'),
+      JSON.stringify({
+        odometerKm: null,
+        learnedGearRatios: null,
+        avgLPer100km: null,
+        maintenanceRecords: [],
+        lastWallMs: savedWallMs,
+      }),
+    );
+    const hud = createHudServer({
+      dataDir,
+      port: 0,
+      tlsPort: null,
+      host: '127.0.0.1',
+      record: true,
+      clockSynchronized: () => false,
+      sysRoot: null,
+      createSensorSources: () => [],
+      createFrameSinks: () => [],
+      advertiseHud: () => null,
+    });
+    server = hud;
+    await hud.start();
+    await waitFor(() => hud.engine.state.vehicle.vin !== null, 15_000, 'the VIN over OBD');
+    await hud.stop();
+    server = null;
+
+    const dir = join(dataDir, 'obd-transcripts');
+    const names = await readdir(dir);
+    expect(names).toHaveLength(1);
+    const { header } = parseTranscript(await readFile(join(dir, names[0] ?? ''), 'utf8'));
+    expect(header.startedAt).toBeGreaterThanOrEqual(savedWallMs);
+    expect(header.startedAt).toBeLessThan(savedWallMs + 60_000);
+    expect(names).toEqual([transcriptFileName(header.startedAt)]);
+  }, 30_000);
 });

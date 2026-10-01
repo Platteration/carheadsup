@@ -128,6 +128,14 @@ export interface HudServerOptions {
   /** The wall (system) clock. Default `Date.now`. */
   now?: Clock;
   /**
+   * The HUD's wall clock (see `WallClock`): the system clock, corrected from the phone and never
+   * earlier at start-up than the time the HUD last saved, which `start()` reads. Default a new
+   * one on `now` and `monotonic`. The command line passes the one its logs are stamped with, so
+   * that log times, debug dump names and OBD transcript names sort by age on a Pi without a
+   * real-time clock and agree with trip and service times.
+   */
+  wallClock?: WallClock;
+  /**
    * The monotonic clock the engine's time follows (see `EngineClock`). Default
    * `performance.now()`, or `now` without its backward steps when only `now` is given.
    */
@@ -237,7 +245,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
   // clock tells it when the system clock is set meanwhile.
   const monotonic =
     options.monotonic ?? (options.now === undefined ? SYSTEM_MONOTONIC : monotonicView(now));
-  const wallClock = new WallClock(now, monotonic);
+  const wallClock = options.wallClock ?? new WallClock(now, monotonic);
   const clockSynchronized = options.clockSynchronized ?? (() => systemClockSynchronized());
   let clockCheckTimer: unknown = null;
 
@@ -631,7 +639,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
       config,
       simulator: simulation?.vehicle ?? null,
       deps,
-      recording: { createSink: transcripts.createSink },
+      // Transcripts are named by the HUD's wall clock, like trips (see `wallClock`).
+      recording: { createSink: transcripts.createSink, wallNow: () => wallClock.now() },
       onEvent: (event) => {
         if (event.type === 'obd/link') {
           // A link that worked and broke (the adapter vanished or stopped making sense) — not

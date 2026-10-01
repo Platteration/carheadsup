@@ -197,9 +197,10 @@ adapter's own traffic, switch on *OBD connection → Record the adapter's traffi
 app before the drive (or run with `--record`).
 
 **Transcripts.** A recording (`<data dir>/obd-transcripts/obd-<time>.jsonl`, one file per
-connection) holds everything the HUD wrote to the adapter and every chunk it got back, unmerged
-and timed: what the format of a clone's answers, its echo, a line split across Bluetooth packets,
-`SEARCHING...` or `BUFFER FULL` really looked like. Replay it on any computer, without the car:
+connection, named by the HUD's wall clock like the trip log) holds everything the HUD wrote to the
+adapter and every chunk it got back, unmerged and timed: what the format of a clone's answers, its
+echo, a line split across Bluetooth packets, `SEARCHING...` or `BUFFER FULL` really looked like.
+Replay it on any computer, without the car:
 
 ```sh
 npm run obd-replay -- obd-2026-10-01T07-30-00.000Z.jsonl            # the events, as text

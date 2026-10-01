@@ -619,6 +619,14 @@ keeps its own files in `/var/lib/carheadsup/logs` (on the data partition):
   minute; the newest five are kept. The server's log names each one ("wrote the recent debug log
   to …").
 
+Their times, and the names of the [OBD transcripts](development.md#field-testing), come
+from the HUD's own clock, as the trip log's do. On a Pi without a real-time clock that has not yet
+heard from the phone or network time, it counts on from the time the HUD last saved rather than
+from the older time the system restored, so the files sort by age and the oldest are the ones
+deleted; such times are only a lower bound, as each debug log's `# clock:` line says. Only the
+first line or two that each start logs, before the server has read its saved time, carry the
+system clock (the next line says when the HUD's clock differs).
+
 ```sh
 sudo tail -f /var/lib/carheadsup/logs/hud.log
 sudo ls -lt /var/lib/carheadsup/logs
