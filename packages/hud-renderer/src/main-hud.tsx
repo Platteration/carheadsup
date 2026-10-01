@@ -13,7 +13,8 @@ import './hud/kiosk.css';
  * `?fixture=<name>` renders a sample frame without a server; `?preview=1` skips mirroring and
  * keystone (and dims by itself). Keys map to driver inputs sent over the socket.
  *
- * The HUD's own browser connects over loopback and needs no token. Opened from another device
+ * The HUD's own browser is the HUD itself to the server (over loopback, or at the one network
+ * address the server listens on) and needs no token. Opened from another device
  * once `server.apiToken` is set, the page uses the token stored on that device (by the settings
  * app, or `?token=` on this page).
  */

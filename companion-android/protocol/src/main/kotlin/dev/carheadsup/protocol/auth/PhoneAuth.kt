@@ -35,8 +35,8 @@ public object PhoneAuth {
     /** Length of a proof: 32 bytes of HMAC-SHA256 in base64url. */
     public const val PROOF_CHARS: Int = 43
 
-    /** Longest pairing token the HUD accepts (core config `phone.pairingToken`). */
-    public const val MAX_TOKEN_CHARS: Int = 256
+    /** Longest pairing token the HUD holds (core config `phone.pairingToken`). */
+    public const val MAX_TOKEN_CHARS: Int = PairingCode.MAX_CHARS
 
     private const val HMAC_BLOCK_BYTES = 64
     private const val PIN_CONTEXT = "carheadsup-pin-v2|"
@@ -51,7 +51,11 @@ public object PhoneAuth {
     /** Whether [value] is a well-formed proof. */
     public fun isValidProof(value: String): Boolean = PROOF.matches(value)
 
-    /** Whether the HUD accepts [token] as a pairing token (length; any text otherwise). */
+    /**
+     * Whether the link can prove [token]: any text the HUD may hold as its pairing token — also
+     * one saved before the pairing-token rule, which the HUD keeps and phones paired with it go on
+     * proving. A new token (typed or scanned) must keep the rule: [PairingCode.isValid].
+     */
     public fun isValidToken(token: String): Boolean = token.length <= MAX_TOKEN_CHARS
 
     /** 16 random bytes as 22 base64url characters: a nonce or a device id. */

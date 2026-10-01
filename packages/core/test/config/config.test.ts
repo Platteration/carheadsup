@@ -964,8 +964,12 @@ describe('mergeConfig', () => {
     }
     expect(mergeConfig(base, { server: { apiToken: '' } }).config.server.apiToken).toBe('');
     expect(mergeConfig(base, { server: { apiToken: 'K7f!Q2~z' } }).errors).toEqual([]);
-    // The phone's pairing token travels inside JSON: any text works.
-    expect(mergeConfig(base, { phone: { pairingToken: 'schlüssel' } }).errors).toEqual([]);
+    // The pairing token never travels, but it is typed into the phone and drawn as a QR code:
+    // one word of printable ASCII (see tokens.test.ts).
+    expect(mergeConfig(base, { phone: { pairingToken: 'K7f!Q2~z' } }).errors).toEqual([]);
+    expect(mergeConfig(base, { phone: { pairingToken: 'schlüssel' } }).errors).toEqual([
+      'phone.pairingToken: only letters, digits and symbols of plain ASCII: no accents, emoji or control characters',
+    ]);
   });
 
   it('applies cross-field rules against the merged result', () => {

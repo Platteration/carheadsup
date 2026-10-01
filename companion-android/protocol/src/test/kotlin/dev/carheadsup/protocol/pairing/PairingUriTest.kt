@@ -2,6 +2,7 @@ package dev.carheadsup.protocol.pairing
 
 import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.HudPin
+import dev.carheadsup.protocol.auth.PairingCode
 import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.link.HudEndpoint
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -57,11 +58,40 @@ class PairingUriTest {
     @Test
     fun `a plus sign and raw characters stand for themselves`() {
         val uri =
-            "carheadsup://pair?v=1&id=${payload.hudId}&fp=${payload.certFingerprint}&k=a+b ü%C3%BC" +
-                "&h=10.42.0.1&p=8443"
+            "carheadsup://pair?v=1&id=${payload.hudId}&fp=${payload.certFingerprint}&k=a+b!~*%21" +
+                "&h=10.42.0.1&p=8443&n=My car ü%C3%BC"
         val result = PairingUri.parse(uri)
         assertInstanceOf(PairingScan.Valid::class.java, result)
-        assertEquals("a+b üü", (result as PairingScan.Valid).payload.pairingToken)
+        assertEquals("a+b!~*!", (result as PairingScan.Valid).payload.pairingToken)
+        assertEquals("My car üü", result.payload.hudName)
+    }
+
+    @Test
+    fun `takes exactly the tokens the manual pairing-code field takes`() {
+        val tokens =
+            listOf(
+                "K7fQ2mZrP4xW9sLt3HvNbC8e",
+                "a",
+                "!",
+                "~",
+                (0x21..0x7e).map { it.toChar() }.joinToString(""),
+                "x".repeat(256),
+                "x".repeat(257),
+                "two words",
+                " leading",
+                "tab\t",
+                "line\nbreak",
+                "Schlüssel",
+                "\u00a0",
+                "\u200b",
+                "\u0000",
+                "\u007f",
+                "🚗",
+            )
+        for (token in tokens) {
+            val encodable = PairingUri.problem(payload.copy(pairingToken = token)) == null
+            assertEquals(PairingCode.isValid(token), encodable, token)
+        }
     }
 
     @Test
@@ -144,6 +174,9 @@ class PairingUriTest {
                 payload.copy(pairingToken = ""),
                 payload.copy(pairingToken = "x".repeat(257)),
                 payload.copy(pairingToken = "a\uD800b"),
+                payload.copy(pairingToken = "two words"),
+                payload.copy(pairingToken = "Schlüssel"),
+                payload.copy(pairingToken = "tab\t"),
                 payload.copy(hosts = emptyList()),
                 payload.copy(hosts = List(9) { "10.0.0.$it" }),
                 payload.copy(hosts = listOf("fe80::1")),

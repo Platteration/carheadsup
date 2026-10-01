@@ -2,6 +2,7 @@ package dev.carheadsup.protocol.pairing
 
 import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.HudPin
+import dev.carheadsup.protocol.auth.PairingCode
 import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.link.HudEndpoint
 import java.nio.ByteBuffer
@@ -18,7 +19,7 @@ public data class PairingPayload(
     val hudId: String,
     /** SHA-256 of the HUD's certificate, 64 lowercase hex digits. */
     val certFingerprint: String,
-    /** The HUD's `phone.pairingToken`; never empty. */
+    /** The HUD's `phone.pairingToken`; never empty, and it keeps the [PairingCode] rule. */
     val pairingToken: String,
     val hosts: List<String>,
     val tlsPort: Int,
@@ -65,7 +66,8 @@ public sealed interface PairingScan {
  * Values are percent-encoded UTF-8 (a `+` is a plus sign, not a space). The scheme and host
  * compare ignoring ASCII case; surrounding ASCII white space, a fragment and unknown parameters
  * are ignored; anything else out of shape — a duplicated parameter, a malformed escape, a field
- * out of range — makes the code [PairingScan.Invalid]. `n` is optional.
+ * out of range, a pairing token that breaks the [PairingCode] rule — makes the code
+ * [PairingScan.Invalid]. `n` is optional.
  */
 public object PairingUri {
     public const val SCHEME: String = "carheadsup"
@@ -78,8 +80,8 @@ public object PairingUri {
     /** Longest host (a DNS name). */
     public const val MAX_HOST_CHARS: Int = 253
 
-    /** Longest pairing token, in UTF-16 code units (the HUD's config limit). */
-    public const val MAX_TOKEN_CHARS: Int = PhoneAuth.MAX_TOKEN_CHARS
+    /** Longest pairing token, in characters (the HUD's config limit). */
+    public const val MAX_TOKEN_CHARS: Int = PairingCode.MAX_CHARS
 
     /** Longest HUD name, in bytes of UTF-8 (one DNS-SD instance label). */
     public const val MAX_NAME_BYTES: Int = 63
@@ -160,7 +162,7 @@ public object PairingUri {
         val token = payload.pairingToken
         if (token.isEmpty()) return "k (the pairing token) must not be empty"
         if (token.length > MAX_TOKEN_CHARS) return "k (the pairing token) must be at most $MAX_TOKEN_CHARS characters"
-        if (hasLoneSurrogate(token)) return "k (the pairing token) is not well-formed text"
+        PairingCode.problem(token)?.let { return "k (the pairing token): $it" }
         val hosts = payload.hosts
         if (hosts.isEmpty()) return "h must name at least one host"
         if (hosts.size > MAX_HOSTS) return "h must name at most $MAX_HOSTS hosts"

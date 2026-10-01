@@ -208,7 +208,7 @@ carheadsup://pair?v=1&id=<hudId>&fp=<certificate SHA-256, hex>&k=<pairing token>
 | `v` | `1`. A later version makes the companion ask for an update, not report a broken code. |
 | `id` | The HUD's id (22 base64url characters), as in `challenge`. |
 | `fp` | The [fingerprint](#tls-and-the-huds-certificate) of the HUD's certificate: 64 lowercase hex digits. |
-| `k` | `phone.pairingToken`, 1–256 characters. A HUD without a token shows no code: the page says the HUD is open and how to set one. |
+| `k` | `phone.pairingToken`: 1–256 characters of printable ASCII without spaces (`!` to `~`), the pairing-token rule that the HUD's config, its settings app and the companion's *Pairing code* field share (`pairingTokenProblem` in `core/src/config/tokens.ts`, `PairingCode` in the companion); a parser refuses anything else as `invalid`. A HUD without a token shows no code: the page says the HUD is open and how to set one. Nor does a HUD whose token in `config.json` breaks the rule (as older versions allowed, or a hand edit; kept so that paired phones keep connecting): the page asks for a new code. |
 | `h` | 1–8 hosts, comma-separated, most preferred first: the HUD's IPv4 addresses (not loopback or link-local 169.254.x.x, in the order of its network interfaces; only the listening address when `server.host` names one) and `<host name>.local`. No IPv6: a link-local address needs a zone that differs on every phone. |
 | `p` | The TLS port (`server.tlsPort`). |
 | `n` | Optional: the HUD's name as it advertises itself over mDNS, "<vehicle name> HUD" (at most 63 bytes of UTF-8). |
@@ -619,7 +619,7 @@ Points a renderer of its own must know (the full contract is `types/frame.ts`):
   completed one with `completed: true`; distance, duration, moving time, economy, fuel, cost);
   `maintenance` (`DiagnosticsMaintenanceItem`: status, remaining distance and days, due date —
   on the overview only the items due soon or overdue); `pairing` on the `pair` page only
-  (`PairingFrame`: `status` `ready` / `open` / `unavailable`, `hudName`, the
+  (`PairingFrame`: `status` `ready` / `open` / `legacy-code` / `unavailable`, `hudName`, the
   [pairing URI](#pairing-by-qr-code) to draw as a QR code in `uri` when ready, the certificate's
   short `fingerprint` and `closesInS`, the seconds until the page turns back to the overview);
   and `vehicle` (VIN, adapter, protocol).
@@ -689,8 +689,9 @@ HUD's certificate.
 
 **Conventions**
 
-- **HTTPS for other devices**: while TLS is on, the plain port serves only the Pi itself
-  (loopback). Another device's API request there gets `403` with
+- **HTTPS for other devices**: while TLS is on, the plain port serves only the Pi itself (over
+  loopback, or connected from the very address it reached the HUD at). Another device's API
+  request there gets `403` with
   `{ "error": "HTTPS required: use https://<host>:8443/api/… — …" }`, whatever its token — the
   token is not looked at, the body not read. See
   [Plain HTTP and other devices](#plain-http-and-other-devices).
@@ -702,10 +703,13 @@ HUD's certificate.
   origin (`Origin` or `Sec-Fetch-Site: cross-site`) get `403`. Clients that are not browsers are
   unaffected.
 - **Host names**: every request (pages included) and WebSocket upgrade must name the HUD in its
-  `Host` header — an IP address, `localhost`, the machine's host name, `<hostname>.local`, or a
-  name allowed with `--allowed-hosts` — or it gets `403`. This stops DNS rebinding, where a web
-  page makes its own name resolve to the HUD and would otherwise count as same-origin. A request
-  without a `Host` header (not a browser) is allowed.
+  `Host` header — an IP address, `localhost` or a `*.localhost` name, the machine's host name,
+  `<hostname>.local`, or a name allowed with `--allowed-hosts` — or it gets `403`. A name must be
+  made of DNS labels (letters, digits, hyphens and underscores, 1–63 characters per label, none
+  starting or ending with a hyphen, 253 in all; a trailing dot is ignored):
+  `evil.example/.localhost` is no `.localhost` name and gets `403` too. This stops DNS rebinding, where a web page makes its own name resolve to the HUD and
+  would otherwise count as same-origin. A request without a `Host` header (not a browser) is
+  allowed.
 - **Bodies**: `Content-Type: application/json`, at most 256 KiB (`413` above, `415` for another
   content type, `400` for malformed JSON).
 - **Errors**: `{ "error": "<message>" }` with the status code. `404` for an unknown endpoint,
@@ -856,9 +860,10 @@ See [obd.md](obd.md#clearing-trouble-codes) before using it.
 `POST /api/pairing/show` turns the parked dashboard to its *Pair a phone* page with the
 [pairing QR code](#pairing-by-qr-code) (and unblanks the HUD); the settings app's *Show pairing
 code on the HUD* calls it. `status` says what the page shows: `ready` (the code), `open` (no
-pairing token: how to set one instead) or `unavailable` (no TLS listener, or no address a phone
-can reach — e.g. `server.host` is a loopback address). It is **refused with 409 unless the car is
-parked**:
+pairing token: how to set one instead), `legacy-code` (the pairing token in `config.json`
+breaks today's rule — spaces, accents, as older versions allowed — and no code carries it:
+generate a new one) or `unavailable` (no TLS listener, or no address a phone can reach — e.g.
+`server.host` is a loopback address). It is **refused with 409 unless the car is parked**:
 
 ```json
 { "ok": false, "status": null, "message": "The HUD shows its pairing code only while the car is parked" }
@@ -927,8 +932,14 @@ without a server, e.g. `?fixture=city-nav&preview=1`).
 ### Plain HTTP and other devices
 
 The plain port carries the API token, the config and the HUD's frames in clear text. While TLS is
-on (`server.tlsPort` set) it therefore serves only clients on the Pi itself (loopback: the kiosk,
-local scripts) exactly as described above; for every other client it answers:
+on (`server.tlsPort` set) it therefore serves only clients on the Pi itself (the kiosk, local
+scripts) exactly as described above: clients over loopback, and clients whose address is the very
+address they reached the HUD at (compared in canonical form — `::ffff:10.42.0.1` is `10.42.0.1`,
+IPv6 zones aside), such as the kiosk of a HUD that listens on one network address only. No other
+device can open such a connection: the TCP handshake of a forged source address equal to the HUD's
+own never completes, as the HUD's answer to it never leaves the machine. A client whose address is
+unknown is another device. The same rule decides who needs no API token and who is exempt from the
+connection limits. For every other client it answers:
 
 | Request on `server.port` from another device | Answer |
 | --- | --- |

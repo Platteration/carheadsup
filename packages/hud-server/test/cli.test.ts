@@ -107,6 +107,19 @@ describe('parseCli', () => {
       kind: 'error',
       message: '--allowed-hosts: "http://x/" is not a host name',
     });
+    // Only DNS labels: the Host check would never match anything else.
+    for (const bad of ['-hud.lan', 'hud..lan', 'hud-.lan', `${'x'.repeat(64)}.lan`, '.']) {
+      expect(parseCli(['--allowed-hosts', `car.lan,${bad}`], {}, HOME)).toEqual({
+        kind: 'error',
+        message: `--allowed-hosts: "${bad}" is not a host name`,
+      });
+    }
+    expect(
+      parseCli([], { CARHEADSUP_ALLOWED_HOSTS: 'Pi.Fritz.Box., my_pi.lan, 10.42.0.1' }, HOME),
+    ).toMatchObject({
+      kind: 'run',
+      options: { allowedHosts: ['Pi.Fritz.Box.', 'my_pi.lan', '10.42.0.1'] },
+    });
   });
 
   it('maps backlight words', () => {
@@ -210,18 +223,36 @@ describe('pageUrls', () => {
       'https://10.42.0.1:8443',
       'https://[fd00::10]:8443',
     ]);
-    expect(pageUrls({ ...base, host: '10.42.0.1' })).toEqual(['https://10.42.0.1:8443']);
     expect(pageUrls({ ...base, host: '127.0.0.1' })).toEqual(['http://127.0.0.1:8080']);
+  });
+
+  it('lists the bind address over plain http for the HUD itself when it is a network address', () => {
+    // The kiosk reaches a HUD bound to one address there, as the HUD itself.
+    expect(pageUrls({ ...base, host: '10.42.0.1' })).toEqual([
+      'http://10.42.0.1:8080',
+      'https://10.42.0.1:8443',
+    ]);
+    expect(pageUrls({ ...base, host: 'fd00::10' })).toEqual([
+      'http://[fd00::10]:8080',
+      'https://[fd00::10]:8443',
+    ]);
   });
 
   it('lists plain http for other devices with TLS off or server.allowPlainRemote', () => {
     const plain = ['http://localhost:8080', 'http://10.42.0.1:8080', 'http://[fd00::10]:8080'];
     expect(pageUrls({ ...base, tlsEnabled: false, tlsPort: null })).toEqual(plain);
     expect(pageUrls({ ...base, allowPlainRemote: true })).toEqual(plain);
+    // Once, when the HUD itself and other devices use the same address.
+    expect(pageUrls({ ...base, host: '10.42.0.1', allowPlainRemote: true })).toEqual([
+      'http://10.42.0.1:8080',
+    ]);
   });
 
   it('lists nothing for other devices while the TLS listener could not start', () => {
     expect(pageUrls({ ...base, tlsPort: null })).toEqual(['http://localhost:8080']);
+    expect(pageUrls({ ...base, host: '10.42.0.1', tlsPort: null })).toEqual([
+      'http://10.42.0.1:8080',
+    ]);
   });
 });
 

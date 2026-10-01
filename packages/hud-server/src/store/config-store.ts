@@ -3,7 +3,9 @@ import {
   DEFAULT_CONFIG,
   GENERATED_TOKEN_ALPHABET,
   GENERATED_TOKEN_LENGTH,
+  pairingTokenProblem,
   parseConfig,
+  parseStoredConfig,
 } from '@carheadsup/core';
 import type { HudConfig } from '@carheadsup/core';
 import type { Logger } from '@carheadsup/obd';
@@ -20,6 +22,11 @@ export interface ConfigLoadResult {
   errors: string[];
   /** The file did not exist and was created from the defaults. */
   created: boolean;
+  /**
+   * The file's pairing token breaks the pairing-token rule (older versions allowed such tokens)
+   * and was kept as it is, so phones paired with it keep connecting (see `parseStoredConfig`).
+   */
+  keptPairingToken?: boolean;
 }
 
 /**
@@ -71,6 +78,11 @@ function lockTokens(config: HudConfig, fields: readonly string[]): HudConfig {
  * invalid fields fall back to defaults field by field (see `parseConfig`) and are logged. When the loaded config differs
  * from the file it is saved back normalised, after keeping the original as `<file>.bak` so a
  * hand edit is never silently lost.
+ *
+ * A pairing token that breaks today's pairing-token rule (spaces, accents …) but that older
+ * versions allowed is kept as it is — phones paired with it prove exactly that token — and
+ * reported: the HUD's pairing page and the settings app ask for a new one. The file does not say
+ * which version wrote it, so a token typed into it by hand is kept the same way.
  *
  * Loading fails closed where falling back would open the HUD up: a token field that is invalid
  * gets a random token that nobody knows instead of "none", and a file that is not valid JSON
@@ -141,9 +153,14 @@ export class ConfigStore {
       };
     }
 
-    const parsed = parseConfig(read.value);
-    const { errors } = parsed;
+    const parsed = parseStoredConfig(read.value);
+    const { errors, keptPairingToken } = parsed;
     for (const error of errors) this.logger.warn(`Config: ${this.path}: ${error}`);
+    if (keptPairingToken) {
+      this.logger.warn(
+        `Config: phone.pairingToken in ${this.path} breaks the pairing-code rule (${pairingTokenProblem(parsed.config.phone.pairingToken) ?? 'unknown'}); older versions allowed such codes. It is kept as it is, so phones paired with it keep connecting, but no phone can pair with it anew: the HUD cannot show it as a QR code and the companion app does not take it. Generate a new pairing code in the settings app (Phone → Pairing code), save, and pair the phone again.`,
+      );
+    }
     const badTokens = TOKEN_FIELDS.filter((field) =>
       errors.some((error) => error.startsWith(`${field}:`)),
     );
@@ -170,7 +187,7 @@ export class ConfigStore {
         this.logger.warn(`Config: cannot rewrite ${this.path}: ${describe(err)}`);
       }
     }
-    return { config, errors, created: false };
+    return { config, errors, created: false, keptPairingToken };
   }
 
   /**

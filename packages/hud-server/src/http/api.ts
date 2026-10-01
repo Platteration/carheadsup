@@ -80,6 +80,10 @@ export function showPairingRefusal(state: HudState): string | null {
 const PAIRING_SHOWN: Readonly<Record<PairingPageStatus, string>> = {
   ready: 'The HUD shows its pairing code: scan it with the carheadsup app',
   open: 'The HUD has no pairing code to show: set one under Phone first',
+  'legacy-code':
+    'The HUD cannot show its pairing code: it has characters a pairing code cannot carry ' +
+    '(spaces, accents …), which older versions allowed. Phones paired with it still connect; to ' +
+    'pair by QR code, generate a new code under Phone, save, and show it again',
   unavailable:
     'The HUD cannot show a pairing code: its phone link (TLS) is not running, or it has no ' +
     'address phones can reach',

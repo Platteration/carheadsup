@@ -43,7 +43,7 @@ export interface HudFeedOptions {
   url?: string;
   /**
    * API token, sent as `?token=` (browsers cannot set headers on a WebSocket). Needed by pages
-   * on other devices once `server.apiToken` is set; the HUD's own kiosk (loopback) needs none.
+   * on other devices once `server.apiToken` is set; the HUD's own kiosk needs none.
    */
   token?: string;
   /**

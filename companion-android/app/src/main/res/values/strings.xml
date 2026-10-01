@@ -125,6 +125,8 @@
     <string name="scan_paired_unreached">Paired with %1$s (certificate %2$s). It is not reachable yet at %3$s: join the car\'s Wi-Fi and the app connects.</string>
     <string name="setting_pairing_token">Pairing code</string>
     <string name="setting_pairing_token_description">Set by scanning the HUD\'s code, or as shown in the HUD\'s settings (Phone → Pairing code). It is never sent: phone and HUD prove to each other that they know it.</string>
+    <string name="setting_pairing_token_invalid">One word of letters, digits and symbols (plain ASCII, at most 256): no spaces, accents or emoji, as the HUD takes it</string>
+    <string name="setting_pairing_token_legacy">This code is from an older version: it has spaces or characters a pairing code may no longer have. It still works with the HUD it is paired with; to pair anew, scan the HUD\'s code or enter a new one.</string>
     <string name="setup_paired">Paired with HUD %1$s…</string>
     <string name="setup_paired_certificate">Paired with HUD %1$s… · certificate %2$s</string>
     <string name="setup_confirmed_open">Confirmed HUD %1$s… (no pairing code: not verified)</string>

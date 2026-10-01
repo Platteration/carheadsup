@@ -281,8 +281,11 @@ export function useConfigEditor(api: HudApi, options: ConfigEditorOptions = {}):
   );
 
   const clientIssues = useMemo(
-    () => (state.draft === null ? new Map<string, FieldIssue>() : validateConfig(state.draft)),
-    [state.draft],
+    () =>
+      state.draft === null
+        ? new Map<string, FieldIssue>()
+        : validateConfig(state.draft, state.base),
+    [state.draft, state.base],
   );
 
   const issues = useMemo<IssueMap>(() => {

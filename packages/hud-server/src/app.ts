@@ -579,12 +579,13 @@ export function createHudServer(options: HudServerOptions): HudServer {
       authorize: (auth, cfg) =>
         isAuthorized({
           remoteAddress: auth.remoteAddress,
+          localAddress: auth.localAddress,
           token: auth.token,
           apiToken: cfg.server.apiToken,
         }),
       listenerAllowed: (auth, cfg) =>
         auth.listener !== 'plain' ||
-        plainAccess(auth.remoteAddress, {
+        plainAccess(auth, {
           ...plainAccessPolicy,
           allowPlainRemote: () => cfg.server.allowPlainRemote,
         }) === SERVE_PLAIN,

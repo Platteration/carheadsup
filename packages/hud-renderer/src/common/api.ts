@@ -16,7 +16,7 @@ import type {
 /**
  * Typed client for the HUD's REST API (`core/src/types/api.ts`), shared by the settings app and
  * the dev console. Every request carries `Authorization: Bearer <token>` when a token is known
- * (the HUD requires it from non-loopback clients once `server.apiToken` is set), and every
+ * (the HUD requires it from other devices once `server.apiToken` is set), and every
  * failure — including no network at all — surfaces as a {@link HudApiError} with a `kind` the UI
  * can switch on.
  */

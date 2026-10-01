@@ -66,7 +66,8 @@ test_never_answers() {
 
 test_error_status() {
   local status
-  # 307: the HUD sends the kiosk to HTTPS when it comes by another address than loopback.
+  # 307: the HUD sends the kiosk to HTTPS when it takes it for another device (it came through an
+  # address that is not the machine's own).
   for status in 403 404 503 307; do
     echo "$status" >"${WORK}/status"
     run_kiosk 3 CARHEADSUP_KIOSK_WAIT_S=1

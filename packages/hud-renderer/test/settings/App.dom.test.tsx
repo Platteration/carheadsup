@@ -517,7 +517,8 @@ describe('settings app', () => {
   it('never blocks saving because of a stored token the HUD accepts', async () => {
     const hud = new MockHud();
     hud.config.server.apiToken = 'old secret'; // inner spaces: accepted by the HUD
-    hud.config.phone.pairingToken = 'schlüssel'; // travels inside JSON: any text works
+    // Kept by the HUD from its config file, although it breaks today's pairing-token rule.
+    hud.config.phone.pairingToken = 'schlüssel';
     const root = start(hud);
     await ready(root);
     expect(field(section(root, 'server'), 'API token').querySelector('.field__error')).toBeNull();
@@ -530,6 +531,35 @@ describe('settings app', () => {
     expect(hud.config.phone.pairingToken).toBe('schlüssel');
   });
 
+  it('says when the pairing code breaks the pairing-code rule, and offers a new one', async () => {
+    const hud = new MockHud();
+    hud.config.phone.pairingToken = 'mein Schlüssel';
+    const root = start(hud);
+    await ready(root);
+    const phone = () => section(root, 'phone');
+    const notice = () => phone().querySelector('.notice--caution');
+    expect(text(notice())).toContain('Old-style pairing code');
+    expect(text(notice())).toContain('pairing codes no longer use');
+    expect(text(notice())).toContain('Phones paired with it still connect');
+    expect(text(phone().querySelector('.section__aside'))).toBe('Paired');
+    // Typing a code of the same kind anew is refused, as the HUD would; the stored one is not.
+    const input = field(phone(), 'Pairing code').querySelector('input')!;
+    await type(input, 'mein Code');
+    expect(text(field(phone(), 'Pairing code').querySelector('.field__error'))).toBe(
+      'No spaces: one word of letters, digits and symbols',
+    );
+    expect(byText(saveBar(root)!, 'button', 'Save')).toBeNull();
+    await type(input, 'mein Schlüssel');
+    expect(field(phone(), 'Pairing code').querySelector('.field__error')).toBeNull();
+    expect(saveBar(root)).toBeNull();
+    // A new code replaces it.
+    await click(button(notice()!, 'Generate new pairing code'));
+    expect(input.value).toMatch(/^[A-Za-z0-9]{24}$/);
+    expect(notice()).toBeNull();
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => hud.config.phone.pairingToken === input.value);
+  });
+
   it('refuses an API token that no device could ever present', async () => {
     const hud = new MockHud();
     const root = start(hud);
@@ -538,11 +568,13 @@ describe('settings app', () => {
     const input = tokenField().querySelector('input')!;
     await type(input, 'correct horse battery');
     expect(text(tokenField().querySelector('.field__error'))).toBe(
-      'No spaces: a token is one word of letters, digits and symbols',
+      'No spaces: one word of letters, digits and symbols',
     );
     expect(byText(saveBar(root)!, 'button', 'Save')).toBeNull();
     await type(input, 'geheim€');
-    expect(text(tokenField().querySelector('.field__error'))).toContain('Only plain letters');
+    expect(text(tokenField().querySelector('.field__error'))).toContain(
+      'Only letters, digits and symbols of plain ASCII',
+    );
     // A pasted token with a stray space or line break is simply trimmed.
     await type(input, '  s3cret\n');
     expect(input.value).toBe('s3cret');

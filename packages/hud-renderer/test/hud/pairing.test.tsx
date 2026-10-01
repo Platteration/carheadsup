@@ -136,6 +136,20 @@ describe('PairingPage', () => {
     expect(html).not.toContain('<svg');
   });
 
+  it('asks for a new code when the stored one breaks the pairing-code rule', () => {
+    const html = renderToString(
+      h(PairingPage, { pairing: { ...READY, status: 'legacy-code', uri: null } }),
+    );
+    expect(html).toContain('data-status="legacy-code"');
+    expect(textOf(html)).toContain('Pairing code cannot be shown');
+    expect(textOf(html)).toContain('spaces or other characters a code cannot carry');
+    // Not blamed on an older version: a hand edit of config.json can set such a code too.
+    expect(textOf(html)).not.toMatch(/from an older version/i);
+    expect(textOf(html)).toContain('Phones paired with it still connect');
+    expect(textOf(html)).toContain('Phone → Pairing code → Generate');
+    expect(html).not.toContain('<svg');
+  });
+
   it('treats a code without its URI, or a status it does not know, as unavailable', () => {
     for (const pairing of [
       { ...READY, uri: null },

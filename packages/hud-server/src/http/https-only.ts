@@ -1,12 +1,13 @@
 import type { IncomingMessage } from 'node:http';
 import { isIPv4, isIPv6 } from 'node:net';
-import { isLoopbackAddress } from './auth.ts';
+import { isDnsName, isHudItself } from './auth.ts';
+import type { ConnectionAddresses } from './auth.ts';
 
 /**
  * HTTPS-only access for other devices. The plain listener (`server.port`) carries everything in
  * clear text — the API token, the config, the HUD's frames. While TLS is on (`server.tlsPort`
- * set), the plain listener therefore serves only the HUD itself (loopback: the kiosk browser,
- * local tools); other devices are sent to HTTPS on the TLS port: their page requests are
+ * set), the plain listener therefore serves only the HUD itself (the kiosk browser, local tools:
+ * see `isHudItself`); other devices are sent to HTTPS on the TLS port: their page requests are
  * redirected, their API requests and display-socket upgrades refused before any token they carry
  * is looked at. If the TLS listener could not start, other devices are refused (the phone cannot
  * connect then either) rather than quietly served in clear text. `server.allowPlainRemote`
@@ -31,24 +32,21 @@ export interface PlainAccessPolicy {
 export const SERVE_PLAIN = 'serve';
 
 /**
- * What the plain listener does with a client at `remoteAddress`: serve it ({@link SERVE_PLAIN}) —
- * the HUD itself always, everyone while TLS is off or `server.allowPlainRemote` is on — or send it
- * to TLS: `{ tlsPort }`, the running TLS listener's port, or null when that listener is not
- * running (it could not start), so there is nowhere to send the client. A client whose address is
- * unknown (its socket is already gone) is not the HUD itself.
+ * What the plain listener does with a client connected from `client.remoteAddress` to
+ * `client.localAddress`: serve it ({@link SERVE_PLAIN}) — the HUD itself always (see
+ * `isHudItself`), everyone while TLS is off or `server.allowPlainRemote` is on — or send it to
+ * TLS: `{ tlsPort }`, the running TLS listener's port, or null when that listener is not running
+ * (it could not start), so there is nowhere to send the client. A client whose address is unknown
+ * (its socket is already gone) is not the HUD itself.
  */
 export function plainAccess(
-  remoteAddress: string | null | undefined,
+  client: ConnectionAddresses,
   policy: PlainAccessPolicy,
 ): typeof SERVE_PLAIN | { tlsPort: number | null } {
-  if (isLoopbackAddress(remoteAddress)) return SERVE_PLAIN;
+  if (isHudItself(client.remoteAddress, client.localAddress)) return SERVE_PLAIN;
   if (!policy.tlsEnabled() || policy.allowPlainRemote()) return SERVE_PLAIN;
   return { tlsPort: policy.tlsPort() };
 }
-
-/** Dot-separated labels of letters, digits, hyphens and underscores (lower case). */
-const DNS_NAME =
-  /^(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*$/;
 
 /**
  * The host of a `Host` header as it may stand in an https URL — an IPv4 address, a bracketed IPv6
@@ -69,7 +67,7 @@ export function redirectHost(header: string | string[] | undefined): string | nu
   if (match === null) return null;
   const raw = match[1] ?? '';
   const name = raw.endsWith('.') ? raw.slice(0, -1) : raw;
-  return isIPv4(name) || DNS_NAME.test(name) ? name : null;
+  return isIPv4(name) || isDnsName(name) ? name : null;
 }
 
 /** A socket's local address (where the client reached the HUD) as a URL host, or null. */

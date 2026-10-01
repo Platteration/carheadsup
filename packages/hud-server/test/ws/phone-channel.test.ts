@@ -279,13 +279,13 @@ describe('PhoneChannel: mutual authentication', () => {
     const v1 = connect('10.42.0.25');
     v1.receive({ t: 'hello', v: 1, device: 'Old', app: 'a', appVersion: '1', token: TOKEN });
     await flush();
-    changeConfig(testConfig({ phone: { pairingToken: 'a new code' } }));
+    changeConfig(testConfig({ phone: { pairingToken: 'a-new-code' } }));
     await flush();
     expect(good.closeCode).toBe(PHONE_CLOSE.badToken);
     const errors = [good, wrong, v1].flatMap((socket) =>
       socket.ofType('error').map((m) => JSON.stringify(m)),
     );
-    const secrets = [TOKEN, 'a new code', String(hello['proof']), String(guess['proof'])];
+    const secrets = [TOKEN, 'a-new-code', String(hello['proof']), String(guess['proof'])];
     for (const text of [...logger.lines(), ...errors]) {
       for (const secret of secrets) expect(text).not.toContain(secret);
     }

@@ -52,17 +52,17 @@ internal val SHARED_PAIRING_VECTORS: List<PairingVector> =
             ),
         ),
         PairingVector(
-            name = "a token with every kind of character to escape, and no name",
+            name = "a token with every symbol to escape, and no name",
             uri =
             "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
-                "c28be52f39bb2666a72bfdd4531&k=p%40ss%20w0rd%2F%3F%26%3D%23%25%2B%2C%3B%3A%27%21%2A%28%29" +
-                "~._-Schl%C3%BCssel-%F0%9F%9A%97&h=10.42.0.1,carheadsup.local&p=8443",
+                "c28be52f39bb2666a72bfdd4531&k=p%40ss%2F%3F%26%3D%23%25%2B%2C%3B%3A%27%21%2A%28%29~._-%5B" +
+                "%5D%7B%7D%3C%3E%7C%5C%5E%60%22%24&h=10.42.0.1,carheadsup.local&p=8443",
             canonical = true,
             payload =
             PairingPayload(
                 hudId = "AAECAwQFBgcICQoLDA0ODw",
                 certFingerprint = "fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531",
-                pairingToken = "p@ss w0rd/?&=#%+,;:'!*()~._-Schlüssel-🚗",
+                pairingToken = "p@ss/?&=#%+,;:'!*()~._-[]{}<>|\\^`\"\$",
                 hosts = listOf("10.42.0.1", "carheadsup.local"),
                 tlsPort = 8443,
                 hudName = null,
@@ -501,6 +501,70 @@ internal val SHARED_INVALID_PAIRING_VECTORS: List<InvalidPairingVector> =
             "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
                 "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZrP4xW9sLt3HvNbC8e&h=10.42.0.1,carheadsup.local&p=84" +
                 "43&n=My%C2%85car",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a token with a space and characters beyond ASCII, as tokens could be before the pairing-token rule",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=p%40ss%20w0rd%2F%3F%26%3D%23%25%2B%2C%3B%3A%27%21%2A%28%29" +
+                "~._-Schl%C3%BCssel-%F0%9F%9A%97&h=10.42.0.1,carheadsup.local&p=8443",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a token with a space",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=two%20words&h=10.42.0.1,carheadsup.local&p=8443&n=My%20car" +
+                "%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a token with an unescaped space",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=two words&h=10.42.0.1,carheadsup.local&p=8443&n=My%20car%2" +
+                "0HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a token ending in a tab",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ2mZr%09&h=10.42.0.1,carheadsup.local&p=8443&n=My%20car" +
+                "%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a token with a letter beyond ASCII",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=Schl%C3%BCssel&h=10.42.0.1,carheadsup.local&p=8443&n=My%20" +
+                "car%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a token with a no-break space",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ%C2%A02mZr&h=10.42.0.1,carheadsup.local&p=8443&n=My%20" +
+                "car%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a token with a control character",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ%002mZr&h=10.42.0.1,carheadsup.local&p=8443&n=My%20car" +
+                "%20HUD",
+            error = "invalid",
+        ),
+        InvalidPairingVector(
+            name = "a token with DEL",
+            uri =
+            "carheadsup://pair?v=1&id=AAECAwQFBgcICQoLDA0ODw&fp=fdc153eedca2b5364dd71c13e90afd8d47ff4" +
+                "c28be52f39bb2666a72bfdd4531&k=K7fQ%7F2mZr&h=10.42.0.1,carheadsup.local&p=8443&n=My%20car" +
+                "%20HUD",
             error = "invalid",
         ),
     )

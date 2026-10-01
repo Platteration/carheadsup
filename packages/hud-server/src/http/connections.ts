@@ -1,10 +1,12 @@
 import type { Server } from 'node:http';
 import type { Socket } from 'node:net';
-import { isLoopbackAddress } from './auth.ts';
+import { isHudItself } from './auth.ts';
+import type { ConnectionAddresses } from './auth.ts';
 
 /**
  * TCP connections (HTTP requests, keep-alive, WebSockets) accepted from other machines, in total
- * and per address. Connections from the HUD itself (the kiosk browser) are never limited.
+ * and per address. Connections from the HUD itself (the kiosk browser; see `isHudItself`) are
+ * never limited.
  */
 export const MAX_REMOTE_CONNECTIONS = 128;
 export const MAX_CONNECTIONS_PER_ADDRESS = 32;
@@ -16,8 +18,8 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 export interface ConnectionLimits {
   maxRemote?: number;
   maxPerAddress?: number;
-  /** Addresses that are never limited; default: loopback. */
-  exempt?: (address: string) => boolean;
+  /** Connections that are never limited; default: the HUD's own (`isHudItself`). */
+  exempt?: (connection: ConnectionAddresses) => boolean;
   /** Called for each refused connection. */
   onRefused?: (address: string) => void;
 }
@@ -35,12 +37,15 @@ export function limitConnections(
 ): void {
   const maxRemote = limits.maxRemote ?? MAX_REMOTE_CONNECTIONS;
   const maxPerAddress = limits.maxPerAddress ?? MAX_CONNECTIONS_PER_ADDRESS;
-  const exempt = limits.exempt ?? isLoopbackAddress;
+  const exempt =
+    limits.exempt ??
+    ((connection: ConnectionAddresses) =>
+      isHudItself(connection.remoteAddress, connection.localAddress));
   const perAddress = new Map<string, number>();
   let remote = 0;
   const onConnection = (socket: Socket): void => {
+    if (exempt({ remoteAddress: socket.remoteAddress, localAddress: socket.localAddress })) return;
     const address = socket.remoteAddress ?? '';
-    if (exempt(address)) return;
     const count = perAddress.get(address) ?? 0;
     if (remote >= maxRemote || count >= maxPerAddress) {
       socket.destroy();

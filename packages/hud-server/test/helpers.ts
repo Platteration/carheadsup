@@ -26,6 +26,7 @@ import { mergeConfig } from '@carheadsup/core';
 import { VehicleSimulator } from '@carheadsup/obd';
 import type { ClearDtcsOutcome, Logger, ObdServiceDeps } from '@carheadsup/obd';
 import { WebSocket } from 'ws';
+import type { ClientOptions } from 'ws';
 import { createHudServer } from '../src/app.ts';
 import type { HudServer, HudServerOptions } from '../src/app.ts';
 import type { ObdServiceLike } from '../src/obd/obd-link.ts';
@@ -521,8 +522,9 @@ export async function waitFor(
 }
 
 /**
- * A non-loopback IPv4 address of this machine, if any. Requests to it come from that address, not
- * from loopback: how the tests play another device on the car's Wi-Fi.
+ * A non-loopback IPv4 address of this machine, if any. A connection to it comes from that same
+ * address: the HUD itself, as far as the HUD can tell (see `isHudItself`) — like the kiosk on a
+ * HUD that listens on that one address. Tests play another device with {@link otherDevice}.
  */
 export function lanAddress(): string | null {
   for (const list of Object.values(networkInterfaces())) {
@@ -531,6 +533,56 @@ export function lanAddress(): string | null {
     }
   }
   return null;
+}
+
+/** Another device on the car's Wi-Fi, played from this machine (see {@link otherDevice}). */
+export interface OtherDevice {
+  /** The address it comes from, at which it believes to reach the HUD (its URLs name it). */
+  readonly address: string | null;
+  /** {@link rawRequest} from this device; `url` names the HUD by `address`. */
+  request(url: string, init?: RawRequestInit): Promise<RawReply>;
+  /** A {@link TestSocket} from this device; `url` names the HUD by `address`. */
+  socket(url: string, options?: ClientOptions): TestSocket;
+}
+
+/**
+ * How the tests play another device from this machine, whose LAN address is `address` (see
+ * {@link lanAddress}; tests that use the device are skipped without one), with the HUD listening
+ * on 0.0.0.0: a request or socket to `<scheme>://<address>:<port>/…` connects from `address` to
+ * the HUD's loopback address instead, with the `Host` header of the URL. The HUD sees a client at
+ * `address` that came to 127.0.0.1 — neither loopback nor at the address it reached the HUD at:
+ * another device. (Connected to `address` itself, it would come from there too: the HUD itself.)
+ * The HUD's redirects name `address` (from the `Host` header), so the device follows them with
+ * these methods too.
+ */
+export function otherDevice(address: string | null): OtherDevice {
+  const viaLoopback = (url: string): { url: string; host: string } => {
+    const target = new URL(url);
+    if (address === null) throw new Error('this machine has no LAN address to play a device with');
+    if (target.hostname !== address) throw new Error(`${url} does not name ${address}`);
+    const host = target.host;
+    target.hostname = '127.0.0.1';
+    return { url: target.toString(), host };
+  };
+  return {
+    address,
+    request: (url, init = {}) => {
+      const route = viaLoopback(url);
+      return rawRequest(route.url, {
+        ...init,
+        localAddress: address ?? undefined,
+        headers: { host: route.host, ...init.headers },
+      });
+    },
+    socket: (url, options = {}) => {
+      const route = viaLoopback(url);
+      return new TestSocket(route.url, {
+        ...options,
+        localAddress: address ?? undefined,
+        headers: { host: route.host, ...options.headers },
+      });
+    },
+  };
 }
 
 export interface RawReply {
@@ -546,6 +598,8 @@ export interface RawRequestInit {
   /** Sent as given; without `host`, the Host header names the URL's host and port. */
   headers?: Record<string, string>;
   body?: string;
+  /** The address of this machine to connect from (default: the one the system picks). */
+  localAddress?: string;
 }
 
 /**
@@ -565,6 +619,7 @@ export function rawRequest(url: string, init: RawRequestInit = {}): Promise<RawR
     headers: init.headers ?? {},
     setHost: init.headers?.['host'] === undefined,
     agent: false as const,
+    ...(init.localAddress !== undefined ? { localAddress: init.localAddress } : {}),
   };
   return new Promise((resolve, reject) => {
     const onResponse = (res: IncomingMessage): void => {

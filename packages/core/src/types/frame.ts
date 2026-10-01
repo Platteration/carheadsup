@@ -336,9 +336,12 @@ export interface DiagnosticsMaintenanceItem {
  * - 'ready': the pairing QR code ({@link PairingFrame.uri});
  * - 'open': no pairing token is set, so there is nothing to pair with — any phone can connect;
  *   the page explains how to set one instead of showing a code;
+ * - 'legacy-code': the pairing token is one kept from before the pairing-token rule (spaces,
+ *   accents …: see `pairingTokenProblem`), which no pairing code carries — phones paired with it
+ *   still connect; the page asks for a new code instead of showing one;
  * - 'unavailable': the HUD's phone link (TLS) is not running, or it has no usable address.
  */
-export type PairingPageStatus = 'ready' | 'open' | 'unavailable';
+export type PairingPageStatus = 'ready' | 'open' | 'legacy-code' | 'unavailable';
 
 /** The "Pair a phone" page of the parked dashboard. */
 export interface PairingFrame {

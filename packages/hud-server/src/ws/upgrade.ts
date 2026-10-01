@@ -166,10 +166,11 @@ export class WebSocketRouter {
       return;
     }
     const remoteAddress = req.socket.remoteAddress;
+    const connection = { remoteAddress, localAddress: req.socket.localAddress };
 
     if (path === HUD_SOCKET_PATH) {
       const access =
-        transport === 'plain' ? plainAccess(remoteAddress, this.options.plainAccess) : SERVE_PLAIN;
+        transport === 'plain' ? plainAccess(connection, this.options.plainAccess) : SERVE_PLAIN;
       if (access !== SERVE_PLAIN) {
         const location = secureLocationOf(req, url, access.tlsPort, 'wss');
         this.options.logger.debug(
@@ -179,22 +180,18 @@ export class WebSocketRouter {
         return;
       }
       const token = url.searchParams.get('token') ?? bearerToken(req.headers.authorization);
-      const authorized = isAuthorized({
-        remoteAddress,
-        token,
-        apiToken: this.options.apiToken(),
-      });
+      const authorized = isAuthorized({ ...connection, token, apiToken: this.options.apiToken() });
       if (!authorized) {
         reject(socket, 401, 'Missing or invalid API token');
         return;
       }
-      if (!this.options.renderer.canAccept(remoteAddress)) {
+      if (!this.options.renderer.canAccept(connection)) {
         reject(socket, 503, 'Too many display connections from other devices');
         return;
       }
       this.rendererServer.handleUpgrade(req, socket, head, (ws) => {
         this.heartbeat.track(ws);
-        this.options.renderer.accept(ws, { remoteAddress, token, listener: transport });
+        this.options.renderer.accept(ws, { ...connection, token, listener: transport });
       });
       return;
     }

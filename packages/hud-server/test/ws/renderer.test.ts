@@ -2,7 +2,15 @@ import { DEFAULT_CONFIG } from '@carheadsup/core';
 import type { HudFrame, RendererDisplayMessage } from '@carheadsup/core';
 import type { FrameSink } from '../../src/sources/types.ts';
 import { afterEach, describe, expect, it } from 'vitest';
-import { FakeSimulation, TestSocket, lanAddress, startTestServer, waitFor } from '../helpers.ts';
+import type { ClientOptions } from 'ws';
+import {
+  FakeSimulation,
+  TestSocket,
+  lanAddress,
+  otherDevice,
+  startTestServer,
+  waitFor,
+} from '../helpers.ts';
 import type { TestServer, TestServerOptions } from '../helpers.ts';
 
 let current: TestServer | null = null;
@@ -171,24 +179,35 @@ describe('/ws/hud', () => {
   });
 
   const lan = lanAddress();
+  const device = otherDevice(lan);
 
   it.skipIf(lan === null)('requires the API token from remote clients', async () => {
     const t = await start({ host: '0.0.0.0', config: { server: { apiToken: 's3cret' } } });
     // Other devices connect over TLS (plain ws:// is refused to them; see https-only.test.ts).
     const remote = `wss://${lan}:${t.tlsPort}/ws/hud`;
-    await expect(connect(remote).opened).rejects.toThrow(/401/);
-    await expect(connect(`${remote}?token=wrong`).opened).rejects.toThrow(/401/);
-    const byQuery = connect(`${remote}?token=s3cret`);
+    const fromDevice = (url: string, options?: ClientOptions): TestSocket => {
+      const socket = device.socket(url, options);
+      sockets.push(socket);
+      return socket;
+    };
+    await expect(fromDevice(remote).opened).rejects.toThrow(/401/);
+    await expect(fromDevice(`${remote}?token=wrong`).opened).rejects.toThrow(/401/);
+    const byQuery = fromDevice(`${remote}?token=s3cret`);
     await byQuery.opened;
-    const byHeader = connect(remote, { headers: { Authorization: 'Bearer s3cret' } });
+    const byHeader = fromDevice(remote, { headers: { Authorization: 'Bearer s3cret' } });
     await byHeader.opened;
     const local = connect(`${t.wsBase}/ws/hud`);
     await local.opened;
-    // A new token disconnects remote clients holding the old one; loopback stays.
+    // The HUD itself at its network address needs no token either.
+    const own = connect(remote);
+    await own.opened;
+    // A new token disconnects remote clients holding the old one; the HUD's own stay.
     expect(await patch(t, { server: { apiToken: 'rotated' } })).toBe(200);
     expect(await byQuery.closed).toBe(4001);
     expect(await byHeader.closed).toBe(4001);
-    await local.nextOfType('frame');
-    expect(local.ws.readyState).toBe(local.ws.OPEN);
+    for (const socket of [local, own]) {
+      await socket.nextOfType('frame');
+      expect(socket.ws.readyState).toBe(socket.ws.OPEN);
+    }
   });
 });

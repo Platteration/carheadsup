@@ -1,4 +1,4 @@
-import { shortFingerprint } from '@carheadsup/core';
+import { isPairingToken, shortFingerprint } from '@carheadsup/core';
 import type { ApiPairingShowResult, ApiTlsInfo, HudConfig } from '@carheadsup/core';
 import { useState } from 'preact/hooks';
 import { describeError } from '../../common/api.ts';
@@ -146,6 +146,10 @@ export function PhoneSection({
 }) {
   const phone = root.child('phone');
   const paired = phone.value.pairingToken !== '';
+  // A code the HUD kept although it breaks today's rule (spaces, accents…; older versions allowed
+  // them, and a hand edit of config.json still can): it still works, but no QR code carries it.
+  const legacyCode =
+    paired && !phone.dirty('pairingToken') && !isPairingToken(phone.value.pairingToken);
   return (
     <Section
       id="phone"
@@ -180,6 +184,25 @@ export function PhoneSection({
           Any phone on the car’s Wi-Fi can connect and feed the HUD, and your phone cannot verify
           that it is talking to this HUD — it asks you to confirm instead. Generate a pairing code,
           save, and pair the companion app by scanning the code on the HUD (or type it in).
+        </Notice>
+      )}
+      {legacyCode && (
+        <Notice
+          tone="caution"
+          title="Old-style pairing code"
+          actions={
+            <Button
+              size="small"
+              variant="primary"
+              onClick={() => phone.set('pairingToken', generateToken())}
+            >
+              Generate new pairing code
+            </Button>
+          }
+        >
+          It has spaces or characters other than plain letters, digits and symbols, which pairing
+          codes no longer use. Phones paired with it still connect, but the HUD cannot show it as a
+          QR code. To pair by scanning: generate a new code, save, and pair the phone again.
         </Notice>
       )}
       <Card>

@@ -2,13 +2,15 @@ import { request } from 'node:http';
 import { shortFingerprint } from '@carheadsup/core';
 import type { HudConfig } from '@carheadsup/core';
 import { expect, test } from '@playwright/test';
-import { findChromium, lanAddress, startSimulatedHud } from './support.ts';
+import { findChromium, lanAddress, relayAsOtherDevice, startSimulatedHud } from './support.ts';
 import type { SimulatedHud } from './support.ts';
 
 /**
  * A laptop or phone browser on the car's Wi-Fi: it is sent from plain http to HTTPS, where the
  * settings app and the developer console work as on the HUD itself — with the API token, which
- * never crosses the network in clear text.
+ * never crosses the network in clear text. The browser plays that device through a relay (see
+ * `relayAsOtherDevice`). And the HUD's own kiosk on a HUD that listens on one network address:
+ * it reaches the HUD there, and is served as the HUD itself.
  */
 
 test.skip(findChromium() === null, 'No Chromium binary (set PW_CHROMIUM) — skipping browser e2e');
@@ -19,10 +21,13 @@ test.skip(lan === null, 'No LAN address to play another device with');
 const TOKEN = 'e2e-remote-token';
 
 let hud: SimulatedHud;
+let relay: { close: () => Promise<void> } | null = null;
 test.beforeAll(async () => {
-  hud = await startSimulatedHud({ host: '0.0.0.0', config: { server: { apiToken: TOKEN } } });
+  hud = await startSimulatedHud({ config: { server: { apiToken: TOKEN } } });
+  relay = await relayAsOtherDevice(lan ?? '', hud);
 });
 test.afterAll(async () => {
+  await relay?.close();
   await hud?.close();
 });
 
@@ -134,4 +139,39 @@ test('plain http from another device gets no API and no display socket', async (
   expect(upgrade).toBe(403);
   // The HUD itself (the kiosk) keeps plain http.
   expect((await fetch(`${hud.base}/api/config`)).status).toBe(200);
+});
+
+test('the kiosk of a HUD on one network address is the HUD itself: plain http, no token', async ({
+  browser,
+}) => {
+  // E.g. `server.host` = 10.42.0.1 on a hotspot: the kiosk cannot use loopback, and connects
+  // from that address to that address.
+  const own = await startSimulatedHud({
+    host: lan ?? '',
+    config: { server: { apiToken: TOKEN } },
+  });
+  try {
+    expect(own.base).toBe(`http://${lan}:${own.port}`);
+    const context = await browser.newContext({ viewport: { width: 1280, height: 480 } });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on('pageerror', (err) => errors.push(err.message));
+
+    // The projected display: live frames over plain ws://, no redirect, no token.
+    const response = await page.goto(`${own.base}/`);
+    expect(response?.status()).toBe(200);
+    expect(page.url()).toBe(`${own.base}/`);
+    await expect(page.locator('.hud-content[data-mode="diagnostics"]')).toBeVisible();
+    await expect(page.locator('[data-no-signal="true"]')).toHaveCount(0);
+
+    // The settings app: the config loads without asking for the token.
+    await page.goto(`${own.base}/settings`);
+    expect(page.url()).toBe(`${own.base}/settings`);
+    await expect(page.locator('.pill')).toHaveText('Simulator');
+    await expect(page.getByText('This HUD asks for an access token')).toHaveCount(0);
+    expect(errors).toEqual([]);
+    await context.close();
+  } finally {
+    await own.close();
+  }
 });

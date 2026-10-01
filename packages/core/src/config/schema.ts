@@ -15,6 +15,7 @@ import {
   valueFitsMask,
 } from './buttons.ts';
 import { normalizeIpAddress } from './ip.ts';
+import { MAX_PAIRING_TOKEN_CHARS, pairingTokenTextProblem } from './tokens.ts';
 import { DRIVING_CONTEXTS } from '../types/config.ts';
 import type { Ads1115FullScaleV, HudConfig, WidgetId, Zone } from '../types/config.ts';
 import { INPUT_ACTIONS } from '../types/events.ts';
@@ -496,8 +497,18 @@ const apiTokenSchema = text(0, 256)
   .regex(/^[\x20-\x7e]*$/, 'use letters, digits and symbols (printable ASCII) only')
   .refine((token) => token === '' || token.trim() !== '', 'a token cannot be only spaces');
 
+/**
+ * `phone.pairingToken`: the pairing-token rule (`pairingTokenProblem` in tokens.ts) — at most 256
+ * characters of printable ASCII without spaces, as the settings app, the pairing URI and the
+ * companion app take them. A stored token from before the rule is kept by `parseStoredConfig`.
+ */
+const pairingTokenSchema = text(0, MAX_PAIRING_TOKEN_CHARS).superRefine((token, ctx) => {
+  const problem = pairingTokenTextProblem(token);
+  if (problem !== null) ctx.addIssue({ code: 'custom', message: problem });
+});
+
 const phoneSchema = z.object({
-  pairingToken: text(0, 256),
+  pairingToken: pairingTokenSchema,
   showMessageSender: bool,
   readMessagesAloud: bool,
   showMedia: bool,

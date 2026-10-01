@@ -434,8 +434,8 @@ export interface ServerConfig {
    * Also serve the pages, the API and the display socket to other devices on the plain port,
    * where the API token and the config cross the network unencrypted — for development only.
    * Off (while the TLS listener runs): other devices' page requests are redirected to HTTPS on
-   * `tlsPort`, their API requests and display-socket upgrades refused. The HUD itself (loopback)
-   * always uses the plain port.
+   * `tlsPort`, their API requests and display-socket upgrades refused. The HUD itself (over
+   * loopback, or from the address it connected to) always uses the plain port.
    */
   allowPlainRemote: boolean;
   /** Bind address; "0.0.0.0" to allow the phone on the car's Wi-Fi. */

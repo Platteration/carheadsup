@@ -8,7 +8,8 @@ import type {
 } from '@carheadsup/core';
 import type { Clock, Logger, Timers } from '@carheadsup/obd';
 import type { RawData, WebSocket } from 'ws';
-import { isLoopbackAddress } from '../http/auth.ts';
+import { isHudItself } from '../http/auth.ts';
+import type { ConnectionAddresses } from '../http/auth.ts';
 import type { Listener } from '../http/https-only.ts';
 import { TokenBucket } from './rate-limit.ts';
 import { closeAll, closeSocket, rawDataToString, sendJson, sendText } from './sockets.ts';
@@ -27,15 +28,17 @@ export const CLOSE_UNAUTHORIZED = 4001;
 export const CLOSE_TLS_REQUIRED = 4005;
 /**
  * Clients from other machines, per address and in total (each gets every frame, and up to
- * {@link MAX_RENDERER_BACKLOG_BYTES} buffered). The HUD's own display (loopback) is never
- * limited.
+ * {@link MAX_RENDERER_BACKLOG_BYTES} buffered). The HUD's own display (see `isHudItself`) is
+ * never limited.
  */
 export const MAX_RENDERER_CLIENTS_PER_ADDRESS = 4;
 export const MAX_REMOTE_RENDERER_CLIENTS = 16;
 
-/** How a renderer client connected and authenticated, re-checked when the config changes. */
-export interface RendererClientAuth {
-  remoteAddress: string | undefined;
+/**
+ * How a renderer client connected (its socket's addresses, kept while it is connected) and
+ * authenticated, re-checked when the config changes.
+ */
+export interface RendererClientAuth extends ConnectionAddresses {
   /** Token from `?token=` or the Authorization header, if any. */
   token: string | null;
   /** The listener it connected to. */
@@ -98,15 +101,18 @@ export class RendererChannel {
     return this.clients.size;
   }
 
-  /** Whether another client from `remoteAddress` is within the limits (loopback always is). */
-  canAccept(remoteAddress: string | undefined): boolean {
-    if (isLoopbackAddress(remoteAddress)) return true;
+  /**
+   * Whether another client connected like `connection` is within the limits (the HUD itself
+   * always is).
+   */
+  canAccept(connection: ConnectionAddresses): boolean {
+    if (isHudItself(connection.remoteAddress, connection.localAddress)) return true;
     let remote = 0;
     let sameAddress = 0;
-    for (const client of this.clients.values()) {
-      if (isLoopbackAddress(client.auth.remoteAddress)) continue;
+    for (const { auth } of this.clients.values()) {
+      if (isHudItself(auth.remoteAddress, auth.localAddress)) continue;
       remote += 1;
-      if (client.auth.remoteAddress === remoteAddress) sameAddress += 1;
+      if (auth.remoteAddress === connection.remoteAddress) sameAddress += 1;
     }
     return remote < MAX_REMOTE_RENDERER_CLIENTS && sameAddress < MAX_RENDERER_CLIENTS_PER_ADDRESS;
   }
@@ -116,7 +122,7 @@ export class RendererChannel {
       closeSocket(ws, 1001, 'HUD shutting down');
       return;
     }
-    if (!this.canAccept(auth.remoteAddress)) {
+    if (!this.canAccept(auth)) {
       closeSocket(ws, 1013, 'too many display connections');
       return;
     }

@@ -63,6 +63,32 @@ describe('Host validation (DNS rebinding)', () => {
     expect(t.server.engine.config.vehicle.name).toBe('Golf');
   });
 
+  it('refuses names that only end in .localhost without being host names', async () => {
+    const t = (current = await startTestServer({ config: { vehicle: { name: 'Golf' } } }));
+    for (const host of [
+      'evil.example/.localhost',
+      'user@evil.example.localhost',
+      'a b.localhost',
+      'evil.example%2f.localhost',
+    ]) {
+      const origin = { host, origin: `http://${host}` };
+      const patch = await send(
+        t,
+        'PATCH',
+        '/api/config',
+        { ...origin, 'content-type': 'application/json' },
+        JSON.stringify({ vehicle: { name: 'Owned' } }),
+      );
+      expect({ host, status: patch.status }).toEqual({ host, status: 403 });
+      expect((await send(t, 'GET', '/settings', { host })).status).toBe(403);
+    }
+    // A real *.localhost name still works.
+    expect((await send(t, 'GET', '/settings', { host: `hud.localhost:${t.port}` })).status).toBe(
+      200,
+    );
+    expect(t.server.engine.config.vehicle.name).toBe('Golf');
+  });
+
   it('refuses WebSocket upgrades addressed to a foreign host name, over TLS as well', async () => {
     const t = (current = await startTestServer({ config: { server: { allowPlainPhone: true } } }));
     const secureRebound = {

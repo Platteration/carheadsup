@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PAIRING_PAGE_TIMEOUT_MS, composePairing } from '../../src/compose/diagnostics.ts';
+import { parseStoredConfig } from '../../src/config/config.ts';
 import { parsePairingUri } from '../../src/protocol/pairing.ts';
 import { diagnosticsPageKinds } from '../../src/compose/diagnostics.ts';
 import type { HudFrame } from '../../src/types/frame.ts';
@@ -103,6 +104,27 @@ describe('the "Pair a phone" page', () => {
       fingerprint: 'FDC1 53EE DCA2 B536 4DD7',
       closesInS: 180,
     });
+  });
+
+  it('asks for a new code instead of showing one kept from before the pairing-token rule', () => {
+    // A config.json from an older version: its token has spaces and an umlaut, and is kept.
+    const stored = parseStoredConfig({
+      phone: { pairingToken: 'mein Schlüssel' },
+      vehicle: { name: 'Golf' },
+    });
+    expect(stored.keptPairingToken).toBe(true);
+    const h = new Harness(stored.config);
+    h.send({ type: 'pairing/endpoint', endpoint: ENDPOINT, at: T0 });
+    h.send({ type: 'pairing/show', at: T0 + 100 });
+    const frame = h.frame();
+    expect(frame.diagnostics?.pairing).toEqual({
+      status: 'legacy-code',
+      hudName: 'Golf HUD',
+      uri: null,
+      fingerprint: 'FDC1 53EE DCA2 B536 4DD7',
+      closesInS: 180,
+    });
+    expect(JSON.stringify(frame)).not.toContain('Schlüssel');
   });
 
   it('is unavailable while the phone link is off or has no usable address', () => {

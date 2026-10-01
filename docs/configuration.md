@@ -52,6 +52,16 @@ A token field that is invalid on its own (an API token with characters no client
 one longer than 256 characters) also becomes a random token instead of none, logged as an
 error; set a new one in the settings app on the HUD itself or in the file.
 
+One exception: a pairing code in the file that breaks today's [rule](#phone) — spaces,
+accents, emoji, which older versions allowed — is **kept as it is**, so phones paired with it
+keep connecting, and logged as a warning
+(`phone.pairingToken in … breaks the pairing-code rule …`). It stays while other settings
+change, but the HUD's pairing page cannot show it as a QR code, the companion app's *Pairing
+code* field does not take it (so no phone can pair with it anew) and the settings app suggests
+a new one. Once replaced in the settings app (or through the API), it cannot be set there
+again. The file does not say which version wrote it, so such a code typed into `config.json` by
+hand is kept and logged the same way — set a new code that keeps the rule instead.
+
 Cross-field rules are enforced too: `minLevel ≤ maxLevel`, `nightEnterLux < nightExitLux`,
 `highwayExitKph < highwayEnterKph`, `stationaryKph < highwayExitKph`, `startRpm < shiftRpm ≤
 flashRpm`, `coolantHighC < coolantCriticalC`, both low-voltage thresholds below `voltageHighV`,
@@ -285,7 +295,7 @@ the phone.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `phone.pairingToken` | `""`, but random in a new `config.json` | Shared secret phone and HUD prove to each other when the phone connects (it is never sent; [details](protocol.md#authentication)). The phone gets it by scanning the HUD's pairing QR code (parked: the dashboard's last page, or *Phone → Show pairing code on the HUD*; [details](protocol.md#pairing-by-qr-code)) or by typing it in. When the server creates `config.json`, it sets a random one (24 letters and digits, about 139 bits), so a new HUD is never open; an existing file is never given one. Use a long random one (the settings app's *Generate*). Empty = the HUD is open: any phone on the network may connect, and the phone cannot verify the HUD (it asks the user to confirm it); the pairing page then says so instead of showing a code. Changing or removing it disconnects a phone paired with the old one. |
+| `phone.pairingToken` | `""`, but random in a new `config.json` | Shared secret phone and HUD prove to each other when the phone connects (it is never sent; [details](protocol.md#authentication)). The phone gets it by scanning the HUD's pairing QR code (parked: the dashboard's last page, or *Phone → Show pairing code on the HUD*; [details](protocol.md#pairing-by-qr-code)) or by typing it in. When the server creates `config.json`, it sets a random one (24 letters and digits, about 139 bits), so a new HUD is never open; an existing file is never given one. Use a long random one (the settings app's *Generate*). At most 256 characters of printable ASCII without spaces — letters, digits and symbols, one word (`!` to `~`) — the rule the settings app, the pairing QR code and the companion app's *Pairing code* field share; every generated code keeps it. A code in `config.json` that breaks it (older versions allowed spaces and accents) is kept ([see above](#changing-settings)). Empty = the HUD is open: any phone on the network may connect, and the phone cannot verify the HUD (it asks the user to confirm it); the pairing page then says so instead of showing a code. Changing or removing it disconnects a phone paired with the old one. |
 | `phone.showMessageSender` | `true` | Show who sent a message (the content is never shown). |
 | `phone.readMessagesAloud` | `true` | Ask the phone to read messages aloud (sent in `welcome`). |
 | `phone.showMedia` | `true` | Song and artist toast on track change. |
@@ -368,7 +378,7 @@ call and media state ([more](hardware.md#steering-wheel-buttons)).
 | `server.tlsPort` | `8443` | 1–65535, not `server.port`, or `null` | HTTPS and secure WebSocket port with the HUD's self-signed certificate (`<data dir>/tls.pem`, made on the first start): the companion app's link, encrypted and pinned to that certificate ([details](protocol.md#tls-and-the-huds-certificate)), and where browsers on other devices use the settings app and the developer console; it serves the same pages and API as `server.port`. `null` switches TLS off — and with it the phone link, unless `server.allowPlainPhone` is on; other devices then use `server.port`, unencrypted (the API token and settings cross the Wi-Fi in clear text; the HUD logs a warning). Takes effect after a restart; 1024 or above on the Pi. A TLS port that cannot be opened (taken by another service) is logged and left out; the HUD keeps running without the phone, and other devices' browsers are refused until it is fixed. A config file from before this setting whose `server.port` is 8443 keeps that port and gets 8444 here. |
 | `server.allowPlainPhone` | `false` | | Also serve the phone link (`/ws/phone`) on `server.port`, unencrypted, with nothing bound to a certificate — for development and custom clients only; the companion app always uses TLS. Off: a plain phone connection is refused (`403`); switching it off closes plain sessions at once. |
 | `server.allowPlainRemote` | `false` | | Also serve the pages, the API and the display socket to other devices on `server.port`, unencrypted — for development only. Off (while TLS is on): other devices' page requests on the plain port are redirected to HTTPS on `server.tlsPort`, their API requests and `/ws/hud` upgrades refused (`403`) without their token being looked at ([details](#remote-https)). The Pi itself always uses the plain port; `/ws/phone` follows `server.allowPlainPhone`. Applies at once; switching it off closes other devices' plain display sockets (4005). |
-| `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. An address the kiosk cannot reach leaves it black — and so does a single network address (say `10.42.0.1`): the kiosk would reach the HUD there, not over loopback, and be taken for another device ([Remote HTTPS](#remote-https)). |
+| `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. An address the kiosk cannot reach leaves it black. With a single network address (say `10.42.0.1`), point the kiosk at it (`CARHEADSUP_KIOSK_URL=http://10.42.0.1:8080/`; `localhost` no longer reaches the HUD): it connects from that address to that address, which the HUD knows as itself ([Remote HTTPS](#remote-https)). |
 | `server.apiToken` | `""` | ≤ 256 printable ASCII chars | Bearer token required from every client except the Pi itself. Empty = open to the car's network. Letters, digits, symbols and spaces only (not spaces alone): it travels in HTTP headers and `?token=` addresses, which carry nothing else. |
 | `server.mdns` | `true` | | Advertise `_carheadsup._tcp` so the companion finds the HUD. |
 | `server.frameRate` | `15` | 1–60 | Frames per second pushed to the HUD page. Keep it at 2 or more: at 2 fps and above the page blanks after 1 s without a frame, and slower rates make the HUD slow to notice a stalled server. Lower (10) on a Pi Zero 2 W. |
@@ -377,8 +387,10 @@ call and media state ([more](hardware.md#steering-wheel-buttons)).
 
 The plain port carries everything in clear text — the API token, the config, the HUD's frames — to
 anyone listening on the car's Wi-Fi. So while TLS is on, it serves only the Pi itself (the kiosk
-browser, `curl` on the Pi: loopback clients); a laptop or phone browser on the Wi-Fi uses the
-same pages over HTTPS:
+browser, `curl` on the Pi): clients over loopback, or connected from the very address they reached
+the HUD at — on a HUD that listens on one network address, the kiosk reaches it there. No other
+device can open such a connection (its handshake would need the Pi to answer itself). A laptop or
+phone browser on the Wi-Fi uses the same pages over HTTPS:
 
 | Request from another device on `server.port` | Answer |
 | --- | --- |
@@ -574,7 +586,7 @@ polled less and less often (back-off up to a minute).
 | `--host <addr>` | `CARHEADSUP_HOST` | `server.host` | Override the bind address. Not saved. |
 | `--renderer-dir <dir>` | `CARHEADSUP_RENDERER_DIR` | `packages/hud-renderer/dist` | Built web pages to serve. |
 | `--backlight <dir\|auto\|off>` | `CARHEADSUP_BACKLIGHT` | `auto` | Backlight device (e.g. `/sys/class/backlight/rpi_backlight`), `auto` = the first writable device, `off` = never touch it (the page is dimmed instead). A device that is missing or not writable at start-up is looked for again every 10 s. |
-| `--allowed-hosts <names>` | `CARHEADSUP_ALLOWED_HOSTS` | none | Extra host names (comma-separated) under which browsers may reach the HUD. IP addresses, `localhost`, the machine's host name and `<hostname>.local` always work; requests for any other name get `403` ([DNS-rebinding protection](architecture.md#security-model)). |
+| `--allowed-hosts <names>` | `CARHEADSUP_ALLOWED_HOSTS` | none | Extra host names (comma-separated) under which browsers may reach the HUD: DNS names (letters, digits, hyphens, underscores; anything else stops the server with an error). IP addresses, `localhost`, the machine's host name and `<hostname>.local` always work; requests for any other name get `403` ([DNS-rebinding protection](architecture.md#security-model)). |
 | `--log-level <level>` | `CARHEADSUP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `-h`, `--help` | | | Usage. |
 | `-v`, `--version` | | | Version. |

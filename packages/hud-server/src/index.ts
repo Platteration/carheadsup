@@ -23,7 +23,14 @@ export { ConfigStore, serializeConfig } from './store/config-store.ts';
 export { PersistStore, parsePersistedState } from './store/persist-store.ts';
 export { DEFAULT_MAX_TRIPS, TripStore, isTripRecord } from './store/trip-store.ts';
 export { writeFileAtomic } from './store/atomic.ts';
-export { isAuthorized, isCrossSiteRequest, isLoopbackAddress, secretsEqual } from './http/auth.ts';
+export {
+  isAuthorized,
+  isCrossSiteRequest,
+  isHudItself,
+  isLoopbackAddress,
+  secretsEqual,
+} from './http/auth.ts';
+export type { AuthInput, ConnectionAddresses } from './http/auth.ts';
 export { SERVE_PLAIN, plainAccess, secureLocation } from './http/https-only.ts';
 export type { Listener, PlainAccessPolicy } from './http/https-only.ts';
 export { CONTENT_SECURITY_POLICY } from './http/security.ts';

@@ -5,6 +5,7 @@ import type { AddressInfo, Server as NetServer } from 'node:net';
 import type { ApiConfigResult } from '@carheadsup/core';
 import { SILENT_LOGGER } from '@carheadsup/obd';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { ClientOptions } from 'ws';
 import { hudHostNames, isAllowedHost } from '../../src/http/auth.ts';
 import {
   SERVE_PLAIN,
@@ -23,6 +24,7 @@ import {
   connectTestPhone,
   lanAddress,
   makeTempDir,
+  otherDevice,
   rawRequest,
   startTestServer,
   upgradeHeaders,
@@ -54,36 +56,65 @@ const url = (target: string): URL => {
 const errorOf = (reply: RawReply): string => (JSON.parse(reply.body) as { error: string }).error;
 
 describe('plainAccess', () => {
+  const from = (remoteAddress: string | null | undefined, localAddress = '10.42.0.1') => ({
+    remoteAddress,
+    localAddress,
+  });
+
   it.each(['127.0.0.1', '::1', '::ffff:127.0.0.1', '127.8.9.10'])(
     'serves the HUD itself (%s) on the plain listener',
     (address) => {
-      expect(plainAccess(address, policy())).toBe(SERVE_PLAIN);
-      expect(plainAccess(address, policy({ tlsPort: null }))).toBe(SERVE_PLAIN);
+      expect(plainAccess(from(address, address), policy())).toBe(SERVE_PLAIN);
+      expect(plainAccess(from(address), policy())).toBe(SERVE_PLAIN);
+      expect(plainAccess(from(address, address), policy({ tlsPort: null }))).toBe(SERVE_PLAIN);
+    },
+  );
+
+  it.each([
+    ['10.42.0.1', '10.42.0.1'],
+    ['::ffff:10.42.0.1', '::ffff:10.42.0.1'],
+    ['::ffff:10.42.0.1', '10.42.0.1'],
+    ['fd00::10', 'fd00::10'],
+    ['fe80::1%wlan0', 'fe80::1%wlan0'],
+  ])(
+    'serves the HUD itself from its own network address (%s → %s): the kiosk on a single-address bind',
+    (remote, local) => {
+      expect(plainAccess(from(remote, local), policy())).toBe(SERVE_PLAIN);
+      expect(plainAccess(from(remote, local), policy({ tlsPort: null }))).toBe(SERVE_PLAIN);
     },
   );
 
   it.each(['192.168.4.20', '10.42.0.23', '::ffff:10.42.0.23', 'fe80::1', 'fd00::10'])(
     'sends another device (%s) to the TLS port',
     (address) => {
-      expect(plainAccess(address, policy())).toEqual({ tlsPort: 8443 });
+      expect(plainAccess(from(address), policy())).toEqual({ tlsPort: 8443 });
+      expect(plainAccess(from(address, '127.0.0.1'), policy())).toEqual({ tlsPort: 8443 });
     },
   );
 
   it('treats a client without an address (a socket already gone) as another device', () => {
     for (const address of [undefined, null, '']) {
-      expect(plainAccess(address, policy())).toEqual({ tlsPort: 8443 });
+      expect(plainAccess(from(address), policy())).toEqual({ tlsPort: 8443 });
+      expect(plainAccess({ remoteAddress: address, localAddress: address }, policy())).toEqual({
+        tlsPort: 8443,
+      });
     }
+    expect(plainAccess({ remoteAddress: '10.42.0.1', localAddress: undefined }, policy())).toEqual({
+      tlsPort: 8443,
+    });
   });
 
   it('serves everyone with server.allowPlainRemote, or while TLS is off', () => {
-    expect(plainAccess('192.168.4.20', policy({ allowPlainRemote: true }))).toBe(SERVE_PLAIN);
-    expect(plainAccess('192.168.4.20', policy({ tlsEnabled: false, tlsPort: null }))).toBe(
+    expect(plainAccess(from('192.168.4.20'), policy({ allowPlainRemote: true }))).toBe(SERVE_PLAIN);
+    expect(plainAccess(from('192.168.4.20'), policy({ tlsEnabled: false, tlsPort: null }))).toBe(
       SERVE_PLAIN,
     );
   });
 
   it('has nowhere to send other devices while the TLS listener is not running', () => {
-    expect(plainAccess('192.168.4.20', policy({ tlsPort: null }))).toEqual({ tlsPort: null });
+    expect(plainAccess(from('192.168.4.20'), policy({ tlsPort: null }))).toEqual({
+      tlsPort: null,
+    });
   });
 });
 
@@ -245,10 +276,14 @@ describe('the plain listener’s request handler', () => {
     temp = null;
   });
 
-  /** A plain listener whose clients all appear to come from `remoteAddress`. */
+  /**
+   * A plain listener whose clients all appear to come from `remoteAddress` (and to have reached it
+   * at `localAddress`, by default where it really listens: 127.0.0.1).
+   */
   async function listen(
     remoteAddress: string,
     access: PlainAccessPolicy = policy(),
+    localAddress?: string,
   ): Promise<{ base: string; calls: string[]; tokenReads: () => number }> {
     temp = await makeTempDir();
     await writeFakeRenderer(temp.dir);
@@ -280,6 +315,12 @@ describe('the plain listener’s request handler', () => {
         value: remoteAddress,
         configurable: true,
       });
+      if (localAddress !== undefined) {
+        Object.defineProperty(req.socket, 'localAddress', {
+          value: localAddress,
+          configurable: true,
+        });
+      }
       handler(req, res);
     });
     server = plain;
@@ -293,6 +334,33 @@ describe('the plain listener’s request handler', () => {
     expect((await rawRequest(`${base}/settings`)).status).toBe(200);
     expect((await rawRequest(`${base}/api/info`)).status).toBe(200);
     expect(calls).toEqual(['GET /api/info']);
+  });
+
+  it('serves the HUD itself at its own network address plainly, without a token', async () => {
+    for (const address of ['10.42.0.1', '::ffff:10.42.0.1', 'fd00::10']) {
+      const { base, calls } = await listen(address, policy(), address);
+      const host = { host: '10.42.0.1:8080' };
+      expect((await rawRequest(`${base}/settings`, { headers: host })).status).toBe(200);
+      // A token is configured (s3cret), and none is needed.
+      expect((await rawRequest(`${base}/api/info`, { headers: host })).status).toBe(200);
+      expect(calls).toEqual(['GET /api/info']);
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+      server = null;
+      await temp?.cleanup();
+      temp = null;
+    }
+  });
+
+  it('still sends another device that reached the HUD at that address to HTTPS', async () => {
+    const { base, calls } = await listen('10.42.0.23', policy(), '10.42.0.1');
+    const page = await rawRequest(`${base}/settings`, { headers: { host: '10.42.0.1:8080' } });
+    expect(page.status).toBe(307);
+    expect(page.headers.location).toBe('https://10.42.0.1:8443/settings');
+    const api = await rawRequest(`${base}/api/info`, {
+      headers: { host: '10.42.0.1:8080', authorization: 'Bearer s3cret' },
+    });
+    expect(api.status).toBe(403);
+    expect(calls).toEqual([]);
   });
 
   it('redirects another device’s page requests to HTTPS', async () => {
@@ -381,9 +449,23 @@ describe('the plain listener’s request handler', () => {
     const reply = await rawRequest(`${base}/settings`, { headers: { host: 'evil.example:8080' } });
     expect(reply.status).toBe(403);
     expect(reply.headers.location).toBeUndefined();
-    // Allowed by the list, but no usable host: the address the client connected to.
+    // Ending in .localhost is not enough: a name made of anything but DNS labels is refused.
+    for (const host of [
+      'evil.example/.localhost',
+      'user@evil.example.localhost',
+      'a b.localhost',
+    ]) {
+      const hostile = await rawRequest(`${base}/settings`, { headers: { host } });
+      expect({ host, status: hostile.status, location: hostile.headers.location }).toEqual({
+        host,
+        status: 403,
+        location: undefined,
+      });
+    }
+    // Allowed by the list, but no usable host (a zone has no place in a URL): the address the
+    // client connected to.
     const odd = await rawRequest(`${base}/settings`, {
-      headers: { host: 'evil.example/.localhost' },
+      headers: { host: '[fe80::1%25wlan0]:8080' },
     });
     expect(odd.status).toBe(307);
     expect(odd.headers.location).toBe('https://127.0.0.1:8443/settings');
@@ -391,9 +473,11 @@ describe('the plain listener’s request handler', () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// The whole server, reached from this machine's LAN address (a client that is not loopback)
+// The whole server: another device played from this machine's LAN address (see `otherDevice`),
+// and the HUD itself reached at that address
 
 const lan = lanAddress();
+const device = otherDevice(lan);
 
 describe('the HUD server', () => {
   let current: TestServer | null = null;
@@ -412,11 +496,14 @@ describe('the HUD server', () => {
     return current;
   }
 
-  function connect(address: string, options?: ConstructorParameters<typeof TestSocket>[1]) {
-    const socket = new TestSocket(address, options);
+  function track(socket: TestSocket): TestSocket {
     sockets.push(socket);
     return socket;
   }
+
+  const connect = (url: string): TestSocket => track(new TestSocket(url));
+  const connectAsDevice = (url: string, options?: ClientOptions): TestSocket =>
+    track(device.socket(url, options));
 
   async function patchLocally(t: TestServer, patch: unknown): Promise<ApiConfigResult> {
     const res = await fetch(`${t.base}/api/config`, {
@@ -446,18 +533,70 @@ describe('the HUD server', () => {
   });
 
   it.skipIf(lan === null)(
+    'keeps plain http for the HUD itself at its network address, when it listens on that one',
+    async () => {
+      // The kiosk on a HUD bound to one address (say a hotspot's 10.42.0.1) connects from that
+      // address to that address: the HUD itself, not another device.
+      const t = await start({ host: lan ?? '', config: { vehicle: { name: 'Golf' }, ...secret } });
+      const plain = `http://${lan}:${t.port}`;
+      const page = await rawRequest(`${plain}/`);
+      expect(page.status).toBe(200);
+      expect(page.body).toContain('<title>HUD</title>');
+      expect((await rawRequest(`${plain}/settings`)).status).toBe(200);
+      const info = await rawRequest(`${plain}/api/info`);
+      expect(info.status).toBe(200);
+      const patch = await rawRequest(`${plain}/api/config`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ vehicle: { name: 'Weekend car' } }),
+      });
+      expect(patch.status).toBe(200);
+      expect(t.server.engine.config.vehicle.name).toBe('Weekend car');
+      const kiosk = connect(`ws://${lan}:${t.port}/ws/hud`);
+      await kiosk.nextOfType('frame');
+      // Its display stays when the token changes, as a loopback kiosk's would.
+      const changed = await rawRequest(`${plain}/api/config`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ server: { apiToken: 'n3w' } }),
+      });
+      expect(changed.status).toBe(200);
+      await kiosk.nextOfType('frame');
+      expect(kiosk.ws.readyState).toBe(kiosk.ws.OPEN);
+    },
+  );
+
+  it.skipIf(lan === null)(
+    'keeps plain http for the HUD itself at its network address on a wildcard bind',
+    async () => {
+      const t = await start({ config: secret });
+      const plain = `http://${lan}:${t.port}`;
+      expect((await rawRequest(`${plain}/settings`)).status).toBe(200);
+      expect((await rawRequest(`${plain}/api/info`)).status).toBe(200);
+      const display = connect(`ws://${lan}:${t.port}/ws/hud`);
+      await display.nextOfType('frame');
+      // Another device at the same moment is still sent to HTTPS and asked for the token.
+      expect((await device.request(`${plain}/settings`)).status).toBe(307);
+      expect((await device.request(`${plain}/api/info`, { headers: bearer })).status).toBe(403);
+      const secure = `https://${lan}:${t.tlsPort}`;
+      expect((await device.request(`${secure}/api/info`)).status).toBe(401);
+      expect((await device.request(`${secure}/api/info`, { headers: bearer })).status).toBe(200);
+    },
+  );
+
+  it.skipIf(lan === null)(
     'redirects other devices’ page requests on the plain port to HTTPS',
     async () => {
       const t = await start({ config: secret });
       expect(t.logger.text('info')).toContain(
         `Browsers on other devices: HTTPS on port ${t.tlsPort}`,
       );
-      const reply = await rawRequest(`http://${lan}:${t.port}/settings?tab=phone&token=s3cret`);
+      const reply = await device.request(`http://${lan}:${t.port}/settings?tab=phone&token=s3cret`);
       expect(reply.status).toBe(307);
       const location = `https://${lan}:${t.tlsPort}/settings?tab=phone`;
       expect(reply.headers.location).toBe(location);
       // The target serves the page, with the certificate the phone pins.
-      const page = await rawRequest(location);
+      const page = await device.request(location);
       expect(page.status).toBe(200);
       expect(page.body).toContain('<title>Settings</title>');
       expect(page.fingerprint).toBe(t.fingerprint);
@@ -469,11 +608,11 @@ describe('the HUD server', () => {
     async () => {
       const t = await start({ config: { vehicle: { name: 'Golf' }, ...secret } });
       const plain = `http://${lan}:${t.port}`;
-      const info = await rawRequest(`${plain}/api/info`, { headers: bearer });
+      const info = await device.request(`${plain}/api/info`, { headers: bearer });
       expect(info.status).toBe(403);
       expect(errorOf(info)).toContain(`use https://${lan}:${t.tlsPort}/api/info —`);
-      expect((await rawRequest(`${plain}/api/info`)).status).toBe(403);
-      const patch = await rawRequest(`${plain}/api/config`, {
+      expect((await device.request(`${plain}/api/info`)).status).toBe(403);
+      const patch = await device.request(`${plain}/api/config`, {
         method: 'PATCH',
         headers: { ...bearer, 'content-type': 'application/json' },
         body: JSON.stringify({ vehicle: { name: 'Owned' } }),
@@ -481,18 +620,18 @@ describe('the HUD server', () => {
       expect(patch.status).toBe(403);
       expect(t.server.engine.config.vehicle.name).toBe('Golf');
 
-      const upgrade = await rawRequest(`${plain}/ws/hud?token=s3cret`, {
+      const upgrade = await device.request(`${plain}/ws/hud?token=s3cret`, {
         headers: upgradeHeaders(`${lan}:${t.port}`),
       });
       expect(upgrade.status).toBe(403);
       expect(upgrade.headers['content-type']).toBe('application/json; charset=utf-8');
       expect(errorOf(upgrade)).toContain(`use wss://${lan}:${t.tlsPort}/ws/hud —`);
       expect(upgrade.body).not.toContain('s3cret');
-      await expect(connect(`ws://${lan}:${t.port}/ws/hud?token=s3cret`).opened).rejects.toThrow(
-        /403/,
-      );
       await expect(
-        connect(`ws://${lan}:${t.port}/ws/hud`, { headers: bearer }).opened,
+        connectAsDevice(`ws://${lan}:${t.port}/ws/hud?token=s3cret`).opened,
+      ).rejects.toThrow(/403/);
+      await expect(
+        connectAsDevice(`ws://${lan}:${t.port}/ws/hud`, { headers: bearer }).opened,
       ).rejects.toThrow(/403/);
     },
   );
@@ -507,21 +646,21 @@ describe('the HUD server', () => {
     const t = await start({ config: secret });
     const secure = `https://${lan}:${t.tlsPort}`;
     for (const path of ['/', '/settings', '/dev']) {
-      expect((await rawRequest(`${secure}${path}`)).status).toBe(200);
+      expect((await device.request(`${secure}${path}`)).status).toBe(200);
     }
-    expect((await rawRequest(`${secure}/api/info`)).status).toBe(401);
-    const info = await rawRequest(`${secure}/api/info`, { headers: bearer });
+    expect((await device.request(`${secure}/api/info`)).status).toBe(401);
+    const info = await device.request(`${secure}/api/info`, { headers: bearer });
     expect(info.status).toBe(200);
     expect(info.fingerprint).toBe(t.fingerprint);
-    const patch = await rawRequest(`${secure}/api/config`, {
+    const patch = await device.request(`${secure}/api/config`, {
       method: 'PATCH',
       headers: { ...bearer, 'content-type': 'application/json' },
       body: JSON.stringify({ vehicle: { name: 'Weekend car' } }),
     });
     expect(patch.status).toBe(200);
     expect(t.server.engine.config.vehicle.name).toBe('Weekend car');
-    await expect(connect(`wss://${lan}:${t.tlsPort}/ws/hud`).opened).rejects.toThrow(/401/);
-    const display = connect(`wss://${lan}:${t.tlsPort}/ws/hud?token=s3cret`);
+    await expect(connectAsDevice(`wss://${lan}:${t.tlsPort}/ws/hud`).opened).rejects.toThrow(/401/);
+    const display = connectAsDevice(`wss://${lan}:${t.tlsPort}/ws/hud?token=s3cret`);
     expect(await display.nextOfType('display')).toMatchObject({ t: 'display' });
     await display.nextOfType('frame');
     expect(display.peerFingerprint).toBe(t.fingerprint);
@@ -533,21 +672,25 @@ describe('the HUD server', () => {
       const t = await start({ config: { server: { apiToken: 's3cret', allowPlainRemote: true } } });
       expect(t.logger.text('warn')).toContain('server.allowPlainRemote is on');
       const plain = `http://${lan}:${t.port}`;
-      expect((await rawRequest(`${plain}/settings`)).status).toBe(200);
-      expect((await rawRequest(`${plain}/api/info`)).status).toBe(401);
-      expect((await rawRequest(`${plain}/api/info`, { headers: bearer })).status).toBe(200);
-      const display = connect(`ws://${lan}:${t.port}/ws/hud?token=s3cret`);
+      expect((await device.request(`${plain}/settings`)).status).toBe(200);
+      expect((await device.request(`${plain}/api/info`)).status).toBe(401);
+      expect((await device.request(`${plain}/api/info`, { headers: bearer })).status).toBe(200);
+      const display = connectAsDevice(`ws://${lan}:${t.port}/ws/hud?token=s3cret`);
       await display.nextOfType('frame');
       const kiosk = connect(`${t.wsBase}/ws/hud`);
       await kiosk.nextOfType('frame');
+      const kioskAtLan = connect(`ws://${lan}:${t.port}/ws/hud`);
+      await kioskAtLan.nextOfType('frame');
 
       const { config } = await patchLocally(t, { server: { allowPlainRemote: false } });
       expect(config.server.allowPlainRemote).toBe(false);
       expect(await display.closed).toBe(CLOSE_TLS_REQUIRED);
-      expect((await rawRequest(`${plain}/settings`)).status).toBe(307);
-      expect((await rawRequest(`${plain}/api/info`, { headers: bearer })).status).toBe(403);
-      await kiosk.nextOfType('frame');
-      expect(kiosk.ws.readyState).toBe(kiosk.ws.OPEN);
+      expect((await device.request(`${plain}/settings`)).status).toBe(307);
+      expect((await device.request(`${plain}/api/info`, { headers: bearer })).status).toBe(403);
+      for (const own of [kiosk, kioskAtLan]) {
+        await own.nextOfType('frame');
+        expect(own.ws.readyState).toBe(own.ws.OPEN);
+      }
     },
   );
 
@@ -557,10 +700,10 @@ describe('the HUD server', () => {
       const t = await start({ tlsPort: null, config: secret });
       expect(t.logger.text('warn')).toContain('Browsers on other devices: TLS is off');
       const plain = `http://${lan}:${t.port}`;
-      expect((await rawRequest(`${plain}/settings`)).status).toBe(200);
-      expect((await rawRequest(`${plain}/api/info`)).status).toBe(401);
-      expect((await rawRequest(`${plain}/api/info`, { headers: bearer })).status).toBe(200);
-      const display = connect(`ws://${lan}:${t.port}/ws/hud?token=s3cret`);
+      expect((await device.request(`${plain}/settings`)).status).toBe(200);
+      expect((await device.request(`${plain}/api/info`)).status).toBe(401);
+      expect((await device.request(`${plain}/api/info`, { headers: bearer })).status).toBe(200);
+      const display = connectAsDevice(`ws://${lan}:${t.port}/ws/hud?token=s3cret`);
       await display.nextOfType('frame');
     },
   );
@@ -577,15 +720,16 @@ describe('the HUD server', () => {
       expect(t.logger.text('error')).toContain('browsers on other devices are refused');
       const plain = `http://${lan}:${t.port}`;
       for (const path of ['/settings', '/api/info']) {
-        const reply = await rawRequest(`${plain}${path}`, { headers: bearer });
+        const reply = await device.request(`${plain}${path}`, { headers: bearer });
         expect(reply.status).toBe(403);
         expect(errorOf(reply)).toMatch(/TLS listener is not running/);
       }
-      await expect(connect(`ws://${lan}:${t.port}/ws/hud?token=s3cret`).opened).rejects.toThrow(
-        /403/,
-      );
-      // The HUD itself is served as ever.
+      await expect(
+        connectAsDevice(`ws://${lan}:${t.port}/ws/hud?token=s3cret`).opened,
+      ).rejects.toThrow(/403/);
+      // The HUD itself is served as ever, over loopback and at its network address.
       expect((await fetch(`${t.base}/settings`)).status).toBe(200);
+      expect((await rawRequest(`${plain}/settings`)).status).toBe(200);
     },
   );
 
@@ -595,7 +739,7 @@ describe('the HUD server', () => {
       const t = await start();
       const plain = `http://${lan}:${t.port}/dev`;
       const redirect = async (host: string) =>
-        rawRequest(plain, { headers: { host } }).then((reply) => ({
+        device.request(plain, { headers: { host } }).then((reply) => ({
           status: reply.status,
           location: reply.headers.location,
         }));
@@ -611,9 +755,11 @@ describe('the HUD server', () => {
         status: 307,
         location: `https://[::1]:${t.tlsPort}/dev`,
       });
-      expect(await redirect('evil.example/.localhost')).toEqual({
+      // No usable host in the header (an IPv6 zone has no place in a URL): the address the
+      // device reached the HUD at — 127.0.0.1 for the device played here.
+      expect(await redirect(`[fe80::1%25eth0]:${t.port}`)).toEqual({
         status: 307,
-        location: `https://${lan}:${t.tlsPort}/dev`,
+        location: `https://127.0.0.1:${t.tlsPort}/dev`,
       });
     },
   );

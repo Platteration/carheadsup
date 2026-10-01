@@ -1,4 +1,5 @@
 import { normalizeIpAddress } from '../config/ip.ts';
+import { MAX_PAIRING_TOKEN_CHARS, pairingTokenTextProblem } from '../config/tokens.ts';
 import { PHONE_AUTH, isAuthId, isCertFingerprint } from './phone-auth.ts';
 
 /**
@@ -15,8 +16,10 @@ import { PHONE_AUTH, isAuthId, isCertFingerprint } from './phone-auth.ts';
  * - `v`  the version, `1`. A parser meeting a higher one says "update the app" (not "invalid").
  * - `id` the HUD's id (22 base64url characters), as in the phone link's `challenge`.
  * - `fp` the fingerprint of the HUD's certificate, 64 lowercase hex digits.
- * - `k`  the pairing token (`phone.pairingToken`, 1–256 characters). Never empty: a HUD without
- *        a token shows no code.
+ * - `k`  the pairing token (`phone.pairingToken`): 1–256 characters of printable ASCII without
+ *        spaces, the pairing-token rule (`pairingTokenProblem`) that the HUD's config, the
+ *        settings app and the companion's manual field share. Never empty: a HUD without a token
+ *        shows no code (nor one whose stored token is from before the rule).
  * - `h`  1–8 hosts, comma-separated, in order of preference: IPv4 literals (the HUD's
  *        addresses) and DNS names (`<hostname>.local`). No IPv6 (a link-local address needs a
  *        zone, which differs on every phone).
@@ -41,8 +44,8 @@ export const PAIRING_URI = {
   maxHosts: 8,
   /** Longest host (a DNS name). */
   maxHostChars: 253,
-  /** Longest pairing token, in UTF-16 code units (the config schema's limit). */
-  maxTokenChars: 256,
+  /** Longest pairing token, in characters (the config schema's limit). */
+  maxTokenChars: MAX_PAIRING_TOKEN_CHARS,
   /** Longest HUD name, in bytes of UTF-8 (one DNS-SD instance label). */
   maxNameBytes: 63,
 } as const;
@@ -136,7 +139,8 @@ export function pairingPayloadProblem(payload: PairingPayload): string | null {
   if (token.length > PAIRING_URI.maxTokenChars) {
     return `k (the pairing token) must be at most ${PAIRING_URI.maxTokenChars} characters`;
   }
-  if (LONE_SURROGATE.test(token)) return 'k (the pairing token) is not well-formed text';
+  const text = pairingTokenTextProblem(token);
+  if (text !== null) return `k (the pairing token): ${text}`;
   const { hosts } = payload;
   if (hosts.length === 0) return 'h must name at least one host';
   if (hosts.length > PAIRING_URI.maxHosts) {

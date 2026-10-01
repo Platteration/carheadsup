@@ -1,4 +1,4 @@
-import { hudConfigSchema } from '@carheadsup/core';
+import { hudConfigSchema, pairingTokenTextProblem } from '@carheadsup/core';
 import type { HudConfig } from '@carheadsup/core';
 import { pathKey, pathWithin } from './diff.ts';
 import type { PathKey } from './diff.ts';
@@ -153,19 +153,17 @@ export function fieldIssueFromSchema(issue: SchemaIssue): FieldIssue {
 }
 
 /**
- * Why `token` should not be used as an API or pairing token, or null when it is fine. The API
- * token travels in `Authorization: Bearer …` headers (browsers and the companion's HTTP client
- * send only printable ASCII there) and in `?token=` URLs, so a non-ASCII token would lock out
- * every device, including the one that set it — the HUD refuses those. Spaces would work but are
- * easily lost when a token is copied or typed on a phone, so new tokens are one word; the same
- * rule keeps the pairing code easy to type into the companion app.
+ * Why `token` should not be used as an API or pairing token, or null when it is fine: the
+ * pairing-token rule (`pairingTokenProblem` in core — the HUD's schema, the pairing QR code and
+ * the companion app's field take exactly these), one word of printable ASCII. The API token
+ * travels in `Authorization: Bearer …` headers (browsers and the companion's HTTP client send
+ * only printable ASCII there) and in `?token=` URLs, so a non-ASCII token would lock out every
+ * device, including the one that set it — the HUD refuses those. Spaces would work there but are
+ * easily lost when a token is copied or typed on a phone, so new API tokens are one word too.
  */
 export function tokenProblem(token: string): string | null {
-  if (/\s/.test(token)) return 'No spaces: a token is one word of letters, digits and symbols';
-  if (!/^[\x21-\x7e]*$/.test(token)) {
-    return 'Only plain letters, digits and symbols (no accents or emoji)';
-  }
-  return null;
+  const problem = pairingTokenTextProblem(token);
+  return problem === null ? null : sentence(problem);
 }
 
 /** Input transform for token fields: pasted tokens often carry a stray space or line break. */
@@ -173,8 +171,13 @@ export function trimToken(text: string): string {
   return text.trim();
 }
 
-/** Validate a whole draft; the first problem per path wins. */
-export function validateConfig(draft: HudConfig): IssueMap {
+/**
+ * Validate a whole draft; the first problem per path wins. A pairing token the HUD keeps from its
+ * config file although it breaks today's rule (see `parseStoredConfig`) is no problem while it
+ * is left as it is (`base`: the config the HUD has): phones paired with it still connect, and the
+ * phone section says so instead of blocking every save.
+ */
+export function validateConfig(draft: HudConfig, base?: HudConfig | null): IssueMap {
   // reportInput: zod leaves the offending value out of issues by default; the messages need it.
   const result = hudConfigSchema.safeParse(draft, { reportInput: true });
   if (result.success) return NO_ISSUES;
@@ -182,6 +185,9 @@ export function validateConfig(draft: HudConfig): IssueMap {
   for (const issue of result.error.issues) {
     const key = pathKey(issue.path.filter((k): k is PathKey => typeof k !== 'symbol'));
     if (!map.has(key)) map.set(key, fieldIssueFromSchema(issue));
+  }
+  if (base && draft.phone.pairingToken === base.phone.pairingToken) {
+    map.delete('phone.pairingToken');
   }
   return map;
 }

@@ -1,3 +1,4 @@
+import { isPairingToken } from '../config/tokens.ts';
 import { lookupDtc } from '../obd/dtc-lookup.ts';
 import { SIGNAL_META } from '../obd/pids.ts';
 import {
@@ -189,8 +190,9 @@ export function composeDiagnostics(state: HudState, config: HudConfig): Diagnost
 // Pairing
 
 /**
- * The "Pair a phone" page: the pairing URI for the QR code when the HUD has a pairing token and
- * its phone link is up with an address a phone can use; otherwise why not.
+ * The "Pair a phone" page: the pairing URI for the QR code when the HUD has a pairing token that
+ * keeps the pairing-token rule and its phone link is up with an address a phone can use;
+ * otherwise why not.
  */
 export function composePairing(state: HudState, config: HudConfig): PairingFrame {
   const hudName = hudDisplayName(config.vehicle.name);
@@ -204,6 +206,9 @@ export function composePairing(state: HudState, config: HudConfig): PairingFrame
   const fingerprint = shortFingerprint(endpoint.certFingerprint) || null;
   const token = config.phone.pairingToken;
   if (token === '') return { status: 'open', hudName, uri: null, fingerprint, closesInS };
+  if (!isPairingToken(token)) {
+    return { status: 'legacy-code', hudName, uri: null, fingerprint, closesInS };
+  }
   const payload = {
     hudId: endpoint.hudId,
     certFingerprint: endpoint.certFingerprint,

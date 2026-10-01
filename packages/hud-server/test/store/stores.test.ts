@@ -225,6 +225,52 @@ describe('ConfigStore', () => {
     expect(again.config.phone.pairingToken).toBe('schlüssel');
   });
 
+  it('keeps a pairing token an older version stored that breaks the rule, and says so', async () => {
+    const path = join(dir, 'config.json');
+    const config = parseConfig(DEFAULT_CONFIG).config;
+    const raw = JSON.parse(serializeConfig(config)) as Record<string, Record<string, unknown>>;
+    raw['phone']!['pairingToken'] = 'mein Schlüssel';
+    const text = `${JSON.stringify(raw, null, 2)}\n`;
+    await writeFile(path, text);
+    const result = await new ConfigStore(path, logger).load();
+    // Not reset, not locked: phones paired with it prove exactly this token.
+    expect(result.config.phone.pairingToken).toBe('mein Schlüssel');
+    expect(result.keptPairingToken).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(logger.text('error')).toBe('');
+    expect(logger.text('warn')).toMatch(
+      /phone\.pairingToken in .* breaks the pairing-code rule \(no spaces: .*\); older versions allowed such codes\. It is kept as it is/,
+    );
+    // Nothing to correct: the file stays as it is.
+    expect(await readFile(path, 'utf8')).toBe(text);
+    expect(await readdir(dir)).toEqual(['config.json']);
+    // A token that keeps the rule is not reported.
+    const fresh = await new ConfigStore(join(dir, 'other.json'), new MemoryLogger()).load();
+    expect(fresh.keptPairingToken).toBeFalsy();
+  });
+
+  it('keeps such a token typed into the file by hand alike, without blaming an older version', async () => {
+    // A file this version wrote, with a code that keeps the rule …
+    const path = join(dir, 'config.json');
+    const first = await new ConfigStore(path, logger).load();
+    expect(first.keptPairingToken).toBeFalsy();
+    // … edited by hand after the upgrade: the file cannot tell it from an old one.
+    const raw = JSON.parse(await readFile(path, 'utf8')) as Record<string, Record<string, unknown>>;
+    raw['phone']!['pairingToken'] = 'my new phrase';
+    await writeFile(path, `${JSON.stringify(raw, null, 2)}\n`);
+    const handEdited = new MemoryLogger();
+    const result = await new ConfigStore(path, handEdited).load();
+    expect(result.config.phone.pairingToken).toBe('my new phrase');
+    expect(result.keptPairingToken).toBe(true);
+    expect(result.errors).toEqual([]);
+    const warning = handEdited.text('warn');
+    expect(warning).not.toMatch(/saved by an older version/);
+    expect(warning).toMatch(/breaks the pairing-code rule \(no spaces: /);
+    // It says what this means and what to do.
+    expect(warning).toMatch(/no phone can pair with it anew/);
+    expect(warning).toMatch(/Generate a new pairing code in the settings app/);
+  });
+
   it('saves atomically', async () => {
     const path = join(dir, 'config.json');
     const store = new ConfigStore(path, logger);

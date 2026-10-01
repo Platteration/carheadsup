@@ -3,6 +3,7 @@ package dev.carheadsup.protocol
 import dev.carheadsup.protocol.auth.AuthVector
 import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.CertificateVector
+import dev.carheadsup.protocol.auth.PairingCode
 import dev.carheadsup.protocol.auth.PhoneAuth
 import dev.carheadsup.protocol.auth.SHARED_AUTH_VECTORS
 import dev.carheadsup.protocol.auth.SHARED_CERTIFICATE_VECTORS
@@ -172,9 +173,30 @@ class ContractSyncTest {
         assertEquals(constant("proofChars").toInt(), PhoneAuth.PROOF_CHARS)
         assertEquals(constant("fingerprintChars").toInt(), CertFingerprint.CHARS)
         assertEquals(constant("shortFingerprintChars").toInt(), CertFingerprint.SHORT_CHARS)
+        assertEquals(maxPairingTokenChars(), PhoneAuth.MAX_TOKEN_CHARS)
+    }
+
+    private fun maxPairingTokenChars(): Int =
+        Regex("export const MAX_PAIRING_TOKEN_CHARS = (\\d+);")
+            .find(source("packages/core/src/config/tokens.ts"))!!
+            .groupValues[1]
+            .toInt()
+
+    @Test
+    fun `the pairing-token rule matches tokens_ts and the config schema`() {
+        val tokens = source("packages/core/src/config/tokens.ts")
+        assertEquals(maxPairingTokenChars(), PairingCode.MAX_CHARS)
+        val range = Regex("""const PAIRING_TOKEN_TEXT = /\^\[\\x([0-9a-f]{2})-\\x([0-9a-f]{2})\]\*\$/;""").find(tokens)!!
+        assertEquals(PairingCode.FIRST_CHAR.code, range.groupValues[1].toInt(16))
+        assertEquals(PairingCode.LAST_CHAR.code, range.groupValues[2].toInt(16))
+        // The phone says what the HUD says.
+        for (token in listOf("two words", "Schlüssel")) {
+            assertTrue(tokens.contains("'${PairingCode.problem(token)}'"), token)
+        }
         val schema = source("packages/core/src/config/schema.ts")
-        val maxToken = Regex("pairingToken: text\\(0, (\\d+)\\)").find(schema)!!.groupValues[1].toInt()
-        assertEquals(maxToken, PhoneAuth.MAX_TOKEN_CHARS)
+        assertTrue(schema.contains("pairingToken: pairingTokenSchema,"))
+        assertTrue(schema.contains("const pairingTokenSchema = text(0, MAX_PAIRING_TOKEN_CHARS)"))
+        assertTrue(schema.contains("pairingTokenTextProblem(token)"))
     }
 
     @Test
@@ -217,7 +239,8 @@ class ContractSyncTest {
         assertEquals(constant("version").toInt(), PairingUri.VERSION)
         assertEquals(constant("maxHosts").toInt(), PairingUri.MAX_HOSTS)
         assertEquals(constant("maxHostChars").toInt(), PairingUri.MAX_HOST_CHARS)
-        assertEquals(constant("maxTokenChars").toInt(), PairingUri.MAX_TOKEN_CHARS)
+        assertEquals("MAX_PAIRING_TOKEN_CHARS", constant("maxTokenChars"))
+        assertEquals(maxPairingTokenChars(), PairingUri.MAX_TOKEN_CHARS)
         assertEquals(constant("maxNameBytes").toInt(), PairingUri.MAX_NAME_BYTES)
     }
 

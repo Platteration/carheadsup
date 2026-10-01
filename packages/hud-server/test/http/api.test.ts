@@ -24,6 +24,7 @@ import {
   TestSocket,
   helloOn,
   lanAddress,
+  otherDevice,
   makeTempDir,
   rawRequest,
   sleep,
@@ -729,37 +730,39 @@ describe('simulator API', () => {
 
 describe('remote clients', () => {
   const lan = lanAddress();
+  const device = otherDevice(lan);
 
   // Other devices use HTTPS (plain http is refused to them; see https-only.test.ts).
   it.skipIf(lan === null)('need the API token once one is configured', async () => {
     const t = await start({ host: '0.0.0.0', config: { server: { apiToken: 'hunter2' } } });
     const remote = `https://${lan}:${t.tlsPort}`;
     const bearer = (token: string) => ({ headers: { authorization: `Bearer ${token}` } });
-    const none = await rawRequest(`${remote}/api/info`);
+    const none = await device.request(`${remote}/api/info`);
     expect(none.status).toBe(401);
     expect(none.fingerprint).toBe(t.fingerprint);
     expect(none.headers['www-authenticate']).toMatch(/^Bearer/);
     expect(JSON.parse(none.body)).toEqual({ error: expect.any(String) as unknown });
-    expect((await rawRequest(`${remote}/api/info`, bearer('nope'))).status).toBe(401);
-    expect((await rawRequest(`${remote}/api/info`, bearer('hunter2'))).status).toBe(200);
+    expect((await device.request(`${remote}/api/info`, bearer('nope'))).status).toBe(401);
+    expect((await device.request(`${remote}/api/info`, bearer('hunter2'))).status).toBe(200);
     // Static files stay public (the settings app must load to ask for the token).
-    expect((await rawRequest(`${remote}/settings`)).status).toBe(200);
-    // Loopback needs no token.
+    expect((await device.request(`${remote}/settings`)).status).toBe(200);
+    // The HUD itself needs no token: over loopback, or at its own network address.
     expect((await fetch(`${t.base}/api/info`)).status).toBe(200);
+    expect((await rawRequest(`${remote}/api/info`)).status).toBe(200);
     // Changing the token applies to the very next request.
-    const patched = await rawRequest(`${remote}/api/config`, {
+    const patched = await device.request(`${remote}/api/config`, {
       method: 'PATCH',
       headers: { authorization: 'Bearer hunter2', 'content-type': 'application/json' },
       body: JSON.stringify({ server: { apiToken: 'correct-horse' } }),
     });
     expect(patched.status).toBe(200);
-    expect((await rawRequest(`${remote}/api/info`, bearer('hunter2'))).status).toBe(401);
-    expect((await rawRequest(`${remote}/api/info`, bearer('correct-horse'))).status).toBe(200);
+    expect((await device.request(`${remote}/api/info`, bearer('hunter2'))).status).toBe(401);
+    expect((await device.request(`${remote}/api/info`, bearer('correct-horse'))).status).toBe(200);
   });
 
   it.skipIf(lan === null)('are open when no token is configured', async () => {
     const t = await start({ host: '0.0.0.0' });
-    expect((await rawRequest(`https://${lan}:${t.tlsPort}/api/info`)).status).toBe(200);
+    expect((await device.request(`https://${lan}:${t.tlsPort}/api/info`)).status).toBe(200);
   });
 });
 

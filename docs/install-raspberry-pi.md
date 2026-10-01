@@ -224,7 +224,10 @@ Environment=CARHEADSUP_KIOSK_FLAGS=
 waiting); `CARHEADSUP_KIOSK_SCALE` is Chromium's device scale factor (1 = one CSS pixel per panel
 pixel); `CARHEADSUP_KIOSK_FLAGS` are extra Chromium flags, separated by spaces. When the server
 moves to another port (`server.port`, `CARHEADSUP_PORT`), change `CARHEADSUP_KIOSK_URL` with it —
-until then the kiosk stays black.
+until then the kiosk stays black. Likewise when it listens on one network address only
+(`server.host`, e.g. `10.42.0.1`): `localhost` does not reach it then, so use
+`http://10.42.0.1:8080/`. The server knows a connection from its own address to that address as
+the Pi itself: plain http, no token.
 
 `-s` lets you switch to a text console with `Ctrl+Alt+F2` when a keyboard is attached. The kiosk
 page maps keys to HUD inputs (Enter / Escape / arrows / B / + / −, see
@@ -360,7 +363,7 @@ least:
    connects the first time, it shows the HUD certificate's fingerprint (*Status*); it should be
    the one under *Phone → Encrypted link* in the settings app (or in
    `journalctl -u carheadsup | grep 'Phone link'`). The companion remembers the certificate from
-   then on. From the Pi itself (loopback needs no token) setting both tokens is:
+   then on. From the Pi itself (which needs no token) setting both tokens is:
 
    ```sh
    API_TOKEN=$(openssl rand -hex 16)
@@ -547,7 +550,7 @@ renderer clients pass their token) or message content.
 
 | Symptom | Things to check |
 | --- | --- |
-| Display stays black | `systemctl status carheadsup-kiosk`, `journalctl -u carheadsup-kiosk -b`. "waiting for http://localhost:8080/ … (no answer)": the kiosk waits for the server — is it running (`systemctl status carheadsup`), and on the port in `CARHEADSUP_KIOSK_URL`? "HTTP 503": the renderer is not built (`npm run build` in the checkout, then `sudo deploy/install.sh`). "HTTP 403": the server does not accept the host name in `CARHEADSUP_KIOSK_URL` (use `localhost`). "HTTP 307": `CARHEADSUP_KIOSK_URL` names one of the Pi's network addresses, so the server takes the kiosk for another device and sends it to HTTPS (use `localhost`). Otherwise: is `graphical.target` the default (`systemctl get-default`)? A desktop display manager competing for the screen (`sudo systemctl disable display-manager.service`)? `dtoverlay=vc4-kms-v3d` still in `config.txt` (cage needs KMS)? |
+| Display stays black | `systemctl status carheadsup-kiosk`, `journalctl -u carheadsup-kiosk -b`. "waiting for http://localhost:8080/ … (no answer)": the kiosk waits for the server — is it running (`systemctl status carheadsup`), and on the port in `CARHEADSUP_KIOSK_URL`? "HTTP 503": the renderer is not built (`npm run build` in the checkout, then `sudo deploy/install.sh`). "HTTP 403": the server does not accept the host name in `CARHEADSUP_KIOSK_URL` (use `localhost`). "HTTP 307": the server takes the kiosk for another device and sends it to HTTPS — `CARHEADSUP_KIOSK_URL` reaches it through an address that is not the Pi's own (a name of another machine, a forwarded port); use `localhost`, or the `server.host` address when the server listens on one. Otherwise: is `graphical.target` the default (`systemctl get-default`)? A desktop display manager competing for the screen (`sudo systemctl disable display-manager.service`)? `dtoverlay=vc4-kms-v3d` still in `config.txt` (cage needs KMS)? |
 | Page "The HUD renderer has not been built" (in a browser) | `npm run build` in the checkout, then `sudo deploy/install.sh` again. |
 | HUD does not start; `systemctl status carheadsup` says "Dependency failed" | With the [read-only root](#read-only-root-file-system) recipe: the `hud-data` file system is missing or cannot be mounted (`lsblk -f`, `journalctl -b -u var-lib-carheadsup.mount`). |
 | Settings, odometer or trips are back to old values after every start | With a read-only root: the data partition is under the overlay (`findmnt /var/lib/carheadsup` says `overlay`) — see [step 4 of the recipe](#read-only-root-file-system). |
@@ -563,7 +566,7 @@ renderer clients pass their token) or message content.
 | Companion says "HUD certificate changed — re-pair" | The HUD at the paired address presented another TLS certificate than the paired one, and the app stopped. Expected after `/var/lib/carheadsup/tls.pem` was deleted or replaced, or the Pi's card was set up anew: then *Forget paired HUD* and pair again, comparing the new fingerprint with the settings app. Otherwise another device is posing as the HUD — do not forget the HUD; check who is on the car's Wi-Fi. |
 | Companion says "A different HUD is answering" | It is paired with another HUD id than this one's (`/var/lib/carheadsup/hud-id`): the Pi was replaced or its data directory reset. If this is your HUD, *Forget paired HUD* in the companion; it pairs again with the next HUD that proves the code. |
 | Companion asks "This is my HUD — connect" | The HUD has no pairing code, so the phone cannot verify it. Confirm only if it is yours; better, set a pairing code. |
-| The pairing page shows no QR code | "No pairing code set": generate one under *Phone → Pairing code* and save. "Pairing unavailable": the TLS listener is not running (`server.tlsPort`, see the log) or the HUD listens only on a loopback address (`server.host`). The page exists only while parked. |
+| The pairing page shows no QR code | "No pairing code set": generate one under *Phone → Pairing code* and save. "Pairing code cannot be shown": the code has spaces or other characters a QR code does not carry (older versions allowed them; so does a hand edit of `config.json`) — generate a new one under *Phone → Pairing code*, save, and show it again; phones paired with the old one keep connecting until then. "Pairing unavailable": the TLS listener is not running (`server.tlsPort`, see the log) or the HUD listens only on a loopback address (`server.host`). The page exists only while parked. |
 | The companion does not read the QR code | Hold the phone close to the display and square to it, and avoid glare; turning the HUD brighter helps. Scanning the reflection in the windshield works too. It reports a code that is not a carheadsup pairing code, or one it cannot read. Pairing by hand still works. |
 | Browser warns that the connection is not private | Expected for the HUD's self-signed certificate on `https://…:8443`: compare its fingerprint, then accept it ([how](#browsers-and-the-huds-certificate)). |
 | `http://…:8080` from a laptop or phone jumps to `https://…:8443`, or answers "HTTPS required" | Expected: other devices use the TLS port. Open `https://<HUD address>:8443/settings`. "…the HUD's TLS listener is not running": the TLS port is taken or no certificate could be made (`journalctl -u carheadsup -b \| grep TLS`); the kiosk keeps working. |

@@ -53,7 +53,7 @@ import dev.carheadsup.companion.ui.scan.QrScanner
 import dev.carheadsup.companion.ui.theme.StatusColors
 import dev.carheadsup.protocol.auth.CertFingerprint
 import dev.carheadsup.protocol.auth.HudPin
-import dev.carheadsup.protocol.auth.PhoneAuth
+import dev.carheadsup.protocol.auth.PairingCode
 import dev.carheadsup.protocol.link.HudEndpoint
 import dev.carheadsup.protocol.pairing.PairingScan
 import dev.carheadsup.protocol.pairing.PairingUri
@@ -78,7 +78,10 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (HudPage) -> Unit) 
     var trafficKey by rememberSaveable(settings.trafficApiKey) { mutableStateOf(settings.trafficApiKey) }
     val trafficKeyValid = trafficKey.isEmpty() || TomTomTraffic.isPlausibleKey(trafficKey)
     val addressValid = useDiscovery || HudEndpoint.parse(address) != null
-    val tokenValid = PhoneAuth.isValidToken(pairingToken) && pairingToken.none { it.isISOControl() }
+    // The HUD's pairing-token rule for a new code; one saved before the rule stays usable as it is
+    // (the HUD keeps it too), so it never blocks saving the other connection fields.
+    val tokenKept = pairingToken == settings.pairingToken && !PairingCode.isValid(pairingToken)
+    val tokenValid = tokenKept || PairingCode.isValid(pairingToken)
     val dirty =
         useDiscovery != settings.useDiscovery || address != settings.manualAddress ||
             pairingToken != settings.pairingToken || apiToken != settings.apiToken
@@ -113,7 +116,17 @@ fun SetupScreen(viewModel: MainViewModel, onOpenHudSettings: (HudPage) -> Unit) 
                 value = pairingToken,
                 onValueChange = { pairingToken = it },
                 label = { Text(stringResource(R.string.setting_pairing_token)) },
-                supportingText = { Text(stringResource(R.string.setting_pairing_token_description)) },
+                supportingText = {
+                    Text(
+                        stringResource(
+                            when {
+                                !tokenValid -> R.string.setting_pairing_token_invalid
+                                tokenKept -> R.string.setting_pairing_token_legacy
+                                else -> R.string.setting_pairing_token_description
+                            },
+                        ),
+                    )
+                },
                 isError = !tokenValid,
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),

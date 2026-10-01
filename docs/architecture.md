@@ -355,8 +355,19 @@ with mode `0600` and directories with `0700`: they hold the tokens and your driv
 
 The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. The protections:
 
-- **Loopback is trusted.** Requests from the Pi itself (the kiosk browser, local tools) are always
-  allowed, over plain http on `server.port`.
+- **The Pi itself is trusted.** Requests from the Pi itself (the kiosk browser, local tools) are
+  always allowed, over plain http on `server.port`, without the API token and without connection
+  limits. The Pi itself is a client over loopback, or one whose address is the very address it
+  reached the HUD at (compared in canonical form: IPv4-mapped IPv6 as IPv4, without IPv6 zones):
+  the kiosk of a HUD that listens on one network address (`server.host` = `10.42.0.1`) cannot use
+  loopback and connects from that address to that address. Another device cannot open such a
+  connection: with the HUD's own address forged as its source, its handshake never completes —
+  the HUD's answer to its own address is delivered locally and never leaves the Pi (and for IPv4
+  Linux drops incoming packets with a local source address as martians). An unknown address (a socket
+  already gone) is never the Pi itself (`isHudItself` in `http/auth.ts`, used for the token, the
+  plain-http rule, the connection limits and the renderer socket's re-checks). So do not put a
+  proxy or a NAT rule on the Pi in front of the HUD: connections it forwards come from the Pi's
+  own addresses and would count as the Pi itself.
 - **Other devices use HTTPS.** Plain http carries the API token, the config and the HUD's frames
   in clear text, so while TLS is on the plain port serves only the Pi itself. A laptop or phone
   browser on the Wi-Fi that comes to it is redirected to the same page on `server.tlsPort`
@@ -415,10 +426,13 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
 - **Host check (DNS rebinding).** The cross-site check compares `Origin` with `Host`, and a web
   page whose own name is made to resolve to the HUD's address (DNS rebinding) passes it: its
   origin *is* that name. So every request and WebSocket upgrade must address the HUD by an IP
-  address, `localhost`, the machine's host name or `<hostname>.local` (plus names allowed with
-  `--allowed-hosts` / `CARHEADSUP_ALLOWED_HOSTS`); anything else gets `403`. Without an API
-  token these two checks are all that keeps web pages out; the token also keeps out every other
-  device on the Wi-Fi.
+  address, `localhost` or a `*.localhost` name, the machine's host name or `<hostname>.local`
+  (plus names allowed with `--allowed-hosts` / `CARHEADSUP_ALLOWED_HOSTS`); anything else gets
+  `403`. A name counts only when it is made of DNS labels (letters, digits, hyphens, underscores;
+  1–63 characters per label, 253 in all), so `evil.example/.localhost` or `a b.localhost` is
+  refused rather than taken for a `.localhost` name (`isAllowedHost` in `http/auth.ts`). Without
+  an API token these two checks are all that keeps web pages out; the token also keeps out every
+  other device on the Wi-Fi.
 - **Hardened responses.** A strict Content Security Policy, `X-Frame-Options: DENY`,
   `nosniff`, no referrer; static files are served read-only with path-traversal checks; the web
   pages themselves contain no secrets and are served without authentication.

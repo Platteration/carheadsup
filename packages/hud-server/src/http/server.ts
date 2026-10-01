@@ -88,6 +88,7 @@ export function createRequestHandler(
     if (
       !isAuthorized({
         remoteAddress: req.socket.remoteAddress,
+        localAddress: req.socket.localAddress,
         authorization: req.headers.authorization,
         apiToken: options.apiToken(),
       })
@@ -135,7 +136,10 @@ export function createRequestHandler(
       return;
     }
     if (options.plainAccess !== undefined) {
-      const access = plainAccess(req.socket.remoteAddress, options.plainAccess);
+      const access = plainAccess(
+        { remoteAddress: req.socket.remoteAddress, localAddress: req.socket.localAddress },
+        options.plainAccess,
+      );
       if (access !== SERVE_PLAIN) {
         sendToHttps(req, res, url, access.tlsPort);
         return;

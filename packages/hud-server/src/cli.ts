@@ -1,6 +1,6 @@
 import { isAbsolute, join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { isLoopbackAddress } from './http/auth.ts';
+import { isDnsName, isLoopbackAddress } from './http/auth.ts';
 import { LOG_LEVELS, isLogLevel } from './logger.ts';
 import type { LogLevel } from './logger.ts';
 
@@ -95,7 +95,8 @@ function parseHostList(raw: string, source: string): string[] | string {
     .split(/[\s,]+/)
     .map((name) => name.trim())
     .filter((name) => name !== '');
-  const bad = names.find((name) => !/^[A-Za-z0-9._-]+$/.test(name));
+  // As the Host check compares them: lower case, without a trailing dot, made of DNS labels.
+  const bad = names.find((name) => !isDnsName(name.toLowerCase().replace(/\.$/, '')));
   return bad === undefined ? names : `${source}: "${bad}" is not a host name`;
 }
 
@@ -247,21 +248,23 @@ export interface PageUrlOptions {
 
 /**
  * Where the pages are opened, for the start-up log. On the HUD itself: plain http (localhost for
- * a wildcard bind). From other devices (the LAN addresses, or a bind address that is not
- * loopback): https on the TLS port while TLS is on; plain http while it is off or with
+ * a wildcard bind, else the bind address — the HUD reaches a network address it listens on as
+ * itself, see `isHudItself`). From other devices (the LAN addresses, or a bind address that is
+ * not loopback): https on the TLS port while TLS is on; plain http while it is off or with
  * `server.allowPlainRemote`; not at all when the TLS listener could not start.
  */
 export function pageUrls(options: PageUrlOptions): string[] {
   const { host, port, tlsPort } = options;
   const wildcard = host === '0.0.0.0' || host === '::' || host === '';
-  const local = wildcard || host === 'localhost' || isLoopbackAddress(host);
-  const remote = wildcard ? options.lanAddresses : local ? [] : [host];
+  const loopback = host === 'localhost' || isLoopbackAddress(host);
+  const remote = wildcard ? options.lanAddresses : loopback ? [] : [host];
   const plainRemote = !options.tlsEnabled || options.allowPlainRemote;
-  return [
-    ...(local ? serverUrls(wildcard ? 'localhost' : host, port, []) : []),
+  const urls = [
+    ...serverUrls(wildcard ? 'localhost' : host, port, []),
     ...remote.flatMap((address) => {
       if (plainRemote) return serverUrls(address, port, []);
       return tlsPort === null ? [] : serverUrls(address, tlsPort, [], 'https');
     }),
   ];
+  return [...new Set(urls)];
 }

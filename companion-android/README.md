@@ -44,7 +44,7 @@ The Gradle build has two modules:
 
 | Module | What | Builds where |
 | --- | --- | --- |
-| `:protocol` | Pure Kotlin/JVM: the wire protocol (mirrors `packages/core/src/types/protocol.ts`), its JSON configuration and size limits, the mutual authentication (`auth`: proofs bound to the certificate, certificate fingerprints, HUD pinning, the handshake state machine), the trust in the HUD's TLS certificate (`tls`: the pinning decisions and the `X509TrustManager` / host name check that enforce them, tested with real TLS handshakes), the mDNS advertisement (`link.HudAdvertisement`), the Google Maps notification parser, OSM speed-limit parsing, Overpass queries and road matching, traffic incidents (`traffic`: the TomTom request and response, the corridor ahead, the selection of incidents ahead, the mapping onto HUD hazards, the request policy and daily budget) and the merging of hazard sources (`hazards`), pairing by QR code (`pairing`: the pairing URI parser, the QR decoder built on ZXing — plain, inverted and mirrored codes — and the choice of the HUD's address), message-notification extraction, trip/maintenance models and formatting, reconnect backoff, rate limiting, heartbeat and replay state. Everything testable lives here. | Any JDK 17+ machine |
+| `:protocol` | Pure Kotlin/JVM: the wire protocol (mirrors `packages/core/src/types/protocol.ts`), its JSON configuration and size limits, the mutual authentication (`auth`: proofs bound to the certificate, certificate fingerprints, HUD pinning, the handshake state machine, the pairing-code rule `PairingCode` the HUD shares), the trust in the HUD's TLS certificate (`tls`: the pinning decisions and the `X509TrustManager` / host name check that enforce them, tested with real TLS handshakes), the mDNS advertisement (`link.HudAdvertisement`), the Google Maps notification parser, OSM speed-limit parsing, Overpass queries and road matching, traffic incidents (`traffic`: the TomTom request and response, the corridor ahead, the selection of incidents ahead, the mapping onto HUD hazards, the request policy and daily budget) and the merging of hazard sources (`hazards`), pairing by QR code (`pairing`: the pairing URI parser, the QR decoder built on ZXing — plain, inverted and mirrored codes — and the choice of the HUD's address), message-notification extraction, trip/maintenance models and formatting, reconnect backoff, rate limiting, heartbeat and replay state. Everything testable lives here. | Any JDK 17+ machine |
 | `:app` | The Android application (Kotlin, Jetpack Compose + Material 3, OkHttp, CameraX, no Google Play services). Adapts Android APIs to `:protocol`. | Only with an Android SDK |
 
 `settings.gradle.kts` includes `:app` only when an Android SDK is found (`sdk.dir` in
@@ -82,8 +82,8 @@ message through `WireSanitizer` first, which applies the HUD validator's limits 
 names, 44 KiB icon, 50 hazards, finite in-range numbers, no control characters…), so a single odd
 notification never gets an update rejected. `ContractSyncTest` reads the TypeScript sources
 (`nav.ts`, `phone.ts`, `events.ts`, `records.ts`, `protocol.ts`, `validate.ts`, `phone-auth.ts`,
-`pairing.ts`) and fails if enum values, message types, the protocol version, the size limits or
-the authentication and pairing constants drift; `PhoneAuthTest` and `PairingUriTest` assert the
+`pairing.ts`, `tokens.ts`) and fails if enum values, message types, the protocol version, the size
+limits, the authentication and pairing constants or the pairing-code rule drift; `PhoneAuthTest` and `PairingUriTest` assert the
 shared test vectors (`packages/core/test/protocol/phone-auth-vectors.json` and
 `pairing-uri-vectors.json`, which the HUD's tests assert as well, and `ContractSyncTest` checks
 the module's copies against). `QrDecoderTest` decodes the very QR code the HUD's renderer draws
@@ -297,7 +297,9 @@ together.
    HUD makes one itself).
 
    **Or by hand**: leave "Find the HUD automatically" on (or enter the HUD's address with its TLS
-   port, e.g. `10.42.0.1:8443`) and enter the HUD's pairing code (`phone.pairingToken`). The
+   port, e.g. `10.42.0.1:8443`) and enter the HUD's pairing code (`phone.pairingToken`): one word
+   of printable ASCII, as the HUD takes it (`:protocol`'s `PairingCode`; a code saved by an older
+   version that has spaces or accents keeps working until you change it). The
    first HUD that proves the pairing code is remembered as yours, with its certificate ("Paired
    with HUD … · certificate …" in *Setup*); compare that fingerprint with the HUD's settings
    (*Phone → Encrypted link*). A HUD without pairing code cannot prove anything: the app shows it

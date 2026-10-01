@@ -399,6 +399,7 @@
 }
 
 .hud-pair--open .hud-pair__text,
+.hud-pair--legacy-code .hud-pair__text,
 .hud-pair--unavailable .hud-pair__text {
   align-items: center;
   text-align: center;

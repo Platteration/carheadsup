@@ -8,6 +8,7 @@ import {
   parsePairingUri,
 } from '../../src/protocol/pairing.ts';
 import type { PairingPayload } from '../../src/protocol/pairing.ts';
+import { isPairingToken } from '../../src/config/tokens.ts';
 import shared from './pairing-uri-vectors.json' with { type: 'json' };
 
 const utf8Bytes = (text: string) => encodeURIComponent(text).replace(/%[0-9A-F]{2}/g, '.').length;
@@ -65,11 +66,50 @@ describe('encodePairingUri', () => {
     );
   });
 
-  it('round-trips any well-formed token and name', () => {
-    const tokens = ['a', ' leading and trailing ', '100%', 'x+y=z&w', 'ü€😀', '\u0000\u007f', '#'];
+  it('round-trips any token that keeps the pairing-token rule, and any name', () => {
+    const tokens = [
+      'a',
+      '100%',
+      'x+y=z&w',
+      '#',
+      '!',
+      '~',
+      'p@ss/w0rd?&=#%+,;:\'!*()~._-[]{}|\\^`"<>$',
+    ];
     for (const pairingToken of tokens) {
       const payload = { ...PAYLOAD, pairingToken, hudName: 'Škoda Octavia HUD' };
       expect(parsePairingUri(encodePairingUri(payload))).toEqual({ ok: true, payload });
+    }
+    // Every printable ASCII character but the space.
+    const all = Array.from({ length: 0x7e - 0x21 + 1 }, (_, i) => String.fromCharCode(0x21 + i));
+    const payload = { ...PAYLOAD, pairingToken: all.join('') };
+    expect(parsePairingUri(encodePairingUri(payload))).toEqual({ ok: true, payload });
+  });
+
+  it('takes exactly the tokens the HUD’s config takes (the pairing-token rule)', () => {
+    const tokens = [
+      'K7fQ2mZrP4xW9sLt3HvNbC8e',
+      'a',
+      'x'.repeat(256),
+      'x'.repeat(257),
+      'two words',
+      ' leading',
+      'trailing ',
+      'tab\there',
+      'line\nbreak',
+      'Schlüssel',
+      'ü€😀',
+      '\u0000\u007f',
+      'a\u00a0b',
+      'a\u200bb',
+      'a\ud800b',
+    ];
+    for (const pairingToken of tokens) {
+      const payload = { ...PAYLOAD, pairingToken };
+      expect({ pairingToken, encodable: pairingPayloadProblem(payload) === null }).toEqual({
+        pairingToken,
+        encodable: isPairingToken(pairingToken),
+      });
     }
   });
 
@@ -84,7 +124,11 @@ describe('encodePairingUri', () => {
       [{ certFingerprint: 'F'.repeat(64) }, /^fp /],
       [{ pairingToken: '' }, /must not be empty/],
       [{ pairingToken: 'x'.repeat(257) }, /at most 256/],
-      [{ pairingToken: 'a\ud800b' }, /well-formed/],
+      [{ pairingToken: 'a\ud800b' }, /^k \(the pairing token\): only letters, digits and symbols/],
+      [{ pairingToken: 'my car' }, /^k \(the pairing token\): no spaces/],
+      [{ pairingToken: 'Schlüssel' }, /plain ASCII/],
+      [{ pairingToken: 'tab\t' }, /no spaces/],
+      [{ pairingToken: 'nul\u0000' }, /control characters/],
       [{ hosts: [] }, /at least one host/],
       [{ hosts: Array.from({ length: 9 }, (_, i) => `10.0.0.${i}`) }, /at most 8/],
       [{ hosts: ['fe80::1'] }, /"fe80::1"/],

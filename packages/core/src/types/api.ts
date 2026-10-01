@@ -7,8 +7,9 @@ import type { ObdLinkStatus } from './vehicle.ts';
 
 /**
  * REST API served by the HUD (`hud-server`) and used by the settings app, the dev console
- * and the phone. JSON in, JSON out. Requests from non-loopback addresses must send
- * `Authorization: Bearer <server.apiToken>` when a token is configured.
+ * and the phone. JSON in, JSON out. Requests from other devices (not the HUD itself: over loopback,
+ * or from the address they connected to) must send `Authorization: Bearer <server.apiToken>` when
+ * a token is configured.
  *
  *   GET    /api/info                         → ApiInfo
  *   GET    /api/config                       → HudConfig

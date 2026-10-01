@@ -39,6 +39,7 @@ export function QrCode({ text }: { text: string }) {
 const HEADLINE: Readonly<Record<PairingPageStatus, string>> = {
   ready: 'Scan with the carheadsup app',
   open: 'No pairing code set',
+  'legacy-code': 'Pairing code cannot be shown',
   unavailable: 'Pairing unavailable',
 };
 
@@ -51,6 +52,14 @@ function Advice({ status }: { status: PairingPageStatus }) {
         <>
           Any phone on the car’s Wi-Fi can connect. Set one in the settings app (Phone → Pairing
           code → Generate, then Save) and open this page again.
+        </>
+      );
+    case 'legacy-code':
+      return (
+        <>
+          It has spaces or other characters a code cannot carry (older versions allowed them).
+          Phones paired with it still connect. To pair by code: Phone → Pairing code → Generate,
+          Save, and open this page again.
         </>
       );
     default:

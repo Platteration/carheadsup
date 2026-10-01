@@ -12,6 +12,7 @@ import { cloneJson, deepFreeze, deepMerge, isPlainObject } from './json.ts';
 import { describeValue } from './issues.ts';
 import { parseLenient } from './lenient.ts';
 import { hudConfigSchema } from './schema.ts';
+import { isStoredPairingToken, pairingTokenProblem } from './tokens.ts';
 
 export {
   hudConfigSchema,
@@ -299,6 +300,9 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
  *  - If `base` is itself invalid, its bad fields are first repaired from DEFAULT_CONFIG.
  *  - A config from before `server.tlsPort` whose HTTP port is the TLS port it would get keeps
  *    its HTTP port; the TLS port moves to the next port (see {@link withLegacyTlsPort}).
+ *  - A pairing token of `base` that breaks the pairing-token rule (one a stored config kept, see
+ *    {@link parseStoredConfig}) stays while `input` leaves it as it is; a new token must keep the
+ *    rule. A config file is loaded with {@link parseStoredConfig}.
  *
  * The returned config is a fresh, mutable object sharing no references with `input` or `base`.
  */
@@ -308,6 +312,42 @@ export function parseConfig(
 ): { config: HudConfig; errors: string[] } {
   const fallback = validBase(base);
   return parseAgainst(withLegacyTlsPort(input, fallback), fallback);
+}
+
+/**
+ * Load a stored config (`config.json`): {@link parseConfig}, except for a `phone.pairingToken`
+ * that breaks the pairing-token rule (`pairingTokenProblem`) but was valid before it — any text
+ * of up to 256 characters ({@link isStoredPairingToken}). Phones paired with it prove exactly that
+ * token, so resetting it would unpair them: it is kept as it is, and `keptPairingToken` says so
+ * (for the HUD to report; the settings app and the pairing page ask for a new code). From then on
+ * {@link mergeConfig} and {@link parseConfig} keep it while changes leave it alone. A config file
+ * does not say which version wrote it, so such a token typed into it by hand is kept the same way;
+ * only changes through `mergeConfig` / `parseConfig` (the settings app, the API) refuse it.
+ */
+export function parseStoredConfig(input: unknown): {
+  config: HudConfig;
+  errors: string[];
+  keptPairingToken: boolean;
+} {
+  const parsed = parseConfig(input);
+  const kept = grandfatheredPairingToken(input);
+  if (kept === null) return { ...parsed, keptPairingToken: false };
+  const { config } = parsed;
+  config.phone.pairingToken = kept;
+  const errors = parsed.errors.filter((error) => !error.startsWith(`${PAIRING_TOKEN_PATH}:`));
+  return { config, errors, keptPairingToken: true };
+}
+
+const PAIRING_TOKEN_PATH = 'phone.pairingToken';
+
+/**
+ * The `phone.pairingToken` of `config` when it breaks the pairing-token rule but is one a config
+ * stored before the rule may hold (see {@link parseStoredConfig}); otherwise null.
+ */
+function grandfatheredPairingToken(config: unknown): string | null {
+  const phone = isPlainObject(config) ? config['phone'] : undefined;
+  const token = isPlainObject(phone) ? phone['pairingToken'] : undefined;
+  return isStoredPairingToken(token) && pairingTokenProblem(token) !== null ? token : null;
 }
 
 /**
@@ -352,13 +392,26 @@ function parseAgainst(
   }
   const errors: string[] = [];
   // Safe: parseLenient only produces values accepted by the schema, whose inferred type is
-  // statically asserted to equal HudConfig (see HudConfigSchemaMatchesContract).
+  // statically asserted to equal HudConfig (see HudConfigSchemaMatchesContract) — except for a
+  // pairing token the fallback kept from a stored config (below).
   const config = parseLenient(hudConfigSchema, input, fallback, [], errors) as HudConfig;
+  // That token stays while the change leaves it as it is (an unchanged field is no error); an
+  // invalid new token was refused, and the fallback's token stays too.
+  const kept = grandfatheredPairingToken(fallback);
+  if (kept !== null && grandfatheredPairingToken(input) === kept) {
+    return { config, errors: errors.filter((e) => !e.startsWith(`${PAIRING_TOKEN_PATH}:`)) };
+  }
   return { config, errors };
 }
 
-/** `base` itself, repaired field by field from DEFAULT_CONFIG if it is not fully valid. */
+/**
+ * `base` itself, repaired field by field from DEFAULT_CONFIG if it is not fully valid — keeping
+ * a pairing token from a stored config (see {@link parseStoredConfig}).
+ */
 function validBase(base: HudConfig | undefined): HudConfig {
   if (base === undefined || base === DEFAULT_CONFIG) return DEFAULT_CONFIG;
-  return parseLenient(hudConfigSchema, base, DEFAULT_CONFIG, [], []) as HudConfig;
+  const repaired = parseLenient(hudConfigSchema, base, DEFAULT_CONFIG, [], []) as HudConfig;
+  const kept = grandfatheredPairingToken(base);
+  if (kept !== null) repaired.phone.pairingToken = kept;
+  return repaired;
 }

@@ -39,8 +39,9 @@ ready_problem=""
 
 # True once `url` loads: an HTTP 2xx/3xx answer with curl, or at least an open TCP port without
 # it. Anything else (no answer, 403 for a host name the server does not accept, 503 while it
-# starts or without a built renderer, 307 when the server takes the kiosk for another device and
-# sends it to HTTPS — whose self-signed certificate Chromium would answer with its warning page…)
+# starts or without a built renderer, 307 when the server takes the kiosk for another device — it
+# came through an address that is not this machine's own — and sends it to HTTPS, whose
+# self-signed certificate Chromium would answer with its warning page…)
 # would show an error page, so it counts as not ready.
 server_ready() {
   local url=$1
@@ -53,7 +54,7 @@ server_ready() {
     fi
     case $status in
       000) ready_problem="no answer" ;;
-      307) ready_problem="HTTP 307: the server only serves other devices over HTTPS; use http://localhost:<port>/ in CARHEADSUP_KIOSK_URL" ;;
+      307) ready_problem="HTTP 307: the server only serves other devices over HTTPS and took the kiosk for one; use an address of this machine in CARHEADSUP_KIOSK_URL: http://localhost:<port>/, or server.host when it names one address" ;;
       403) ready_problem="HTTP 403: does the server accept the host name in CARHEADSUP_KIOSK_URL?" ;;
       503) ready_problem="HTTP 503: still starting, or the renderer is not built" ;;
       *) ready_problem="HTTP ${status}" ;;
