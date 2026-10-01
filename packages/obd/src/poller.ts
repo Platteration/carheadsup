@@ -575,9 +575,12 @@ export class ObdPoller {
 
   /**
    * A multi-PID request failed (or came back with frames missing). Once some PID has been in
-   * `batchFailuresBeforeStepDown` such requests in a row without being answered, and a request
-   * for it alone works, requests are made smaller: 6 → 3 → 2 → 1 PIDs. A lone request that
-   * fails too says the link is bad, not the batching: nothing changes (the error counts).
+   * `batchFailuresBeforeStepDown` such requests in a row without being answered, a request for
+   * it alone works and the same multi-PID request then fails once more, requests are made
+   * smaller: 6 → 3 → 2 → 1 PIDs. A lone request that fails too says the link is bad, not the
+   * batching: nothing changes (the error counts). Neither does a batch that works on the retry:
+   * the link had stalled (a Bluetooth hiccup times out every request for a few seconds) and has
+   * just come back, which a lone request working right after cannot tell from broken batching.
    */
   private async noteBatchFailure(
     batch: readonly PidItem[],
@@ -603,11 +606,40 @@ export class ObdPoller {
       return;
     }
     suspect.empty = 0;
+    if (await this.batchWorksAgain(batch)) {
+      suspect.batchFailures = 0;
+      return;
+    }
     this.setPidsPerRequest(
       this.maxPids > 3 ? 3 : this.maxPids - 1,
       `requests for ${batch.length} PIDs keep failing`,
     );
     this.emitLink(this.degraded);
+  }
+
+  /**
+   * Repeat a multi-PID request that kept failing, right after a lone request worked: true when
+   * it now comes back whole (its values are published), or when the vehicle has gone silent
+   * (which says nothing about batching either). Its failure is not counted as a request error:
+   * the lone request just showed that the link works.
+   */
+  private async batchWorksAgain(batch: readonly PidItem[]): Promise<boolean> {
+    let result: Mode01Result;
+    try {
+      result = await this.driver.queryMode01(batch.map((item) => item.pid));
+    } catch (err) {
+      if (isLinkFatal(err)) throw err;
+      this.logger.debug(`OBD: PIDs ${batch.map((i) => hex(i.pid)).join(' ')} failed again`);
+      return isVehicleSilence(err);
+    }
+    this.publishResult(result);
+    if (result.incomplete) return false;
+    for (const item of batch) {
+      if (!result.answers.has(item.pid)) continue;
+      item.empty = 0;
+      item.batchFailures = 0;
+    }
+    return true;
   }
 
   /**

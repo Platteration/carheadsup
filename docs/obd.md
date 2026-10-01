@@ -144,7 +144,9 @@ only). The poller checks this right after discovery: if the fast batch fails twi
 rpm together (a one-frame answer) work, requests are kept to answers that fit one frame (up to
 three PIDs); if even that fails, it polls one PID per request. While polling, a PID that keeps
 failing in multi-PID requests (three in a row, or answers with frames missing) while a request
-for it alone works makes requests smaller again — 6 → 3 → 2 → 1 PIDs. A few ECUs simply ignore
+for it alone works makes requests smaller again — 6 → 3 → 2 → 1 PIDs — once the same multi-PID
+request has failed one more time (a link that merely stalled for a few seconds works again by
+then, and keeps its batching). A few ECUs simply ignore
 multi-PID requests and answer only the first PID; that also falls back to one PID per request.
 Each step is logged as a warning and shown on the link ("Polling up to 3 PIDs per request (long
 answers fail)").

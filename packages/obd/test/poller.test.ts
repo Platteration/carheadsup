@@ -696,6 +696,32 @@ describe('ObdPoller with adapters that cannot take multi-PID requests', () => {
     expect(ctx.poller.pidsPerRequest).toBe(6);
   });
 
+  it('keeps the batch size when the link merely stalled (the batch works again)', async () => {
+    // A Bluetooth stall times out every request for a few seconds; the lone request that follows
+    // the third failed batch works because the link is back, not because batching is broken.
+    const ctx = make();
+    await ctx.poller.discover();
+    const query = ctx.driver.queryMode01.bind(ctx.driver);
+    let stalled = false;
+    let failedFastBatches = 0;
+    ctx.driver.queryMode01 = async (pids) => {
+      if (!stalled) return query(pids);
+      ctx.driver.calls.push({ at: ctx.clock.now(), kind: 'mode01', pids: [...pids] });
+      if (pids.includes(0x0d) && pids.length > 1 && ++failedFastBatches === 3) stalled = false;
+      throw new ElmError('TIMEOUT', 'No response within 1000 ms');
+    };
+    const running = ctx.poller.run();
+    await ctx.clock.advance(1000);
+    stalled = true;
+    await ctx.clock.advance(5000);
+    expect(failedFastBatches).toBe(3);
+    expect(ctx.poller.pidsPerRequest).toBe(6);
+    expect(ofType(ctx.events, 'obd/link')).toEqual([]);
+    expect(ctx.poller.latest('speed')?.at).toBeGreaterThan(ctx.clock.now() - 500);
+    ctx.poller.stop();
+    await running;
+  });
+
   it('does not count NO DATA or a silent vehicle as a batch failure', async () => {
     const ctx = make();
     const running = ctx.poller.run();
