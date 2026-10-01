@@ -1,7 +1,12 @@
 import { isEngineRunning } from '@carheadsup/core';
 import type { HudConfig, HudEvent, HudState, ObdConfig, ObdLinkStatus } from '@carheadsup/core';
-import { ObdService } from '@carheadsup/obd';
-import type { ClearDtcsOutcome, ObdServiceDeps, VehicleSimulator } from '@carheadsup/obd';
+import { ObdService, createTransport } from '@carheadsup/obd';
+import type {
+  ClearDtcsOutcome,
+  ObdServiceDeps,
+  RecordingOptions,
+  VehicleSimulator,
+} from '@carheadsup/obd';
 import type { RuntimeDeps } from '../sources/types.ts';
 import type { ObdProtocolFile } from './protocol-cache.ts';
 
@@ -47,6 +52,8 @@ export interface ObdLinkOptions {
   factory?: ObdServiceFactory;
   /** Remembers the vehicle's protocol across restarts (`<data dir>/obd-cache.json`). */
   protocolCache?: ObdProtocolFile | null;
+  /** Where adapter sessions are recorded while `obd.recordTranscript` is on. */
+  recording?: RecordingOptions;
 }
 
 /**
@@ -69,6 +76,9 @@ export class ObdLink {
       logger: deps.logger,
       ...(options.simulator ? { simulator: options.simulator } : {}),
       ...(this.protocolCache ? { protocolCache: this.protocolCache } : {}),
+      ...(options.recording !== undefined
+        ? { createTransport: (config) => createTransport(config, { recording: options.recording }) }
+        : {}),
     };
     this.service = (options.factory ?? createObdService)(options.config.obd, serviceDeps);
     this.unsubscribe = this.service.onEvent(options.onEvent);

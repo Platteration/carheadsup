@@ -156,6 +156,7 @@ export const DEFAULT_CONFIG: HudConfig = deepFreeze<HudConfig>({
     reconnectDelayMs: 3000,
     dtcIntervalMs: 30_000,
     customPids: [],
+    recordTranscript: false,
   },
   display: {
     projection: {

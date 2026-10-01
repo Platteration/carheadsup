@@ -14,6 +14,8 @@ export interface RuntimeOverrides {
   host?: string;
   /** `--tls-port` from the command line (null: TLS off). */
   tlsPort?: number | null;
+  /** `--record`: record the OBD adapter's traffic (`obd.recordTranscript`). */
+  record?: boolean;
 }
 
 /** Custom PIDs with the simulator's TPMS PIDs merged in (they replace user PIDs for the same signal). */
@@ -36,6 +38,9 @@ export function effectiveConfig(stored: HudConfig, overrides: RuntimeOverrides):
       ...(overrides.tlsPort !== undefined ? { tlsPort: overrides.tlsPort } : {}),
     },
   };
+  if (overrides.record === true) {
+    config = { ...config, obd: { ...config.obd, recordTranscript: true } };
+  }
   if (overrides.sim) {
     config = {
       ...config,

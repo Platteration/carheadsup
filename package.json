@@ -22,6 +22,7 @@
     "build:demo": "npm run build:demo --workspace @carheadsup/hud-renderer",
     "start": "node packages/hud-server/src/main.ts",
     "sim": "node packages/hud-server/src/tools/ensure-renderer.ts && node packages/hud-server/src/main.ts --sim",
+    "obd-replay": "node packages/obd/src/tools/obd-replay.ts",
     "dev": "npm run dev --workspace @carheadsup/hud-renderer",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

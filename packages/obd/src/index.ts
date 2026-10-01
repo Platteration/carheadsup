@@ -8,7 +8,31 @@ export type {
   SerialTransportOptions,
   TcpTransportOptions,
 } from './transport.ts';
+export type { CreateTransportOptions } from './transport.ts';
 export { SerialTransport, TcpTransport, TransportEvents, createTransport } from './transport.ts';
+export {
+  ManualClock,
+  describeEvent,
+  replayTranscript,
+  type ReplayOptions,
+  type ReplayResult,
+} from './replay.ts';
+export {
+  RecordingTransport,
+  TRANSCRIPT_FORMAT,
+  TRANSCRIPT_VERSION,
+  TranscriptTransport,
+  normalizeCommand,
+  parseTranscript,
+  type RecordingOptions,
+  type ReplayStats,
+  type Transcript,
+  type TranscriptEntry,
+  type TranscriptHeader,
+  type TranscriptSink,
+  type TranscriptSinkFactory,
+  type TranscriptTransportOptions,
+} from './transcript.ts';
 
 export {
   Elm327,

@@ -82,6 +82,12 @@ export interface ObdConfig {
   /** How often to read stored/pending DTCs. */
   dtcIntervalMs: number;
   customPids: CustomPidConfig[];
+  /**
+   * Record the raw traffic with a serial or Wi-Fi adapter to `<data dir>/obd-transcripts`, so
+   * that a misbehaving adapter or car can be replayed (`npm run obd-replay`) and turned into a
+   * test. Changing it reconnects the adapter (a transcript starts with its initialisation).
+   */
+  recordTranscript: boolean;
 }
 
 export type DrivingContext = 'parked' | 'stopped' | 'city' | 'highway';

@@ -303,3 +303,12 @@ above, `batteryVoltage`, or the four `tirePressure*` signals.
 To talk to the adapter by hand, stop the HUD (`sudo systemctl stop carheadsup`) and use a
 terminal program such as picocom (`sudo apt install picocom`):
 `picocom -b 38400 --omap crlf /dev/rfcomm0`, then type `ATZ`, `ATSP0`, `0100`, `010C`.
+
+For an adapter or car that misbehaves in ways the log does not explain, record its traffic
+(`obd.recordTranscript`, in the settings app *OBD connection → Record the adapter's traffic*, or
+`--record`): every command and every chunk of every answer, timed, in
+`/var/lib/carheadsup/obd-transcripts`. `npm run obd-replay -- <file>` replays it through the
+HUD's driver on any computer, and a recording can become a regression test
+([field testing](development.md#field-testing)). When the link to the adapter breaks, the HUD
+also writes its last 5,000 log lines, debug included, to `logs/debug-<time>.log`
+([logs](install-raspberry-pi.md#logs)).

@@ -23,6 +23,7 @@ describe('parseCli', () => {
       backlight: null,
       allowedHosts: [],
       logLevel: 'info',
+      record: false,
     });
   });
 
@@ -44,6 +45,7 @@ describe('parseCli', () => {
         'hud.fritz.box, car.lan',
         '--log-level',
         'DEBUG',
+        '--record',
       ]),
     ).toEqual({
       sim: true,
@@ -55,6 +57,7 @@ describe('parseCli', () => {
       backlight: '/sys/class/backlight/rpi_backlight',
       allowedHosts: ['hud.fritz.box', 'car.lan'],
       logLevel: 'debug',
+      record: true,
     });
   });
 
@@ -81,6 +84,7 @@ describe('parseCli', () => {
       CARHEADSUP_BACKLIGHT: 'off',
       CARHEADSUP_ALLOWED_HOSTS: 'pi.home',
       CARHEADSUP_LOG_LEVEL: 'warn',
+      CARHEADSUP_RECORD: 'yes',
     };
     expect(run([], env)).toEqual({
       sim: true,
@@ -92,6 +96,7 @@ describe('parseCli', () => {
       backlight: false,
       allowedHosts: ['pi.home'],
       logLevel: 'warn',
+      record: true,
     });
     expect(run(['--port', '1', '--data-dir', '/flag', '--log-level', 'error'], env)).toMatchObject({
       port: 1,
@@ -99,6 +104,11 @@ describe('parseCli', () => {
       logLevel: 'error',
     });
     expect(run([], { CARHEADSUP_SIM: '0' }).sim).toBe(false);
+    expect(run([], { CARHEADSUP_RECORD: 'off' }).record).toBe(false);
+    expect(parseCli([], { CARHEADSUP_RECORD: 'sometimes' }, HOME)).toEqual({
+      kind: 'error',
+      message: 'CARHEADSUP_RECORD: expected 1/0 or true/false, got "sometimes"',
+    });
     expect(run([], { CARHEADSUP_PORT: '' }).port).toBeUndefined();
   });
 

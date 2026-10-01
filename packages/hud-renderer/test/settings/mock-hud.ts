@@ -242,6 +242,13 @@ export class MockHud {
       obd: this.diagnostics.link,
       phoneConnected: true,
       tls: this.tls,
+      system: {
+        socTempC: 52.4,
+        underVoltage: false,
+        underVoltageSeen: true,
+        throttled: false,
+        throttledSeen: true,
+      },
     };
   }
 

@@ -49,6 +49,28 @@ export interface ApiInfo {
   phoneConnected: boolean;
   /** The TLS listener the phone connects to, or null when it is off or failed to start. */
   tls: ApiTlsInfo | null;
+  /**
+   * The HUD computer's own health — heat, supply, throttling — or null where the HUD cannot read
+   * any of it (no such files in /sys: not a Raspberry Pi, or not Linux). Absent from older
+   * servers.
+   */
+  system?: ApiSystemHealth | null;
+}
+
+/**
+ * The Raspberry Pi's temperature and supply, as its kernel and firmware report them. Each field
+ * is null when this machine does not report it. "Seen" covers the time since boot where the
+ * firmware tells (`get_throttled`), else since the server started.
+ */
+export interface ApiSystemHealth {
+  /** SoC temperature, °C (the Pi slows down from 80–85 °C). */
+  socTempC: number | null;
+  /** The supply is below what the Pi needs (under-voltage), now. */
+  underVoltage: boolean | null;
+  underVoltageSeen: boolean | null;
+  /** The CPU runs slowed down now: frequency capped, throttled or at its soft temperature limit. */
+  throttled: boolean | null;
+  throttledSeen: boolean | null;
 }
 
 /**

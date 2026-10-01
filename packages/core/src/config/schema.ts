@@ -244,6 +244,7 @@ const obdSchema = z.object({
     .array(customPidSchema)
     .max(64)
     .superRefine(uniqueBy((p) => p.signal, 'signal', 'signal')),
+  recordTranscript: z.boolean(),
 });
 
 const cornerSchema = z.tuple([num(0, 1), num(0, 1)]);

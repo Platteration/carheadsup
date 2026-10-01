@@ -4,6 +4,7 @@
  */
 import net from 'node:net';
 import type { ObdConfig } from '@carheadsup/core';
+import { RecordingTransport, type RecordingOptions } from './transcript.ts';
 
 export interface Transport {
   /** Open the link. Rejects when the device/host cannot be reached. */
@@ -272,13 +273,15 @@ export class TcpTransport implements Transport {
   }
 }
 
-/**
- * Create the configured hardware transport. The 'simulator' kind has no hardware transport;
- * {@link ObdService} builds an `Elm327Emulator` for it.
- *
- * @throws Error for the 'simulator' kind.
- */
-export function createTransport(config: ObdConfig): Transport {
+export interface CreateTransportOptions {
+  /**
+   * Where to record the session when `config.recordTranscript` is on (see `transcript.ts`);
+   * without it nothing is recorded.
+   */
+  recording?: RecordingOptions;
+}
+
+function hardwareTransport(config: ObdConfig): Transport {
   switch (config.transport) {
     case 'serial':
       return new SerialTransport({ path: config.serialPath, baudRate: config.baudRate });
@@ -287,4 +290,21 @@ export function createTransport(config: ObdConfig): Transport {
     case 'simulator':
       throw new Error("The 'simulator' transport is provided by ObdService (Elm327Emulator)");
   }
+}
+
+/**
+ * Create the configured hardware transport, recording its traffic when `config.recordTranscript`
+ * is on and `options.recording` says where to. The 'simulator' kind has no hardware transport;
+ * {@link ObdService} builds an `Elm327Emulator` for it.
+ *
+ * @throws Error for the 'simulator' kind.
+ */
+export function createTransport(
+  config: ObdConfig,
+  options: CreateTransportOptions = {},
+): Transport {
+  const transport = hardwareTransport(config);
+  return config.recordTranscript && options.recording !== undefined
+    ? new RecordingTransport(transport, options.recording)
+    : transport;
 }

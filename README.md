@@ -122,6 +122,10 @@ notification and sends it to the HUD.
   fuel and electrical values, trouble codes with descriptions, the current (or last) trip and
   service status. Codes can be cleared from the settings app, but only when parked with the
   engine off.
+- **Field diagnostics that survive the ignition**: log files on the data partition (the journal
+  of a car-powered Pi is gone at power-off), the last few thousand debug lines written out when
+  something breaks, the Pi's own temperature and supply under-voltage, and a recorder for the raw
+  OBD adapter traffic whose recordings replay on a laptop (`npm run obd-replay`) and become tests.
 
 ### Nice-to-haves
 

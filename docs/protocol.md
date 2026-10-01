@@ -806,7 +806,8 @@ name, `<hostname>.local` and localhost, not the HUD's Wi-Fi addresses.)
   "uptimeS": 5,
   "obd": { "state": "connected", "adapter": "ELM327 v1.5", "protocol": "ISO 15765-4 (CAN 11/500)", "message": null, "since": 1790190236113 },
   "phoneConnected": true,
-  "tls": { "port": 8443, "fingerprint": "fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531" }
+  "tls": { "port": 8443, "fingerprint": "fdc153eedca2b5364dd71c13e90afd8d47ff4c28be52f39bb2666a72bfdd4531" },
+  "system": { "socTempC": 54.3, "underVoltage": false, "underVoltageSeen": true, "throttled": false, "throttledSeen": false }
 }
 ```
 
@@ -814,6 +815,13 @@ name, `<hostname>.local` and localhost, not the HUD's Wi-Fi addresses.)
 reason in `message`). `tls` is the phone link's TLS listener — its port and its certificate's
 [fingerprint](#tls-and-the-huds-certificate) — or `null` when it is off (`server.tlsPort` null)
 or could not start (the log says why).
+
+`system` is the HUD computer's own health (`ApiSystemHealth`), read every 5 s: `socTempC` the SoC
+temperature in °C, `underVoltage` whether the supply is below what a Raspberry Pi needs and
+`throttled` whether its CPU is slowed down (frequency capped, throttled or at its soft
+temperature limit) — each now, and as `…Seen` since boot (where the firmware tells) or since the
+server started. A field is `null` where the machine does not report it, and `system` is `null`
+where none can be read (not a Pi, not Linux); older servers leave it out.
 
 ### Kiosk health
 

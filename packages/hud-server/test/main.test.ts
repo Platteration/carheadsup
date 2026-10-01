@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -19,8 +19,8 @@ interface Run {
 
 const children: ChildProcess[] = [];
 
-function launch(args: string[], env: Record<string, string> = {}): Run {
-  const child = spawn(process.execPath, [MAIN, ...args], {
+function launch(args: string[], env: Record<string, string> = {}, nodeArgs: string[] = []): Run {
+  const child = spawn(process.execPath, [...nodeArgs, MAIN, ...args], {
     env: { ...process.env, ...env, CARHEADSUP_DATA_DIR: env['CARHEADSUP_DATA_DIR'] ?? '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -111,6 +111,44 @@ describe('carheadsup CLI', () => {
       for (const line of run.output().trim().split('\n')) {
         expect(line).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z (DEBUG|INFO |WARN |ERROR) /);
       }
+      // The log also went to a file in the data directory, flushed before the exit.
+      const file = await readFile(join(temp.dir, 'logs', 'hud.log'), 'utf8');
+      expect(file).toMatch(/INFO {2}HUD server .* listening on 127\.0\.0\.1:\d+/);
+      expect(file.trimEnd().split('\n').at(-1)).toMatch(/HUD server stopped$/);
+    } finally {
+      await temp.cleanup();
+    }
+  }, 20_000);
+
+  it('writes the recent debug log to a file when it crashes', async () => {
+    const temp = await makeTempDir();
+    try {
+      await writeFile(
+        join(temp.dir, 'config.json'),
+        JSON.stringify(testConfig({ obd: { transport: 'simulator' }, server: { mdns: false } })),
+      );
+      // A bug that throws outside any handler, once the server runs.
+      const crash = `data:text/javascript,setTimeout(() => { throw new Error('test crash'); }, 2500)`;
+      const run = launch(
+        ['--data-dir', temp.dir, '--port', '0', '--host', '127.0.0.1', '--backlight', 'off'],
+        {},
+        ['--import', crash],
+      );
+      expect(await run.exited).toBe(1);
+      expect(run.output()).toMatch(/ERROR Fatal: uncaught exception: Error: test crash/);
+      expect(run.output()).toMatch(/INFO {2}Log: wrote the recent debug log to \S+debug-/);
+      const logs = await readdir(join(temp.dir, 'logs'));
+      const dump = logs.find((name) => name.startsWith('debug-'));
+      expect(dump).toBeDefined();
+      const text = await readFile(join(temp.dir, 'logs', dump ?? ''), 'utf8');
+      expect(text.split('\n')[0]).toBe('# carheadsup debug log: uncaught exception: test crash');
+      // Debug lines are in it although the log level is info: the OBD traffic, for one.
+      expect(text).toMatch(/DEBUG OBD → ATZ/);
+      expect(text).toMatch(/ERROR Fatal: uncaught exception/);
+      // And hud.log has the fatal line, written before the exit.
+      expect(await readFile(join(temp.dir, 'logs', 'hud.log'), 'utf8')).toMatch(
+        /ERROR Fatal: uncaught exception: Error: test crash/,
+      );
     } finally {
       await temp.cleanup();
     }

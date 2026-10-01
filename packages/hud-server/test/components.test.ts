@@ -191,6 +191,14 @@ describe('runtime overrides', () => {
     ]);
   });
 
+  it('records the OBD traffic with --record, without saving it', () => {
+    const stored = testConfig();
+    const effective = effectiveConfig(stored, { sim: false, record: true });
+    expect(effective.obd.recordTranscript).toBe(true);
+    expect(stored.obd.recordTranscript).toBe(false);
+    expect(effectiveConfig(stored, { sim: false, record: false }).obd.recordTranscript).toBe(false);
+  });
+
   it('changes nothing without overrides', () => {
     const stored = testConfig();
     expect(effectiveConfig(stored, { sim: false })).toEqual(stored);

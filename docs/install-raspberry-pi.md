@@ -600,9 +600,42 @@ journalctl -u 'obd-rfcomm@*' -b           # Bluetooth binding
 systemctl status carheadsup carheadsup-kiosk
 ```
 
+**The journal does not survive the ignition**: with the [read-only root](#read-only-root-file-system)
+or `Storage=volatile` it lives in RAM, and the Pi loses power seconds after the engine stops — so
+the log of the drive that went wrong is gone before you reach a laptop. The server therefore also
+keeps its own files in `/var/lib/carheadsup/logs` (on the data partition):
+
+- `hud.log` (and `hud.log.1` … `hud.log.4`, 2 MB each): the server's log at info level and
+  above — debug too while the log level is debug. Written to the card every 5 s, and at once for
+  every warning and error, so a power cut loses a few quiet seconds at most.
+- `debug-<time>.log`: the last 5,000 log lines at **every** level, debug included (the OBD
+  commands and answers among them), written when something goes wrong: the link to the OBD
+  adapter breaks, the HUD's display reports a page error, or the server crashes. At most one a
+  minute; the newest five are kept. The server's log names each one ("wrote the recent debug log
+  to …").
+
+```sh
+sudo tail -f /var/lib/carheadsup/logs/hud.log
+sudo ls -lt /var/lib/carheadsup/logs
+# to take them home: pack them on the Pi, then copy the archive from a laptop
+sudo tar -czf ~/hud-logs.tar.gz -C /var/lib/carheadsup logs obd-transcripts
+scp pi@hud.local:hud-logs.tar.gz .
+```
+
 For more detail uncomment `CARHEADSUP_LOG_LEVEL=debug` in `/etc/default/carheadsup` and
 `sudo systemctl restart carheadsup`. Log lines never contain request query strings (where remote
 renderer clients pass their token) or message content.
+
+The server also watches the Pi itself: its SoC temperature and the firmware's under-voltage and
+throttling flags. It logs each change ("under-voltage: the Pi's 5 V supply sags", "the SoC is at
+82 °C", and when it is fine again), reports them in `/api/info` (`system`), and the settings app
+shows them on its Status page (*HUD computer*). Under-voltage, even only "since start-up", means
+the 12 V → 5 V converter or its wiring is not up to the job: expect random resets and a corrupted
+card until it is fixed ([power](hardware.md#power), [heat](hardware.md#heat-and-sun)).
+
+To send a misbehaving OBD adapter's traffic to a developer, switch on *OBD connection → Record
+the adapter's traffic* in the settings app (or `--record`); the files land in
+`/var/lib/carheadsup/obd-transcripts` ([field testing](development.md#field-testing)).
 
 ## Troubleshooting
 
@@ -658,6 +691,8 @@ sudo nmcli connection delete carheadsup-hotspot  # if you created the hotspot
 | `/opt/carheadsup.prev` | root | The version before the last update (`install.sh --rollback`) |
 | `/etc/carheadsup/config.json` | `carheadsup`, 0600 | Configuration (contains the tokens); `config.json.bak` after a correction |
 | `/var/lib/carheadsup` | `carheadsup`, 0700 | `state.json` (odometer, learned gears, service records), `trips.jsonl`, `hud-id` and `tls.pem` (the HUD's identity and TLS key and certificate, which paired phones pin — keep them when moving to a new card, or pair the phone again) |
+| `/var/lib/carheadsup/logs` | `carheadsup`, 0700 | `hud.log` (rotated, 5 × 2 MB) and `debug-<time>.log` ([Logs](#logs)) |
+| `/var/lib/carheadsup/obd-transcripts` | `carheadsup`, 0700 | Recordings of the OBD adapter's traffic while `obd.recordTranscript` is on (at most 64 MB, the oldest deleted) |
 | `/var/lib/carheadsup-kiosk` | `carheadsup-kiosk`, 0700 | Home of the kiosk user |
 | `/etc/default/carheadsup` | root, 0644 | `CARHEADSUP_*` environment for the server |
 | `/etc/systemd/system/carheadsup.service` | root | The server |

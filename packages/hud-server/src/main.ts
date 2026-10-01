@@ -5,11 +5,18 @@
  * 2 on invalid arguments.
  */
 import { homedir, networkInterfaces } from 'node:os';
+import { join } from 'node:path';
+import { SYSTEM_TIMERS } from '@carheadsup/obd';
 import { createHudServer } from './app.ts';
 import type { HudServer } from './app.ts';
 import { USAGE, pageUrls, parseCli, serverUrls } from './cli.ts';
-import { createLogger } from './logger.ts';
+import { LOG_DIR, LogFiles } from './log-files.ts';
+import { LOG_LEVEL_RANK, createLogger } from './logger.ts';
+import type { LogLevel } from './logger.ts';
 import { HUD_VERSION } from './meta.ts';
+
+/** Longest wait for the log file to be flushed before the process exits anyway. */
+const LOG_CLOSE_TIMEOUT_MS = 3000;
 
 /** Non-internal IPv4 addresses of this machine (where the phone can reach the HUD). */
 function lanAddresses(): string[] {
@@ -24,6 +31,10 @@ function lanAddresses(): string[] {
 
 function describe(err: unknown): string {
   return err instanceof Error ? (err.stack ?? err.message) : String(err);
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 interface SystemErrorInfo {
@@ -95,25 +106,56 @@ async function main(): Promise<void> {
   }
 
   const options = parsed.options;
-  const logger = createLogger({ level: options.logLevel });
+  // Problems with the log files themselves go to the journal only.
+  const terminal = createLogger({ level: options.logLevel });
+  // The file gets info and above — and debug too while the log level is debug.
+  const fileLevel: LogLevel =
+    LOG_LEVEL_RANK[options.logLevel] < LOG_LEVEL_RANK.info ? options.logLevel : 'info';
+  const logFiles = new LogFiles({
+    dir: join(options.dataDir, LOG_DIR),
+    level: fileLevel,
+    timers: SYSTEM_TIMERS,
+    now: Date.now,
+    onProblem: (message) => terminal.warn(message),
+  });
+  const logger = createLogger({ level: options.logLevel, sinks: logFiles.sinks });
   process.title = 'carheadsup';
+
+  /** Write the recent debug log to a file (rate-limited), and say where. */
+  const dumpDebugLog = async (reason: string): Promise<void> => {
+    const path = await logFiles.dumpDebug(reason);
+    if (path !== null) logger.info(`Log: wrote the recent debug log to ${path} (${reason})`);
+  };
+  /** Flush the log file, but never wait long for a card that hangs. */
+  const closeLogs = (): Promise<void> =>
+    Promise.race([
+      logFiles.close(),
+      new Promise<void>((resolve) => setTimeout(resolve, LOG_CLOSE_TIMEOUT_MS).unref()),
+    ]);
 
   let server: HudServer | null = null;
   let exiting = false;
-  const exit = (code: number, reason: string): void => {
+  /** Shut down and exit; `dumpReason` also writes the recent debug log first. */
+  const exit = (code: number, reason: string, dumpReason?: string): void => {
     if (exiting) {
       logger.warn(`${reason} while shutting down; exiting immediately`);
       process.exit(1);
     }
     exiting = true;
+    const dumped = dumpReason === undefined ? Promise.resolve() : dumpDebugLog(dumpReason);
     const stopped = server?.stop() ?? Promise.resolve();
-    stopped.then(
-      () => process.exit(code),
-      (err: unknown) => {
-        logger.error(`Shutdown failed: ${describe(err)}`);
-        process.exit(1);
-      },
-    );
+    Promise.all([dumped, stopped])
+      .then(
+        () => code,
+        (err: unknown) => {
+          logger.error(`Shutdown failed: ${describe(err)}`);
+          return 1;
+        },
+      )
+      .then(async (status) => {
+        await closeLogs();
+        process.exit(status);
+      });
   };
 
   process.on('SIGINT', () => {
@@ -126,11 +168,11 @@ async function main(): Promise<void> {
   });
   process.on('uncaughtException', (err) => {
     logger.error(`Fatal: uncaught exception: ${describe(err)}`);
-    exit(1, 'Uncaught exception');
+    exit(1, 'Uncaught exception', `uncaught exception: ${errorMessage(err)}`);
   });
   process.on('unhandledRejection', (reason) => {
     logger.error(`Fatal: unhandled promise rejection: ${describe(reason)}`);
-    exit(1, 'Unhandled rejection');
+    exit(1, 'Unhandled rejection', `unhandled promise rejection: ${errorMessage(reason)}`);
   });
 
   logger.info(
@@ -141,7 +183,9 @@ async function main(): Promise<void> {
     sim: options.sim,
     backlight: options.backlight,
     allowedHosts: options.allowedHosts,
+    record: options.record,
     logger,
+    dumpDebugLog: (reason) => void dumpDebugLog(reason),
     ...(options.configPath !== undefined ? { configPath: options.configPath } : {}),
     ...(options.port !== undefined ? { port: options.port } : {}),
     ...(options.tlsPort !== undefined ? { tlsPort: options.tlsPort } : {}),
@@ -172,6 +216,7 @@ async function main(): Promise<void> {
     logger.error(`Fatal: ${failure.message}`);
     if (failure.stack !== null) logger.debug(`Start-up failure: ${failure.stack}`);
     exiting = true;
+    await closeLogs();
     process.exit(1);
   }
 }

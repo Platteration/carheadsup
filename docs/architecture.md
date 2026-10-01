@@ -348,7 +348,9 @@ wheel's call and media buttons, and the HUD follows the phone's call and media s
 3. Build the engine, the OBD link, the sensor sources (light, gesture, GPIO buttons, CAN and
    resistor-ladder steering-wheel buttons, ADAS UDP — each idles quietly when its hardware is
    absent or disabled), the frame sinks (backlight; the renderer channel tells the page whether
-   the backlight follows the brightness, so the page does not dim as well), the phone and
+   the backlight follows the brightness, so the page does not dim as well; the systemd watchdog,
+   see [liveness](#liveness-outside-the-page)), the Pi's health monitor (SoC temperature,
+   under-voltage and throttling, logged when they change and reported in `/api/info`), the phone and
    renderer channels, and the HTTP server — twice: over TLS on `server.tlsPort` with the HUD's
    self-signed certificate (made on the first start), for the phone and other devices, and
    plainly on `server.port`, for the Pi itself (other devices are sent to TLS); listen (TLS
@@ -382,7 +384,9 @@ default `~/.local/share/carheadsup`, and its `sim` subdirectory with `--sim`) ho
 | `state.json` | Odometer (and, for cars that do not report it, the last dash reading entered and the learned speed-to-distance scale), learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, the trip in progress (`PersistedState.activeTrip`, with wall-clock times), the last trip's sequence number (`tripSeq`), the HUD's wall clock at the write (`lastWallMs`, the next start's [floor](#engine-time-and-the-wall-clock)) and the phone's last location rounded to about 11 km (`lastLocation`, for night mode before the phone connects). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
 | `trips.jsonl` | One completed trip per line, oldest first; at most 5,000 trips (the oldest are dropped). | Appended when a trip ends |
 | `hud-id` | The HUD's identity on the phone link (22 base64url characters), which paired phones pin. A corrupt file is moved to `hud-id.corrupt` and replaced; phones then report a different HUD until paired again. | Once, on the first start |
+| `logs/` | `hud.log` (the server's log at info level and above, rotated at 2 MB, five files) and `debug-<time>.log` (the last 5,000 lines at every level, written when the OBD link breaks, the display reports a page error or the server crashes; the newest five kept). The journal of the recommended set-ups lives in RAM, so this is the log that survives the ignition. | `hud.log` every 5 s and at once for warnings and errors (`hud-server/src/log-files.ts`) |
 | `obd-cache.json` | The OBD protocol each adapter link's vehicle spoke last (`{"protocols": {"serial:/dev/rfcomm0": "6"}}`), so the next start finds the vehicle sooner (see [obd.md](obd.md#connection)). Only a hint: a missing or damaged file means a slower first connect. | When a session connects with another protocol than remembered |
+| `obd-transcripts/` | Recordings of the OBD adapter's traffic (`obd.recordTranscript`, `--record`): one JSON Lines file per connection, at most 64 MB in all. | Every 5 s while recording |
 | `tls.pem` | The HUD's TLS private key (ECDSA P-256) and self-signed certificate, which paired phones pin; mode `0600` (made so if it was readable by others). Made by the server itself (`hud-server/src/tls`), without the openssl command. A corrupt file (no key, no certificate, or a certificate for another key) is moved to `tls.pem.corrupt` (also `0600`) and replaced; phones then report "HUD certificate changed" until paired again. Not made while `server.tlsPort` is null. | Once, on the first start |
 
 A trip normally ends only after `trip.endAfterEngineOffMs` (5 min) without the engine or the

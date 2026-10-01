@@ -151,6 +151,7 @@ describe('createTransport', () => {
     reconnectDelayMs: 3000,
     dtcIntervalMs: 30_000,
     customPids: [],
+    recordTranscript: false,
   };
 
   it('builds the configured hardware transport', () => {

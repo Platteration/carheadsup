@@ -5,6 +5,7 @@ Everything here runs on an ordinary Linux or macOS machine; no car, Pi or phone 
 - [Setup](#setup)
 - [Everyday workflow](#everyday-workflow)
 - [Tests](#tests)
+- [Field testing](#field-testing)
 - [Screenshots](#screenshots)
 - [Conventions](#conventions)
 - [How to add a widget](#how-to-add-a-widget)
@@ -29,6 +30,7 @@ Everything here runs on an ordinary Linux or macOS machine; no car, Pi or phone 
 | `npm start` | The server without the simulator (talks to a real adapter per `config.json`). |
 | `npm test` | All unit and integration tests (vitest). |
 | `npm run test:e2e` | Browser end-to-end tests (Playwright), see [Tests](#tests). |
+| `npm run obd-replay -- <file>` | Replays a recorded OBD-II adapter session through the real driver and poller and prints what the HUD would have received, see [Field testing](#field-testing). |
 | `npm run typecheck` | `tsc` for every workspace and for `e2e/`. One package: `npx tsc -p packages/<pkg>/tsconfig.json`; the browser tests: `npx tsc -p e2e/tsconfig.json`. |
 | `npm run format` / `npm run format:check` | Prettier. |
 
@@ -117,7 +119,9 @@ into happy-dom. What covers what:
 - **obd** — the driver against scripted transports, the poller, the service's reconnect loop,
   and end-to-end tests (`e2e.test.ts`) of the real driver and poller against the ELM327 emulator
   and vehicle simulator — as a CAN car, a K-line (ISO 9141-2) car (`bus: 'iso9141'`) and a clone
-  without ISO-TP flow control (`multiFrame: false`), the timing-sensitive ones on a fake clock.
+  without ISO-TP flow control (`multiFrame: false`), the timing-sensitive ones on a fake clock —
+  and the recorded adapter sessions in `test/transcripts/`, replayed (`transcript.test.ts`, see
+  [Field testing](#field-testing)).
 - **hud-server** — the REST API, auth, static files, both WebSockets, stores, sensors (with fake
   I²C buses, fake `gpiomon` and real UDP sockets on port 0), the engine; `smoke.test.ts` runs
   the complete server with the real simulation and sockets, and `main.test.ts` spawns the CLI.
@@ -155,10 +159,65 @@ They need a Chromium binary: the first that exists of `$PW_CHROMIUM`,
 one they skip themselves. `npm run typecheck` checks `e2e/` too.
 
 The deployment kit has its own checks, which need no root and change nothing:
-`deploy/check.sh` runs `bash -n` (and `shellcheck` when installed) on the scripts, the behaviour
-tests in `deploy/test/` (the kiosk launcher against stub `curl` and `chromium` commands, the
-installer's port detection), `systemd-analyze verify` on the units and `xmllint` on the Avahi
-file.
+`deploy/check.sh` runs `bash -n` (and `shellcheck` and `shfmt` when installed) on the scripts,
+the behaviour tests in `deploy/test/` (the kiosk launcher and its watchdog against stub `curl` and
+`chromium` commands, the installer's port detection, and its update path: the power-cut-safe
+swap, `--rollback` and the automatic rollback), `systemd-analyze verify` on the units and
+`xmllint` on the Avahi file.
+
+## Field testing
+
+The simulator only exercises what it implements; the first drive with a real adapter is where
+things go wrong — and the Pi loses power, and its journal, seconds after the ignition. What to
+bring home, and how to turn it into a test:
+
+**A laptop in the passenger seat.** With a USB or Bluetooth ELM327 on the laptop (or a Wi-Fi one
+on its Wi-Fi), run the server there against the car, with the developer console open:
+
+```sh
+npm run build
+npm start -- --data-dir ./field --log-level debug --record
+```
+
+and in `./field/config.json` set `obd.transport` to `serial` with `obd.serialPath`
+(`/dev/rfcomm0`, `/dev/ttyUSB0`, `/dev/tty.OBDII-…` on macOS) or to `tcp` with `obd.tcpHost` /
+`obd.tcpPort` (usually `192.168.0.10:35000`). Open `http://localhost:8080/dev` for the live HUD
+and the settings app's *Diagnostics* for every value and its age. In the debug log each request
+shows as `OBD → 010D0C…` and its answer as `OBD ← …`: a healthy adapter answers within about
+50–150 ms, so the fast values (speed, rpm) arrive several times a second.
+
+**On the HUD itself**, nothing needs preparing: the server keeps `logs/hud.log` and writes the
+last 5,000 lines at every level to `logs/debug-<time>.log` when the OBD link breaks, the display
+reports an error or the server crashes ([logs](install-raspberry-pi.md#logs)). For the OBD
+adapter's own traffic, switch on *OBD connection → Record the adapter's traffic* in the settings
+app before the drive (or run with `--record`).
+
+**Transcripts.** A recording (`<data dir>/obd-transcripts/obd-<time>.jsonl`, one file per
+connection) holds everything the HUD wrote to the adapter and every chunk it got back, unmerged
+and timed: what the format of a clone's answers, its echo, a line split across Bluetooth packets,
+`SEARCHING...` or `BUFFER FULL` really looked like. Replay it on any computer, without the car:
+
+```sh
+npm run obd-replay -- obd-2026-10-01T07-30-00.000Z.jsonl            # the events, as text
+npm run obd-replay -- obd-….jsonl --debug                           # with the driver's log
+npm run obd-replay -- obd-….jsonl --protocol 6 --timeout 2000       # the HUD's obd settings
+npm run obd-replay -- obd-….jsonl --out before.jsonl                # save the events …
+npm run obd-replay -- obd-….jsonl --expect before.jsonl             # … and compare after a fix
+```
+
+The replay runs the real driver, poller and service on a manual clock (an hour replays in
+seconds) and answers each command with the chunks recorded after the same command, at the
+recorded delays. It reports how many commands it could answer from the recording: when the code
+asks differently than it did in the car, unknown commands get `OK` (AT commands) or `NO DATA`, so
+a replay of a long drive stays useful even after the poller changed.
+
+**From a field bug to a test.** Commit the transcript under `packages/obd/test/transcripts/` (it
+holds the car's VIN — replace it in the file if you mind) and add a case to
+[`transcript.test.ts`](../packages/obd/test/transcript.test.ts) that replays it and checks the
+decoded values: the speed, rpm and trouble codes the car really had. `emulator-can-chunked.jsonl`
+is the example, made from the emulator by `test/transcripts/record-emulator.ts`. A drive
+(not just the adapter) is replayed through the core with the `Harness` instead, see
+[Replaying drives](#replaying-drives).
 
 ## Screenshots
 

@@ -100,6 +100,8 @@ const CONNECTION_KEYS = [
   'tcpHost',
   'tcpPort',
   'protocol',
+  // A transcript starts with the adapter's initialisation, so recording starts a new session.
+  'recordTranscript',
 ] as const;
 
 type Phase = 'open' | 'init' | 'discover' | 'poll';

@@ -17,6 +17,7 @@ const CONFIG: ObdConfig = {
   reconnectDelayMs: 3000,
   dtcIntervalMs: 30_000,
   customPids: [],
+  recordTranscript: false,
 };
 
 /** A transport that cannot be opened (no such device). */

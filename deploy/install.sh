@@ -776,7 +776,8 @@ carheadsup is installed.
   code     ${PREFIX}
   config   ${CONFIG_FILE}   (created with defaults and a random pairing code on the first start)
   data     ${DATA_DIR}   (tls.pem: the HUD's TLS key and certificate, made on the first start)
-  logs     journalctl -u carheadsup -f     (kiosk: journalctl -u carheadsup-kiosk -f)
+  logs     journalctl -u carheadsup -f     (kiosk: journalctl -u carheadsup-kiosk -f);
+           kept across power cuts in ${DATA_DIR}/logs
   settings ${settings}
   phone    ${phone}
 EOF

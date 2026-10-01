@@ -132,9 +132,11 @@ gear is one up or down from the last one shown.
 | `obd.reconnectDelayMs` | `3000` | 100–600000 | Delay before reconnecting after a failure; doubles after each consecutive failure, never more than 30 s — so values above `30000` act as `30000`. |
 | `obd.dtcIntervalMs` | `30000` | 1000–3600000 | How often trouble codes are read (also right after connecting). |
 | `obd.customPids` | `[]` | up to 64 | Manufacturer-specific PIDs, see [below](#custom-pids-and-tpms). |
+| `obd.recordTranscript` | `false` | | Record the raw traffic with a serial or Wi-Fi adapter to `<data dir>/obd-transcripts` (one file per connection, at most 64 MB in all, the oldest deleted), to replay it on a computer and turn a misbehaving adapter or car into a test ([field testing](development.md#field-testing)). `--record` switches it on without saving. |
 
-Changing the transport, device, host, port, baud rate or protocol reconnects the adapter; the
-timeout, DTC interval and custom PIDs apply without reconnecting. More in [obd.md](obd.md).
+Changing the transport, device, host, port, baud rate, protocol or `recordTranscript` reconnects
+the adapter; the timeout, DTC interval and custom PIDs apply without reconnecting. More in
+[obd.md](obd.md).
 
 ### display.projection
 
@@ -639,7 +641,8 @@ A real flat tyre that reads exactly 0 from the moment the HUD starts therefore s
 | `--renderer-dir <dir>` | `CARHEADSUP_RENDERER_DIR` | `packages/hud-renderer/dist` | Built web pages to serve. |
 | `--backlight <how>` | `CARHEADSUP_BACKLIGHT` | `auto` (with `--sim`: `sysfs`) | The backlight the HUD dims ([which one to use](hardware.md#dimming-the-backlight)): `auto` = the first writable Linux backlight device, else a display that takes its brightness over DDC/CI (when `ddcutil` is installed); `sysfs` or `sysfs:<dir>` (or just the directory, e.g. `/sys/class/backlight/rpi_backlight`) = a Linux backlight device; `ddc` or `ddc:<bus>` = an HDMI monitor or driver board over DDC/CI (`/dev/i2c-<bus>`; written at most once a second, only for changes of 3 % or more, and used only after it has applied a test change); `pwm:<chip>/<channel>[,hz=<Hz>][,min=<%>][,inverted]` = a PWM channel wired to the panel's dimming input (default 25 kHz, minimum duty 1 %); `off` = never touch it (the page is dimmed instead). A device that is missing or not usable at start-up is looked for again every 10 s (a DDC/CI display at most every minute). |
 | `--allowed-hosts <names>` | `CARHEADSUP_ALLOWED_HOSTS` | none | Extra host names (comma-separated) under which browsers may reach the HUD: DNS names (letters, digits, hyphens, underscores; anything else stops the server with an error). IP addresses, `localhost`, the machine's host name and `<hostname>.local` always work; requests for any other name get `403` ([DNS-rebinding protection](architecture.md#security-model)). |
-| `--log-level <level>` | `CARHEADSUP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
+| `--log-level <level>` | `CARHEADSUP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. The log also goes to `<data dir>/logs/hud.log` (info and above, debug too at `debug`), and the last lines at every level to `logs/debug-<time>.log` when something goes wrong ([logs](install-raspberry-pi.md#logs)). |
+| `--record` | `CARHEADSUP_RECORD=1` | off | Record the OBD adapter's traffic, as `obd.recordTranscript` does. Not saved. |
 | `-h`, `--help` | | | Usage. |
 | `-v`, `--version` | | | Version. |
 

@@ -64,6 +64,9 @@ describe('settings app', () => {
     await ready(root);
     expect(text(root.querySelector('.pill'))).toBe('Simulator');
     expect(text(section(root, 'status'))).toContain('OBDLink MX+ (STN2255)');
+    expect(text(section(root, 'status'))).toContain('HUD computer');
+    expect(text(section(root, 'status'))).toContain('52 °C · supply OK');
+    expect(text(section(root, 'status'))).toContain('The supply sagged since start-up');
     await waitFor(() => text(section(root, 'diagnostics')).includes('P0420'));
     expect(text(section(root, 'diagnostics'))).toContain('Catalytic converter efficiency');
     expect(text(section(root, 'diagnostics'))).toContain('Check engine on');
@@ -106,6 +109,23 @@ describe('settings app', () => {
     expect(field(section(root, 'alerts'), 'Warn at').classList.contains('field--dirty')).toBe(
       false,
     );
+  });
+
+  it('switches recording the OBD adapter’s traffic on, for a real adapter only', async () => {
+    const hud = new MockHud();
+    const root = start(hud);
+    await ready(root);
+    const obd = () => section(root, 'obd');
+    expect(text(field(obd(), 'Record the adapter’s traffic'))).toContain('obd-transcripts');
+    const record = field(obd(), 'Record the adapter’s traffic').querySelector<HTMLInputElement>(
+      'input[type=checkbox]',
+    )!;
+    expect(record.checked).toBe(false);
+    await check(record, true);
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => text(saveBar(root)) === 'Saved');
+    expect(patches(hud)).toEqual([{ obd: { recordTranscript: true } }]);
+    expect(hud.config.obd.recordTranscript).toBe(true);
   });
 
   it('edits how far ahead highway traffic appears', async () => {

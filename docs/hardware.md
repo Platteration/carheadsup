@@ -219,6 +219,11 @@ leave the car, without corrupting the SD card and without draining the battery.
   split it), long after such a power-down: the saved trip is closed at the next start (ending at
   its last activity) and then appears in the trip log and on the phone — or continued, if the
   car was off only briefly.
+- **Check the supply.** The HUD logs an under-voltage the moment the Pi's firmware reports one,
+  and the settings app's Status page shows it (*HUD computer*: "Under-voltage", or "the supply
+  sagged since start-up"). Crank the engine with the HUD running and look: any under-voltage
+  means a weak converter, thin wires or a bad connection — the usual cause of random resets and
+  corrupted SD cards in a car.
 - **Don't drain the battery.** Never power the Pi from permanent 12 V without a controller that
   switches it off: a Pi 4 idling at 2–3 W takes roughly 5 Ah from the battery per day. A halted
   Pi 4 or 5 still draws power unless the bootloader is told to switch off completely on halt
@@ -542,6 +547,8 @@ A dashboard in the sun easily reaches 70–100 °C.
   over it) when parked in the sun.
 - **The Pi** throttles at about 80–85 °C. Use a case with a heat sink, keep it out of direct sun
   (under the dashboard rather than on it) and give it some airflow; the Pi 5 needs its cooler.
+  The HUD logs a warning from 80 °C and when the CPU is slowed down, and shows its temperature on
+  the settings app's Status page.
 - **Batteries**: lithium cells in a hot car age fast and can fail dangerously; prefer supercapacitor
   UPS boards.
 - **SD cards and adhesives**: use parts rated for the temperature, and mechanical fixings rather

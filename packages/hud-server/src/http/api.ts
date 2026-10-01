@@ -15,6 +15,7 @@ import type {
   ApiInfo,
   ApiKioskHealth,
   ApiPairingShowResult,
+  ApiSystemHealth,
   ApiTlsInfo,
   DeepPartial,
   HudConfig,
@@ -74,6 +75,8 @@ export interface ApiDeps {
   refreshPairing?(): void;
   /** The heartbeat of the HUD's own display (`GET /api/kiosk/health`). */
   kioskHealth?(): KioskHealth;
+  /** The HUD computer's temperature and supply (`/api/info`), null where unknown. */
+  systemHealth?(): ApiSystemHealth | null;
 }
 
 /** Why `POST /api/pairing/show` is refused right now, or null when the page may come up. */
@@ -175,6 +178,7 @@ export function createApiRouter(deps: ApiDeps): Router {
       obd: linkStatus(state),
       phoneConnected: state.phone.connected,
       tls: deps.tls(),
+      system: deps.systemHealth?.() ?? null,
     };
     return ok(info);
   });

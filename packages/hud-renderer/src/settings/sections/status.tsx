@@ -1,4 +1,4 @@
-import type { ApiInfo, ObdLinkState } from '@carheadsup/core';
+import type { ApiInfo, ApiSystemHealth, ObdLinkState } from '@carheadsup/core';
 import { useState } from 'preact/hooks';
 import { describeError, isHudApiError } from '../../common/api.ts';
 import type { HudApi } from '../../common/api.ts';
@@ -22,6 +22,47 @@ export const OBD_STATE_TONES: Readonly<Record<ObdLinkState, Tone>> = {
   connected: 'ok',
   error: 'critical',
 };
+
+/** The Pi starts slowing down from about this SoC temperature. */
+const SOC_HOT_C = 80;
+
+export interface SystemHealthSummary {
+  tone: Tone;
+  value: string;
+  /** Temperature and supply in a few words. */
+  sub: string | null;
+  /** What went wrong earlier, if anything. */
+  note: string | null;
+}
+
+/** The "HUD computer" tile: the Pi's temperature, supply and throttling. */
+export function systemHealthSummary(system: ApiSystemHealth): SystemHealthSummary {
+  const hot = system.socTempC !== null && system.socTempC >= SOC_HOT_C;
+  let tone: Tone = 'ok';
+  let value = 'OK';
+  if (system.underVoltage === true) {
+    tone = 'critical';
+    value = 'Under-voltage';
+  } else if (system.throttled === true) {
+    tone = 'caution';
+    value = 'Slowed down';
+  } else if (hot) {
+    tone = 'caution';
+    value = 'Hot';
+  }
+  const parts: string[] = [];
+  if (system.socTempC !== null) parts.push(`${Math.round(system.socTempC)} °C`);
+  if (system.underVoltage !== null) {
+    parts.push(system.underVoltage ? 'check the 5 V supply' : 'supply OK');
+  }
+  let note: string | null = null;
+  if (system.underVoltage !== true && system.underVoltageSeen === true) {
+    note = 'The supply sagged since start-up: check the 5 V converter and its wiring';
+  } else if (system.throttled !== true && system.throttledSeen === true) {
+    note = 'Slowed down since start-up (heat or supply)';
+  }
+  return { tone, value, sub: parts.length > 0 ? parts.join(' · ') : null, note };
+}
 
 /** True when the error means "wrong or missing token". */
 export function needsToken(error: unknown): boolean {
@@ -91,6 +132,7 @@ export function StatusSection({ api, info, onTokenChange }: StatusSectionProps) 
                 {data.phoneConnected ? 'Navigation, calls and media' : 'Open the companion app'}
               </p>
             </div>
+            {data.system != null && <SystemTile system={data.system} />}
           </div>
           <p class="status-meta">
             <span>{data.simulated ? 'Vehicle simulator' : 'Live vehicle'}</span>
@@ -101,6 +143,21 @@ export function StatusSection({ api, info, onTokenChange }: StatusSectionProps) 
       )}
       {!needsToken(info.error) && <TokenCard api={api} onSaved={onTokenChange} />}
     </Section>
+  );
+}
+
+function SystemTile({ system }: { system: ApiSystemHealth }) {
+  const summary = systemHealthSummary(system);
+  return (
+    <div class="tile">
+      <p class="tile__label">HUD computer</p>
+      <p class="tile__value">
+        <StatusDot tone={summary.tone} />
+        {summary.value}
+      </p>
+      {summary.sub !== null && <p class="tile__sub">{summary.sub}</p>}
+      {summary.note !== null && <p class="tile__sub tile__sub--note">{summary.note}</p>}
+    </div>
   );
 }
 

@@ -83,6 +83,7 @@ describe('DEFAULT_CONFIG', () => {
       reconnectDelayMs: 3000,
       dtcIntervalMs: 30000,
       customPids: [],
+      recordTranscript: false,
     });
     expect(c.display.projection.mirrorX).toBe(true);
     expect(c.display.projection.mirrorY).toBe(false);

@@ -9,6 +9,7 @@ import {
   SegmentedField,
   SelectField,
   TextField,
+  ToggleField,
 } from '../ui/fields.tsx';
 import type { Option } from '../ui/fields.tsx';
 
@@ -122,6 +123,14 @@ export function ObdSection({ root }: { root: Scope<HudConfig> }) {
             />
           </FieldGrid>
         </details>
+        {transport !== 'simulator' && (
+          <ToggleField
+            scope={obd}
+            k="recordTranscript"
+            label="Record the adapter’s traffic"
+            hint="For a bug report: keeps the raw conversation with the adapter in the HUD’s obd-transcripts folder, where it can be replayed on a computer. Changing it reconnects the adapter."
+          />
+        )}
       </Card>
       <FieldGroup>
         <p class="muted small">Manufacturer-specific PIDs are set up under Vehicle.</p>

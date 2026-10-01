@@ -289,6 +289,8 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     advertiseHud: () => null,
     // Whatever the machine running the tests says: no network time unless a test says so.
     clockSynchronized: () => false,
+    // The test machine's own temperature has no place in the tests.
+    sysRoot: null,
     ...options,
   });
   let port: number;

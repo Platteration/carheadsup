@@ -11,6 +11,7 @@ import type {
   HudConfig,
   HudFrame,
   HudToPhone,
+  ObdLinkState,
   PairingEndpoint,
 } from '@carheadsup/core';
 import { SILENT_LOGGER, SYSTEM_CLOCK, SYSTEM_TIMERS } from '@carheadsup/obd';
@@ -34,6 +35,7 @@ import { DEFAULT_RENDERER_DIR, HUD_VERSION } from './meta.ts';
 import { ObdLink } from './obd/obd-link.ts';
 import { OBD_CACHE_FILE, ObdProtocolFile } from './obd/protocol-cache.ts';
 import type { ObdServiceFactory } from './obd/obd-link.ts';
+import { TRANSCRIPT_DIR, TranscriptFiles } from './obd/transcripts.ts';
 import { createFrameSinks as defaultCreateFrameSinks } from './outputs/index.ts';
 import type { FrameSinkOptions } from './outputs/index.ts';
 import { effectiveConfig } from './runtime-config.ts';
@@ -54,6 +56,7 @@ import { HUD_ID_FILE, loadHudId } from './store/hud-id.ts';
 import { PersistStore } from './store/persist-store.ts';
 import { TripStore } from './store/trip-store.ts';
 import type { CertificateBundle } from './tls/certificate.ts';
+import { SystemHealthMonitor } from './system/health.ts';
 import { createSystemdWatchdog } from './system/watchdog.ts';
 import type { WatchdogOptions } from './system/watchdog.ts';
 import { systemClockSynchronized } from './time-sync.ts';
@@ -103,6 +106,11 @@ export interface HudServerOptions {
   /** Override `server.host`. Never written to the config file. */
   host?: string;
   /**
+   * Record the OBD adapter's traffic to `<dataDir>/obd-transcripts` (`--record`), as
+   * `obd.recordTranscript` does. Never written to the config file.
+   */
+  record?: boolean;
+  /**
    * Override `server.tlsPort` (0 = any free port, null = no TLS listener). Never written to the
    * config file.
    */
@@ -149,6 +157,17 @@ export interface HudServerOptions {
    */
   pairingHosts?: (listenHost: string) => string[];
   createObdService?: ObdServiceFactory;
+  /**
+   * Where the HUD computer's health (temperature, under-voltage, throttling) is read: the sysfs
+   * root, default `/sys`; null reads none (see `system/health.ts`).
+   */
+  sysRoot?: string | null;
+  /**
+   * Called when something went wrong that the recent debug log may explain: the OBD link was
+   * lost, the HUD's own display reported a page error. The command line writes the in-memory
+   * debug log to a file then (see `log-files.ts`).
+   */
+  dumpDebugLog?: (reason: string) => void;
   tuning?: HudServerTuning;
 }
 
@@ -206,6 +225,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
     ...(options.port !== undefined ? { port: options.port } : {}),
     ...(options.host !== undefined ? { host: options.host } : {}),
     ...(options.tlsPort !== undefined ? { tlsPort: options.tlsPort } : {}),
+    ...(options.record === true ? { record: true } : {}),
   };
   const dataDir = resolve(options.dataDir);
   const configPath = resolve(options.configPath ?? join(dataDir, CONFIG_FILE));
@@ -246,6 +266,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
   let boundTlsPort: number | null = null;
   let tlsIdentity: CertificateBundle | null = null;
   let mdns: Service | null = null;
+  let health: SystemHealthMonitor | null = null;
   /** The HUD's identity on the phone link (challenge, welcome, mDNS TXT `id`). */
   let hudId: string | null = null;
   let sources: EventSource[] = [];
@@ -601,11 +622,27 @@ export function createHudServer(options: HudServerOptions): HudServer {
     });
     engine = hudEngine;
 
+    let obdState: ObdLinkState | null = null;
+    const transcripts = new TranscriptFiles({ dir: join(dataDir, TRANSCRIPT_DIR), timers, logger });
+    if (config.obd.recordTranscript && config.obd.transport === 'simulator') {
+      logger.info('OBD: the simulator is not recorded; recording applies to a real adapter');
+    }
     obd = new ObdLink({
       config,
       simulator: simulation?.vehicle ?? null,
       deps,
-      onEvent: (event) => hudEngine.dispatch(event),
+      recording: { createSink: transcripts.createSink },
+      onEvent: (event) => {
+        if (event.type === 'obd/link') {
+          // A link that worked and broke (the adapter vanished or stopped making sense) — not
+          // one that never came up, nor a car whose ignition went off (the adapter stays).
+          if (obdState === 'connected' && event.state === 'error') {
+            options.dumpDebugLog?.(`OBD link lost: ${event.message ?? 'no reason given'}`);
+          }
+          obdState = event.state;
+        }
+        hudEngine.dispatch(event);
+      },
       protocolCache: await ObdProtocolFile.load(join(dataDir, OBD_CACHE_FILE), logger),
       ...(options.createObdService ? { factory: options.createObdService } : {}),
     });
@@ -666,6 +703,10 @@ export function createHudServer(options: HudServerOptions): HudServer {
       hardwareBrightness: () => sinks.some((sink) => sink.drivesBrightness === true),
       // Engine time: a step of the system clock does not age the kiosk's heartbeat.
       monotonic: () => hudEngine.now(),
+      onClientError: (report) => {
+        if (report.fromHud)
+          options.dumpDebugLog?.(`page error on the HUD's display: ${report.message}`);
+      },
       authorize: (auth, cfg) =>
         isAuthorized({
           remoteAddress: auth.remoteAddress,
@@ -726,6 +767,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
       tls: tlsInfo,
       refreshPairing: refreshPairingEndpoint,
       kioskHealth: () => rendererChannel.kioskHealth(),
+      systemHealth: () => health?.snapshot() ?? null,
       simulation:
         sim === null
           ? null
@@ -795,6 +837,16 @@ export function createHudServer(options: HudServerOptions): HudServer {
 
     hudEngine.start();
     if (wallClock.source !== 'network') scheduleClockCheck();
+    const sysRoot = options.sysRoot === undefined ? '/sys' : options.sysRoot;
+    if (sysRoot !== null) {
+      const monitor = new SystemHealthMonitor({ sysRoot, timers, logger });
+      health = monitor;
+      try {
+        await monitor.start();
+      } catch (err) {
+        logger.warn(`System: cannot read the health: ${describe(err)}`);
+      }
+    }
     listenHost = config.server.host;
     refreshPairingEndpoint();
     obd.start();
@@ -924,6 +976,10 @@ export function createHudServer(options: HudServerOptions): HudServer {
     if (simulation !== null) {
       const sim = simulation;
       await step('simulation', () => sim.stop());
+    }
+    if (health !== null) {
+      const monitor = health;
+      await step('system health', () => monitor.stop());
     }
     if (obd !== null) {
       const link = obd;

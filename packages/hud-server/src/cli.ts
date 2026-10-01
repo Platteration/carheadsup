@@ -17,6 +17,8 @@ export interface CliOptions {
   host: string | undefined;
   /** Overrides `server.tlsPort` when set (null: no TLS listener). */
   tlsPort: number | null | undefined;
+  /** Record the OBD adapter's traffic (`obd.recordTranscript`, not saved). */
+  record: boolean;
   rendererDir: string | undefined;
   /**
    * Which backlight to dim (a valid `--backlight` setting, see `outputs/backlight-spec.ts`);
@@ -63,13 +65,18 @@ Options:
                          HUD; IP addresses, localhost, <hostname> and <hostname>.local always
                          work, other names are refused (DNS-rebinding protection)
   --log-level <level>    ${LOG_LEVELS.join(' | ')} (default: info)
+  --record               Record the raw OBD-II adapter traffic to <data-dir>/obd-transcripts,
+                         as obd.recordTranscript does (replay: npm run obd-replay -- <file>)
   -h, --help             Show this help
   -v, --version          Show the version
 
 Every option can also be set in the environment: CARHEADSUP_SIM=1, CARHEADSUP_CONFIG,
 CARHEADSUP_DATA_DIR, CARHEADSUP_PORT, CARHEADSUP_TLS_PORT, CARHEADSUP_HOST,
-CARHEADSUP_RENDERER_DIR, CARHEADSUP_BACKLIGHT, CARHEADSUP_ALLOWED_HOSTS, CARHEADSUP_LOG_LEVEL.
-Command-line flags take precedence.
+CARHEADSUP_RENDERER_DIR, CARHEADSUP_BACKLIGHT, CARHEADSUP_ALLOWED_HOSTS, CARHEADSUP_LOG_LEVEL,
+CARHEADSUP_RECORD=1. Command-line flags take precedence.
+
+The log also goes to <data-dir>/logs/hud.log (info and above, debug too with --log-level
+debug), and the last lines at every level to logs/debug-<time>.log when something goes wrong.
 `;
 
 const TRUE_WORDS = new Set(['1', 'true', 'yes', 'on']);
@@ -139,6 +146,7 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
         backlight: { type: 'string' },
         'allowed-hosts': { type: 'string' },
         'log-level': { type: 'string' },
+        record: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -159,6 +167,21 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
         return {
           kind: 'error',
           message: `CARHEADSUP_SIM: expected 1/0 or true/false, got "${raw}"`,
+        };
+      }
+    }
+  }
+
+  let record = values.record ?? false;
+  if (values.record === undefined) {
+    const raw = env['CARHEADSUP_RECORD'];
+    if (raw !== undefined) {
+      const word = raw.trim().toLowerCase();
+      if (TRUE_WORDS.has(word)) record = true;
+      else if (!FALSE_WORDS.has(word)) {
+        return {
+          kind: 'error',
+          message: `CARHEADSUP_RECORD: expected 1/0 or true/false, got "${raw}"`,
         };
       }
     }
@@ -235,6 +258,7 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
       backlight,
       allowedHosts,
       logLevel: level,
+      record,
     },
   };
 }
