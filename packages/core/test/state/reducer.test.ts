@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DATA_GAP_GRACE_MS } from '../../src/display/context.ts';
+import { DATA_GAP_GRACE_MS, UNPARK_CREEP_MS } from '../../src/display/context.ts';
 import { staleLimitMs } from '../../src/staleness.ts';
 import {
   EMPTY_PERSISTED_STATE,
@@ -18,6 +18,7 @@ import {
   MESSAGE_TTL_MS,
   PHONE_DATA_GRACE_MS,
   ROAD_TTL_MS,
+  isDashboardShown,
   kmSinceConfirmed,
 } from '../../src/state/selectors.ts';
 import type { HudEvent } from '../../src/types/events.ts';
@@ -892,9 +893,57 @@ describe('tick', () => {
 
   it('does not open the dashboard during a long start-stop red light (regression: core-12)', () => {
     const h = driving(40);
-    h.run(h.now + 120_000, { speed: 0, rpm: 0 }, 500); // engine stopped by start-stop
+    // The engine stopped by start-stop for nearly 3 minutes (longer than parkedAfterMs), then
+    // restarting as the light turns green: never parked, not even when the engine restarts.
+    h.run(h.now + 170_000, { speed: 0, rpm: 0 }, 500);
     expect(h.state.context.context).toBe('stopped');
     expect(h.frame().diagnostics).toBeNull();
+    h.run(h.now + 3000, { speed: 0, rpm: 900 }, 500);
+    expect(h.state.context.context).toBe('stopped');
+    expect(h.frame().diagnostics).toBeNull();
+  });
+
+  it('brings the driving layout back within a second of creeping off the parked dashboard', () => {
+    // Idling at a standstill in a jam for over parkedAfterMs parks the HUD …
+    const h = driving(40);
+    h.run(h.now + 130_000, { speed: 0, rpm: 800 }, 500);
+    expect(h.state.context.context).toBe('parked');
+    expect(isDashboardShown(h.state)).toBe(true);
+    // … and the jam creeps on at 3 km/h: the speed is back a second after the first reading.
+    const firstCreepAt = h.now + 200;
+    h.run(firstCreepAt + UNPARK_CREEP_MS, { speed: 3, rpm: 900 }, 200);
+    expect(h.state.context.context).toBe('stopped');
+    expect(isDashboardShown(h.state)).toBe(false);
+    const frame = h.frame();
+    expect(frame.diagnostics).toBeNull();
+    expect(widget(frame, 'speed')).toBeDefined();
+    // A minute of creeping never parks again.
+    h.run(h.now + 60_000, { speed: 3, rpm: 900 }, 500);
+    expect(h.state.context.context).toBe('stopped');
+    expect(isDashboardShown(h.state)).toBe(false);
+  });
+
+  it('does not park in a jam while the phone guides along a route', () => {
+    const h = driving(40);
+    h.phoneConnected();
+    h.send({ type: 'nav/update', nav: navInfo(), at: h.now });
+    h.run(h.now + 300_000, { speed: 0, rpm: 800 }, 1000);
+    expect(h.state.context.context).toBe('stopped');
+    expect(h.frame().diagnostics).toBeNull();
+    // Guidance ends (arrived): idling parks as before.
+    h.send({ type: 'nav/clear', at: h.now });
+    h.run(h.now + 1000, { speed: 0, rpm: 800 }, 1000);
+    expect(h.state.context.context).toBe('parked');
+  });
+
+  it('parks as before when the engine is switched off and the ECU falls silent', () => {
+    const h = driving(40);
+    h.phoneConnected();
+    h.send({ type: 'nav/update', nav: navInfo(), at: h.now });
+    h.run(h.now + 3000, { speed: 0, rpm: 750 });
+    h.idle(h.now + staleLimitMs('speed') + DATA_GAP_GRACE_MS);
+    expect(h.state.context.context).toBe('parked');
+    expect(isDashboardShown(h.state)).toBe(true);
   });
 
   it('does not park on a 2.5 s OBD data gap at a red light (regression: core-11)', () => {

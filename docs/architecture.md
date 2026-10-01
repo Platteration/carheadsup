@@ -197,13 +197,15 @@ The reducer derives one of four contexts from speed, engine state and link state
 
 | Context | When (defaults from `display.context`) |
 | --- | --- |
-| `parked` | Standing completely still with the engine off for 3 min (`engineOffParkedAfterMs`; long, so automatic start-stop does not open the dashboard at red lights), standing completely still with the engine running for 2 min (`parkedAfterMs`), or stopped with no vehicle data at all: at once when the adapter link is down, 10 s after the last speed reading when the link is up but the ECU has fallen silent (ignition off). Sticky until the car actually moves. |
+| `parked` | Standing completely still with the engine off for 3 min (`engineOffParkedAfterMs`; long, so automatic start-stop does not open the dashboard at red lights), standing completely still with the engine running for 2 min (`parkedAfterMs`; not while the phone guides along a route or the transmission reports a gear engaged — that is a jam or a level crossing — and an engine stop of 3 s or more restarts it, so a start-stop red light never parks when the engine restarts), or stopped with no vehicle data at all: at once when the adapter link is down, 10 s after the last speed reading when the link is up but the ECU has fallen silent (ignition off). Starting the engine alone does not leave it; moving does, and so does creeping at 1 km/h or more for 1 s (`UNPARK_CREEP_MS`), which returns to `stopped`. |
 | `stopped` | Below 2 km/h (`stationaryKph`) but not yet parked; left again only above `stationaryKph` + 2 km/h. |
 | `highway` | At least 80 km/h (`highwayEnterKph`) for 10 s (`highwayDwellMs`); left below 65 km/h (`highwayExitKph`). |
 | `city` | Moving otherwise. |
 
 Two safety exceptions: a car known to be moving is never `parked` (hybrids drive and creep with
-the engine off, so creeping restarts both parking timers), and a moving context is never left on
+the engine off, so creeping restarts every parking timer, and creeping off the parked dashboard —
+inching along in a jam, at a level crossing, in a drive-through queue — brings the driving
+layout back within a second), and a moving context is never left on
 missing data alone — only a speed reading (0 once the adapter is back) ends it, so a dead adapter
 at speed never throws the full-screen dashboard up. The flip side: an adapter that dies at speed
 and comes back to a silent ECU leaves the moving layout up until the next drive.

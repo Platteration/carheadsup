@@ -298,9 +298,10 @@ function ContextThresholds({ root }: { root: Scope<HudConfig> }) {
         <NumberField
           scope={context}
           k="parkedAfterMs"
-          label="Parked after standing still for"
+          label="Parked after idling for"
           unit={SECONDS_FROM_MS}
           integer
+          hint="Standing still with the engine running; not while navigating or in gear."
         />
         <NumberField
           scope={context}

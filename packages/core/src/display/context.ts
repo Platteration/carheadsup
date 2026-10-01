@@ -6,6 +6,17 @@ export interface ContextInput {
   speedKph: number | null;
   engineRunning: boolean;
   linkUp: boolean;
+  /**
+   * The phone is guiding along a route. Standing still with the engine running does not park
+   * the HUD while it does: that is a traffic jam or a level crossing on the way somewhere.
+   */
+  routeActive: boolean;
+  /**
+   * The gear the transmission reports (PID 0xA4: 0 = neutral or park), null when unknown or
+   * stale. A gear engaged at a standstill (an automatic held in D, a manual with the clutch
+   * down) means traffic, not parking.
+   */
+  reportedGear: number | null;
 }
 
 /** All fields are plain numbers/strings/null, so the state is JSON-serialisable. */
@@ -28,6 +39,17 @@ export interface ContextState {
    * off); reset by any creeping, like `stillSince`.
    */
   engineOffSince: number | null;
+  /**
+   * When the engine was last seen running at a complete standstill (the `parkedAfterMs`
+   * timer). Reset by any creeping and by an engine stop that lasts `ENGINE_STOP_CONFIRM_MS`
+   * (automatic start-stop at a long red light), not by a momentarily stale rpm reading.
+   */
+  idleSince: number | null;
+  /**
+   * While parked: when the vehicle started creeping (speed of at least `STILL_KPH`); parked
+   * gives way to 'stopped' once that has lasted `UNPARK_CREEP_MS`. Null otherwise.
+   */
+  creepSince: number | null;
 }
 
 /**
@@ -47,6 +69,20 @@ export const STILL_KPH = 1;
  */
 export const DATA_GAP_GRACE_MS = 10_000;
 
+/**
+ * Creeping (speed of at least `STILL_KPH`, below the moving threshold) for this long ends
+ * 'parked': the car is being driven — inching along in a jam, at a level crossing, in a
+ * drive-through queue — so the full-screen dashboard gives way to the driving layout.
+ */
+export const UNPARK_CREEP_MS = 1000;
+
+/**
+ * An engine that has stopped at a standstill for this long (automatic start-stop) restarts
+ * the `parkedAfterMs` timer once it runs again, so a long start-stop red light never parks the
+ * moment the engine restarts. Shorter stops (an rpm reading that went stale for a moment) do not.
+ */
+export const ENGINE_STOP_CONFIRM_MS = 3000;
+
 export function createContextState(now: number): ContextState {
   return {
     context: 'parked',
@@ -56,6 +92,8 @@ export function createContextState(now: number): ContextState {
     stillSince: null,
     lastSpeedAt: null,
     engineOffSince: null,
+    idleSince: null,
+    creepSince: null,
   };
 }
 
@@ -80,20 +118,23 @@ function next(
  * Derive the driving context with hysteresis so the layout does not flicker:
  *  - parked:  at a complete standstill with the engine off for ≥ engineOffParkedAfterMs (so
  *             automatic start-stop does not flash the parked dashboard at red lights), at a
- *             complete standstill with the engine running for ≥ parkedAfterMs, or stopped with
- *             no vehicle data at all: at once when the link is down, after DATA_GAP_GRACE_MS
- *             when the link is up but the ECU has fallen silent (ignition off). Parked is sticky
- *             until the vehicle actually moves (starting the engine alone does not leave it).
+ *             complete standstill with the engine running for ≥ parkedAfterMs (not while the
+ *             phone guides along a route or the transmission reports a gear engaged), or
+ *             stopped with no vehicle data at all: at once when the link is down, after
+ *             DATA_GAP_GRACE_MS when the link is up but the ECU has fallen silent (ignition
+ *             off). Starting the engine alone does not leave it; moving does, and so does
+ *             creeping for UNPARK_CREEP_MS.
  *  - stopped: stationary (< stationaryKph, left again only at stationaryKph + hysteresis) but not
- *             yet parked.
+ *             parked.
  *  - highway: ≥ highwayEnterKph sustained for highwayDwellMs; left below highwayExitKph.
  *  - city:    moving otherwise.
  *
  * Safety exceptions: a vehicle known to be moving is never 'parked' (hybrids drive and creep
- * with the engine off, so creeping restarts both parking timers), and a moving context is
- * never left on missing data alone — only a speed reading (e.g. 0 once the adapter is back)
- * can end it, so a dead adapter at speed never brings up the full-screen dashboard.
- * While speed is unknown but the link is up and the engine runs, the context is held.
+ * with the engine off, so creeping restarts all parking timers, and creeping while parked —
+ * a jam, a level crossing, a drive-through queue — returns to 'stopped' within a second), and a
+ * moving context is never left on missing data alone — only a speed reading (e.g. 0 once the
+ * adapter is back) can end it, so a dead adapter at speed never brings up the full-screen
+ * dashboard. While speed is unknown but the link is up and the engine runs, the context is held.
  */
 export function updateContext(
   state: ContextState,
@@ -122,27 +163,47 @@ export function updateContext(
 
   if (speed < movingThreshold) {
     const stationarySince = state.stationarySince ?? at;
-    const stillSince =
-      speed < Math.min(config.stationaryKph, STILL_KPH) ? (state.stillSince ?? at) : null;
+    const still = speed < Math.min(config.stationaryKph, STILL_KPH);
+    const stillSince = still ? (state.stillSince ?? at) : null;
     // Like `stillSince`, engine-off time only counts at a complete standstill: a hybrid (or a
     // start-stop engine) creeping along in a jam is still driving.
     const engineOffSince =
       !input.engineRunning && stillSince !== null ? (state.engineOffSince ?? at) : null;
+    const engineStopped = engineOffSince !== null && at - engineOffSince >= ENGINE_STOP_CONFIRM_MS;
+    const idleSince =
+      stillSince === null || engineStopped
+        ? null
+        : input.engineRunning
+          ? (state.idleSince ?? at)
+          : state.idleSince;
+    // Idling for a long time parks only when nothing says the car is on its way somewhere.
+    const idleMayPark =
+      !input.routeActive && (input.reportedGear === null || input.reportedGear === 0);
+    const creepSince = state.context === 'parked' && !still ? (state.creepSince ?? at) : null;
     const parked =
-      state.context === 'parked' ||
+      (state.context === 'parked' && (creepSince === null || at - creepSince < UNPARK_CREEP_MS)) ||
       (engineOffSince !== null && at - engineOffSince >= config.engineOffParkedAfterMs) ||
-      (stillSince !== null && at - stillSince >= config.parkedAfterMs);
+      (idleSince !== null && idleMayPark && at - idleSince >= config.parkedAfterMs);
     return next(state, parked ? 'parked' : 'stopped', at, {
       stationarySince,
       stillSince,
       highwayCandidateSince: null,
       lastSpeedAt: at,
       engineOffSince,
+      idleSince,
+      creepSince: parked ? creepSince : null,
     });
   }
 
   // Moving.
-  const moving = { stationarySince: null, stillSince: null, lastSpeedAt: at, engineOffSince: null };
+  const moving = {
+    stationarySince: null,
+    stillSince: null,
+    lastSpeedAt: at,
+    engineOffSince: null,
+    idleSince: null,
+    creepSince: null,
+  };
   if (state.context === 'highway') {
     return speed < config.highwayExitKph
       ? next(state, 'city', at, { ...moving, highwayCandidateSince: null })

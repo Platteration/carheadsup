@@ -204,8 +204,12 @@ The thresholds of the [driving contexts](architecture.md#driving-contexts-and-ad
 | `display.context.highwayDwellMs` | `10000` | 0–600000 | …held for this long. |
 | `display.context.highwayExitKph` | `65` | 10–250 | Leave `highway` below this. |
 | `display.context.stationaryKph` | `2` | 0.5–20 | Below this the car counts as stopped. |
-| `display.context.parkedAfterMs` | `120000` | 0–86400000 | Standing completely still with the engine running this long ⇒ `parked`. |
+| `display.context.parkedAfterMs` | `120000` | 0–86400000 | Standing completely still with the engine running this long ⇒ `parked` — but not while the phone guides along a route or the transmission reports a gear engaged (PID A4, where the car has it): that is a jam or a level crossing on the way. An engine stop of 3 s or more (automatic start-stop) restarts the timer, so a long red light does not park the moment the engine restarts. |
 | `display.context.engineOffParkedAfterMs` | `180000` | 0–86400000 | Standing completely still with the engine off this long ⇒ `parked`. Long enough that automatic start-stop does not open the dashboard at red lights (they often last 45–120 s); switching the ignition off is caught much sooner, because the ECU stops answering (`parked` 10 s after the last speed reading). The trade-off: with the ignition still on and the engine off (accessory mode), clearing trouble codes, which needs `parked`, waits this long — the dashboard itself opens at once with the next-page button while stopped (see below). Creeping along with the engine off (a hybrid in a jam) restarts the timer. |
+
+`parked` ends as soon as the car moves (above `stationaryKph` + 2 km/h) or has crept at 1 km/h or
+more for a second, which returns to `stopped` — so the dashboard never stays up while the car inches
+along in a jam. Creeping also restarts both timers above.
 
 While `stopped`, the driver can open the full diagnostics dashboard at once with `next-page` /
 `prev-page` (a button, the kiosk's arrow keys or the companion app's remote); further presses flip

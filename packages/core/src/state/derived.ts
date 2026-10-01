@@ -24,7 +24,10 @@ import {
  * the raw inputs in `HudState`. Shared by the sample, tick and config handlers.
  */
 
-/** Advance the driving context from the current (fresh-or-null) speed and engine state. */
+/**
+ * Advance the driving context from the current (fresh-or-null) speed and engine state, the
+ * phone's route guidance and the reported gear.
+ */
 export function advanceContext(state: HudState, config: HudConfig): HudState['context'] {
   return updateContext(
     state.context,
@@ -33,6 +36,8 @@ export function advanceContext(state: HudState, config: HudConfig): HudState['co
       speedKph: freshSpeedKph(state),
       engineRunning: isEngineRunning(state),
       linkUp: isObdLinkUp(state),
+      routeActive: state.nav !== null,
+      reportedGear: freshSignal(state, 'transmissionGear'),
     },
     config.display.context,
   );

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   DATA_GAP_GRACE_MS,
+  ENGINE_STOP_CONFIRM_MS,
   STATIONARY_HYSTERESIS_KPH,
+  UNPARK_CREEP_MS,
   createContextState,
   updateContext,
 } from '../../src/display/context.ts';
@@ -23,6 +25,8 @@ const input = (s: Sample): ContextInput => ({
   speedKph: null,
   engineRunning: true,
   linkUp: true,
+  routeActive: false,
+  reportedGear: null,
   ...s,
 });
 
@@ -73,6 +77,8 @@ describe('createContextState', () => {
       stillSince: null,
       lastSpeedAt: null,
       engineOffSince: null,
+      idleSince: null,
+      creepSince: null,
     });
   });
 });
@@ -267,6 +273,160 @@ describe('updateContext', () => {
       expect(hw.context).toBe('highway');
       const s = updateContext(hw, input({ at: 600_000, linkUp: false }), CONFIG);
       expect(s).toBe(hw);
+    });
+  });
+
+  describe('leaving parked by creeping', () => {
+    /** Idled at a standstill with the engine running until parked (a jam, a level crossing). */
+    function idledParked(): ContextState {
+      const states = run(stoppedState(0), [
+        { at: 1000, speedKph: 0 },
+        { at: 131_000, speedKph: 0 },
+      ]);
+      expect(last(states).context).toBe('parked');
+      return last(states);
+    }
+
+    it('returns to stopped once creeping has lasted UNPARK_CREEP_MS (regression: jam creep)', () => {
+      const states = run(idledParked(), [
+        { at: 140_000, speedKph: 3 },
+        { at: 140_000 + UNPARK_CREEP_MS - 1, speedKph: 2 },
+        { at: 140_000 + UNPARK_CREEP_MS, speedKph: 3 },
+      ]);
+      expect(contexts(states)).toEqual(['parked', 'parked', 'stopped']);
+      expect(last(states).since).toBe(140_000 + UNPARK_CREEP_MS);
+      expect(last(states).creepSince).toBeNull();
+      // A minute of creeping at 1–3 km/h never parks again (it never counts as standing still).
+      const creeping: Sample[] = [];
+      for (let t = 142_000; t <= 202_000; t += 500) {
+        creeping.push({ at: t, speedKph: 1 + (Math.floor(t / 500) % 3) });
+      }
+      expect(new Set(contexts(run(last(states), creeping)))).toEqual(new Set(['stopped']));
+    });
+
+    it('stays parked when a creep reading is not held', () => {
+      const states = run(idledParked(), [
+        { at: 140_000, speedKph: 2 },
+        { at: 140_500, speedKph: 0 },
+        { at: 141_500, speedKph: 3 },
+        { at: 142_000, speedKph: 0 },
+      ]);
+      expect(contexts(states)).toEqual(['parked', 'parked', 'parked', 'parked']);
+      expect(last(states).creepSince).toBeNull();
+    });
+
+    it('holds the creep timer through a momentarily unknown speed', () => {
+      const states = run(idledParked(), [
+        { at: 140_000, speedKph: 3 },
+        { at: 140_500, speedKph: null },
+        { at: 141_000, speedKph: 3 },
+      ]);
+      expect(contexts(states)).toEqual(['parked', 'parked', 'stopped']);
+    });
+
+    it('also leaves an engine-off park (a hybrid pulling away on electric power)', () => {
+      const parked = last(
+        run(stoppedState(0), [
+          { at: 2000, speedKph: 0, engineRunning: false },
+          { at: 40_000, speedKph: 0, engineRunning: false },
+        ]),
+      );
+      expect(parked.context).toBe('parked');
+      const states = run(parked, [
+        { at: 50_000, speedKph: 2, engineRunning: false },
+        { at: 51_000, speedKph: 2, engineRunning: false },
+      ]);
+      expect(contexts(states)).toEqual(['parked', 'stopped']);
+    });
+  });
+
+  describe('parking with the engine running', () => {
+    const START_STOP: ContextConfig = {
+      ...CONFIG,
+      parkedAfterMs: 120_000,
+      engineOffParkedAfterMs: 180_000,
+    };
+
+    it('does not park at a long start-stop red light, nor when the engine restarts', () => {
+      // The engine stops at the light; 170 s later it restarts as the light turns green.
+      const states = run(
+        stoppedState(0),
+        [
+          { at: 2000, speedKph: 0, engineRunning: false },
+          { at: 121_000, speedKph: 0, engineRunning: false },
+          { at: 170_000, speedKph: 0, engineRunning: false },
+          { at: 171_000, speedKph: 0, engineRunning: true },
+          { at: 173_000, speedKph: 0, engineRunning: true },
+          { at: 175_000, speedKph: 8, engineRunning: true },
+        ],
+        START_STOP,
+      );
+      expect(contexts(states)).toEqual([
+        'stopped',
+        'stopped',
+        'stopped',
+        'stopped',
+        'stopped',
+        'city',
+      ]);
+    });
+
+    it('restarts the idle timer after an engine stop, then parks after parkedAfterMs', () => {
+      const states = run(
+        stoppedState(0),
+        [
+          { at: 2000, speedKph: 0, engineRunning: false },
+          { at: 2000 + ENGINE_STOP_CONFIRM_MS, speedKph: 0, engineRunning: false },
+          { at: 10_000, speedKph: 0 },
+          { at: 129_999, speedKph: 0 },
+          { at: 130_000, speedKph: 0 },
+        ],
+        START_STOP,
+      );
+      expect(contexts(states)).toEqual(['stopped', 'stopped', 'stopped', 'stopped', 'parked']);
+    });
+
+    it('keeps the idle timer through a momentarily stale rpm reading', () => {
+      const states = run(stoppedState(0), [
+        { at: 1000, speedKph: 0 },
+        { at: 60_000, speedKph: 0, engineRunning: false },
+        { at: 60_000 + ENGINE_STOP_CONFIRM_MS - 1, speedKph: 0, engineRunning: false },
+        { at: 63_500, speedKph: 0 },
+        { at: 121_000, speedKph: 0 },
+      ]);
+      expect(contexts(states)).toEqual(['stopped', 'stopped', 'stopped', 'stopped', 'parked']);
+    });
+
+    it('does not park while the phone guides along a route; parks once it ends', () => {
+      const samples: Sample[] = [];
+      for (let t = 1000; t <= 600_000; t += 5000) {
+        samples.push({ at: t, speedKph: 0, routeActive: true });
+      }
+      const states = run(stoppedState(0), samples);
+      expect(new Set(contexts(states))).toEqual(new Set(['stopped']));
+      const ended = updateContext(
+        last(states),
+        input({ at: 601_000, speedKph: 0, routeActive: false }),
+        CONFIG,
+      );
+      expect(ended.context).toBe('parked');
+    });
+
+    it('does not park while the transmission reports a gear engaged', () => {
+      const states = run(stoppedState(0), [
+        { at: 1000, speedKph: 0, reportedGear: 1 },
+        { at: 300_000, speedKph: 0, reportedGear: 1 },
+        { at: 301_000, speedKph: 0, reportedGear: 0 },
+      ]);
+      expect(contexts(states)).toEqual(['stopped', 'stopped', 'parked']);
+    });
+
+    it('still parks with the engine off whatever the route or gear says', () => {
+      const states = run(stoppedState(0), [
+        { at: 2000, speedKph: 0, engineRunning: false, routeActive: true, reportedGear: 1 },
+        { at: 32_000, speedKph: 0, engineRunning: false, routeActive: true, reportedGear: 1 },
+      ]);
+      expect(contexts(states)).toEqual(['stopped', 'parked']);
     });
   });
 
