@@ -906,12 +906,7 @@ describe('server lifecycle', () => {
     await waitFor(() => t2.server.engine.state.trip.lastCompleted !== null, 2000, 'trip completed');
     const trips = (await call(t2, 'GET', '/api/trips')).body as TripRecord[];
     expect(trips).toHaveLength(1);
-    expect(trips[0]).toMatchObject({ distanceKm: 8.3 });
-    // To the ms: engine time counts on the monotonic clock from the system clock's whole ms, so
-    // the wall clock's offset measured at the start can be 1 ms either way.
-    expect(
-      Math.abs((trips[0]?.startedAt ?? Number.NaN) - (trip.startedAt - hour)),
-    ).toBeLessThanOrEqual(1);
+    expect(trips[0]).toMatchObject({ startedAt: trip.startedAt - hour, distanceKm: 8.3 });
     expect(t2.server.engine.state.trip.active).toBeNull();
   });
 

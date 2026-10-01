@@ -44,6 +44,14 @@ const ERROR_LOG_INTERVAL_MS = 10_000;
  */
 export const CLOCK_SYNC_TOLERANCE_MS = 2000;
 
+/**
+ * A measured offset this close to the one the core has is the same offset: engine time counts on
+ * in fractions of a millisecond from the system clock's whole ms, and the system clock reads
+ * whole ms, so a fresh measurement of an unchanged offset rounds to ±1 ms. Passing that on would
+ * move every wall time the core converts (a restored trip's start comes back 1 ms off).
+ */
+export const CLOCK_OFFSET_ROUNDING_MS = 1;
+
 /** Where the engine's side effects go. Implemented by the app (phone link, stores). */
 export interface EngineOutputs {
   /** Deliver a message to the connected phone (and the simulated phone, when simulating). */
@@ -339,7 +347,11 @@ export class HudEngine {
   private syncClock(at: number, force: boolean): void {
     const wall = this.time.wall();
     if (wall === null) return;
-    const offset = Math.round(wall - at);
+    const measured = Math.round(wall - at);
+    const offset =
+      Math.abs(measured - this.syncedOffset) <= CLOCK_OFFSET_ROUNDING_MS
+        ? this.syncedOffset
+        : measured;
     const moved = offset - this.syncedOffset;
     const trusted = this.clockTrusted();
     const trustChanged = trusted !== this.syncedTrusted;

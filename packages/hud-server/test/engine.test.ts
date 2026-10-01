@@ -161,6 +161,26 @@ describe('HudEngine time', () => {
     expect(engine.state.clock.wallOffsetMs).toBe(-2 * 3_600_000);
   });
 
+  it('takes a fresh measurement of an unchanged offset as unchanged, though it rounds to ±1 ms', () => {
+    // The system clock reads whole ms; engine time counts on in fractions of a ms.
+    const fraction = { ms: 0 };
+    const { engine } = makeEngine({
+      now: () => Date.now(),
+      monotonic: () => Date.now() + fraction.ms,
+    });
+    engine.start();
+    expect(engine.state.clock.wallOffsetMs).toBe(0);
+    fraction.ms = 0.6; // wall − engine time = −0.6, which rounds to −1
+    engine.dispatch({ type: 'clock/sync', wallOffsetMs: 0, at: 0 });
+    expect(engine.state.clock.wallOffsetMs).toBe(0);
+    fraction.ms = 1.4; // −1.4 rounds to −1 too (engine time never runs backwards, so only forward)
+    engine.dispatch({ type: 'clock/sync', wallOffsetMs: 0, at: 0 });
+    expect(engine.state.clock.wallOffsetMs).toBe(0);
+    fraction.ms = 3; // a real step of the system clock, 3 ms back, is followed
+    engine.dispatch({ type: 'clock/sync', wallOffsetMs: 0, at: 0 });
+    expect(engine.state.clock.wallOffsetMs).toBe(-3);
+  });
+
   it('starts with the trust it is given and passes a change on at once', () => {
     const { clock, now, monotonic } = steppableClock();
     let trusted = false;
