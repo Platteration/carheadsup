@@ -379,6 +379,7 @@ install_system_files() {
   if command -v udevadm >/dev/null 2>&1; then
     udevadm control --reload-rules || true
     udevadm trigger --subsystem-match=backlight --action=add || true
+    udevadm trigger --subsystem-match=pwm --action=add || true
   fi
 
   if [[ ! -e $ENV_FILE ]]; then
@@ -457,7 +458,8 @@ start_services() {
 report_missing_tools() {
   local -a missing=()
   local entry tool package
-  local -a tools=(avahi-publish-service:avahi-utils gpiomon:gpiod i2cdetect:i2c-tools rfcomm:bluez)
+  local -a tools=(avahi-publish-service:avahi-utils gpiomon:gpiod i2cdetect:i2c-tools rfcomm:bluez
+    ddcutil:ddcutil)
   for entry in "${tools[@]}"; do
     tool=${entry%%:*}
     package=${entry#*:}

@@ -592,8 +592,8 @@ plain sockets with code 4005.
 }
 ```
 
-`hardwareBrightness` is true while the server drives the display's Linux backlight from the
-frames' `theme.brightness`; the HUD page then draws at full brightness instead of dimming the
+`hardwareBrightness` is true while the server drives the display's backlight (a Linux backlight
+device, a monitor over DDC/CI or a PWM dimming input) from the frames' `theme.brightness`; the HUD page then draws at full brightness instead of dimming the
 content with a CSS filter as well (which would give about b × b^2.2 instead of b). It changes —
 and a new `display` message is sent — when the backlight device appears after start-up (the
 server looks for it again every 10 s) or stops working. Pages that are not lit by that

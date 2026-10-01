@@ -110,8 +110,9 @@ notification and sends it to the HUD.
 - **Adaptive clutter** by driving context — *parked*, *stopped*, *city*, *highway* — with
   hysteresis so the layout never flickers. The highway view shows the least.
 - **Auto-brightness and night mode** from an I²C light sensor (BH1750, VEML7700, TSL2591) or,
-  without one, from the sun's position (phone GPS or a fixed location). Drives the panel backlight
-  when there is one, and the page brightness in any case.
+  without one, from the sun's position (phone GPS, a fixed location or the time zone) or the
+  clock. Drives the panel backlight — a Linux backlight device, an HDMI monitor over DDC/CI or a
+  PWM dimming input — and the page brightness otherwise.
 - **Shift light** (bar that fills and flashes near your shift point).
 - **Trip logging** with distance, time, fuel and cost; each finished trip is pushed to the phone;
   CSV export from the settings app or `GET /api/trips.csv`.

@@ -13,7 +13,10 @@ import {
   type BacklightFs,
 } from '../../src/outputs/backlight.ts';
 import { createFrameSinks } from '../../src/outputs/index.ts';
-import { FakeClock, memoryLogger } from '../sensors/fakes.ts';
+import { FakeClock, fakeSpawn, memoryLogger, respond } from '../sensors/fakes.ts';
+
+/** `ddcutil` is not installed: auto-detection finds no DDC/CI display. */
+const noDdcutil = () => fakeSpawn((child) => child.failToStart('ENOENT'));
 
 function frame(brightness: number, blanked = false): HudFrame {
   return { blanked, theme: { night: false, brightness } } as HudFrame;
@@ -89,7 +92,7 @@ describe('BacklightSink', () => {
     const { clock, deps } = setup();
     const sink = new BacklightSink({ directory: dir }, deps);
     sink.onFrame(frame(0.5)); // arrives before the device is opened
-    expect(await sink.whenReady()).toEqual({ directory: dir, maxBrightness: 255 });
+    expect(await sink.whenReady()).toMatchObject({ directory: dir, maxBrightness: 255 });
     await sink.whenIdle();
     expect(await readLevel(dir)).toBe('55');
     await clock.advance(BACKLIGHT_MIN_INTERVAL_MS);
@@ -210,8 +213,11 @@ describe('BacklightSink', () => {
     await mkdir(broken);
     const good = await device('b-panel', 100);
     const { deps, logger } = setup();
-    const [sink] = createFrameSinks({ backlight: null }, deps, { backlightRoot: root });
-    expect(await (sink as BacklightSink).whenReady()).toEqual({
+    const [sink] = createFrameSinks({ backlight: null }, deps, {
+      backlightRoot: root,
+      spawn: noDdcutil(),
+    });
+    expect(await (sink as BacklightSink).whenReady()).toMatchObject({
       directory: good,
       maxBrightness: 100,
     });
@@ -223,6 +229,7 @@ describe('BacklightSink', () => {
     const { deps, logger } = setup();
     const [sink] = createFrameSinks({ backlight: null }, deps, {
       backlightRoot: join(root, 'missing'),
+      spawn: noDdcutil(),
     });
     expect(await (sink as BacklightSink).whenReady()).toBeNull();
     expect(logger.lines('warn')).toEqual([]);
@@ -240,7 +247,11 @@ describe('BacklightSink', () => {
         throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
       },
     };
-    const [sink] = createFrameSinks({ backlight: null }, deps, { backlightRoot: root, fs });
+    const [sink] = createFrameSinks({ backlight: null }, deps, {
+      backlightRoot: root,
+      fs,
+      spawn: noDdcutil(),
+    });
     expect(await (sink as BacklightSink).whenReady()).toBeNull();
     expect(logger.lines('warn')).toHaveLength(1);
     expect(logger.lines('warn')[0]).toMatch(
@@ -338,7 +349,11 @@ describe('BacklightSink', () => {
         await nodeBacklightFs.checkWritable(path);
       },
     };
-    const [sink] = createFrameSinks({ backlight: null }, deps, { backlightRoot: root, fs });
+    const [sink] = createFrameSinks({ backlight: null }, deps, {
+      backlightRoot: root,
+      fs,
+      spawn: noDdcutil(),
+    });
     const backlight = sink as BacklightSink;
     expect(await backlight.whenReady()).toBeNull();
     sink!.onFrame(frame(0.6));
@@ -362,6 +377,59 @@ describe('BacklightSink', () => {
   it('is not created when disabled', () => {
     const { deps } = setup();
     expect(createFrameSinks({ backlight: false }, deps)).toEqual([]);
+    expect(createFrameSinks({ backlight: 'off' }, deps)).toEqual([]);
+  });
+
+  it('is not created for a setting it does not understand, and says so', () => {
+    const { deps, logger } = setup();
+    expect(createFrameSinks({ backlight: 'hdmi' }, deps)).toEqual([]);
+    expect(logger.lines('warn')).toEqual([
+      expect.stringMatching(
+        /^Backlight: expected auto, off, .*got "hdmi"; backlight control is off$/,
+      ),
+    ]);
+  });
+
+  it('auto-detects a display over DDC/CI when there is no backlight device', async () => {
+    const { deps, logger } = setup();
+    const spawn = fakeSpawn((child) => {
+      const args = child.args.join(' ');
+      if (args.startsWith('detect')) respond(child, 'Display 1\n   I2C bus:  /dev/i2c-20\n');
+      else if (args.includes('getvcp')) respond(child, `VCP 10 C ${current} 100\n`);
+      else {
+        current = Number(child.args[child.args.indexOf('setvcp') + 2]);
+        respond(child, '');
+      }
+    });
+    let current = 60;
+    const [sink] = createFrameSinks({ backlight: null }, deps, {
+      backlightRoot: join(root, 'missing'),
+      spawn,
+    });
+    const backlight = sink as BacklightSink;
+    expect(await backlight.whenReady()).toMatchObject({ bus: 20, max: 100 });
+    expect(logger.lines('info')).toEqual([
+      'Backlight: controlling the display on /dev/i2c-20 over DDC/CI (brightness 0–100)',
+    ]);
+    backlight.onFrame(frame(1));
+    await backlight.whenIdle();
+    expect(current).toBe(100);
+    await backlight.stop();
+  });
+
+  it('looks for a sysfs device only, when told so', async () => {
+    const { deps, logger } = setup();
+    const spawn = fakeSpawn((child) => respond(child, ''));
+    const [sink] = createFrameSinks({ backlight: 'sysfs' }, deps, {
+      backlightRoot: join(root, 'missing'),
+      spawn,
+    });
+    expect(await (sink as BacklightSink).whenReady()).toBeNull();
+    expect(spawn.children).toEqual([]);
+    expect(logger.lines('info')).toEqual([
+      'Backlight: no backlight device found; brightness is applied by the renderer only',
+    ]);
+    await sink!.stop();
   });
 
   it('leaves the backlight as it is on stop', async () => {

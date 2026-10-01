@@ -66,11 +66,9 @@ background behind that reflection is the sky. Hence:
 - **IPS.** You look at the panel at a steep angle via the reflection; TN panels lose contrast and
   shift colour there.
 - **Backlight control.** At night the image must be dim, and an LCD's "black" still glows: without
-  dimming the backlight you see a faint grey rectangle on the windshield. When Linux exposes the
-  panel's backlight (`/sys/class/backlight/*`, typical for DSI panels; see `--backlight`), the
-  HUD writes the brightness to it and draws the page at full brightness; otherwise it dims the
-  page itself. A backlight device that appears after the HUD started (driver or udev rule late at
-  boot) is picked up within 10 s. A panel with a hardware dimmer (PWM input or knob) works too.
+  dimming the backlight you see a faint grey rectangle on the windshield. Choose a panel whose
+  backlight the HUD can dim ([below](#dimming-the-backlight)); otherwise it can only dim the
+  page's content.
 - **Size and resolution**: 5–7" suits most dashboards. The layouts are tested at **800×480**,
   **1024×600** and the wide **1280×480** "bar" format (about 8.8"), which gives room for widgets
   left and right of the speed; the developer console also previews 1920×720 (12.3" bars).
@@ -81,6 +79,43 @@ background behind that reflection is the sky. Hence:
   differently, so how the panel is turned on the dash changes how bright the reflection is. Try
   the panel in both orientations (or with a half-wave retarder film) before you build the mount.
   Polarised sunglasses can dim or hide a windshield reflection altogether.
+
+### Dimming the backlight
+
+The HUD writes its brightness (through a 2.2 gamma) to the panel's backlight when it can, and
+then draws the page at full brightness; `--backlight` / `CARHEADSUP_BACKLIGHT` says how
+([options](configuration.md#command-line-and-environment)). With none of these it dims the page's
+content instead, and the LCD keeps glowing at full power.
+
+| Panel or driver board | How the HUD dims it | `--backlight` |
+| --- | --- | --- |
+| DSI panels (official Raspberry Pi displays, most DSI panels) | Linux backlight device, `/sys/class/backlight/*` | `auto` (default) or `sysfs:<dir>` |
+| HDMI monitors, and LCD driver boards whose scaler firmware supports DDC/CI (check with `ddcutil` as below) | DDC/CI brightness (VCP 0x10) over the HDMI cable's I²C lines, with `ddcutil` | `auto` (once `ddcutil` is installed) or `ddc[:<bus>]` |
+| LCD driver boards and LED backlight drivers with a PWM dimming input (marked PWM, BL_PWM, ADJ or DIM) | a PWM channel of the Pi wired to that input | `pwm:<chip>/<channel>…` |
+| HDMI panels with neither (buttons or a knob only) | not at all: only the content is dimmed — set the knob for the night and rely on the day level, or pick another panel | `off` or `auto` |
+
+**DDC/CI.** `sudo apt install ddcutil`, make sure the `i2c-dev` module loads
+(`echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf`, reboot), then check that the
+panel answers and obeys: `ddcutil detect` lists it as "Display 1" with an I²C bus, `ddcutil
+getvcp 10` shows its brightness, and `ddcutil setvcp 10 30` visibly dims it. The service user is
+in the `i2c` group already. The HUD uses a display only after it has applied a test change, writes
+at most once a second and only for changes of 3 % or more (DDC/CI is slow, and some boards save
+every change to EEPROM), and keeps the page dimmed while the display does not answer.
+
+**PWM.** The Pi's hardware PWM on GPIO 18 (header pin 12): add `dtoverlay=pwm,pin=18,func=2` to
+`/boot/firmware/config.txt` and reboot; it appears as `pwmchip0`, channel 0 (on a Pi 5 the chip
+number can differ: `ls /sys/class/pwm`). On a Pi 3 or 4 this takes over the PWM that the analog
+audio jack uses; the HUD needs no audio. Wire GPIO 18 to the board's dimming input and its ground
+to the Pi's ground — directly only when the input takes 3.3 V logic; a 5 V or 12 V input needs a
+transistor or MOSFET stage, which usually inverts it (`,inverted`). Then set
+`CARHEADSUP_BACKLIGHT=pwm:0/0` — options: `hz=` the frequency (default 25 kHz: above hearing and
+flicker-free; some inputs want 1–20 kHz, see the board's data sheet), `min=` the lowest duty cycle
+in per cent (default 1; raise it if the LEDs flicker or switch off near the bottom),
+`inverted` for inputs that dim as the duty cycle rises. The installer's udev rule lets the
+service export and set the channel.
+
+A backlight that appears after the HUD started (a driver or udev rule late at boot) is picked up
+within 10 s, a DDC/CI display within a minute.
 
 ## Optics: getting the image onto the glass
 
@@ -439,6 +474,7 @@ first time one settles there, the log says so.
 | I²C SDA / SCL (light, gesture, ADS1115, RTC) | 2 / 3 | 3 / 5 |
 | Ground | — | 6, 9, 14, 20, 25, 30, 34, 39 |
 | Buttons (example) | 17, 27, 22 | 11, 13, 15 |
+| PWM dimming input of the backlight driver (optional) | 18 | 12 |
 | CAN HAT (MCP2515 on SPI0: MOSI, MISO, SCLK, CE0; INT) | 10, 9, 11, 8; usually 25 | 19, 21, 23, 24; 22 |
 | Shutdown request from the power controller (example) | 26 | 37 |
 | "Halted" signal to the power controller (example) | 16 | 36 |

@@ -129,6 +129,40 @@ describe('parseCli', () => {
     expect(run(['--backlight', '/sys/x']).backlight).toBe('/sys/x');
   });
 
+  it('takes the other backlight kinds, and refuses what it does not understand', () => {
+    for (const how of [
+      'sysfs',
+      'sysfs:/sys/class/backlight/10-0045',
+      'ddc',
+      'ddc:20',
+      'pwm:0/0',
+      'pwm:pwmchip2/1,hz=20000,min=3,inverted',
+    ]) {
+      expect(run(['--backlight', how]).backlight, how).toBe(how);
+    }
+    expect(run([], { CARHEADSUP_BACKLIGHT: ' ddc:/dev/i2c-21 ' }).backlight).toBe(
+      'ddc:/dev/i2c-21',
+    );
+    expect(parseCli(['--backlight', 'hdmi'], {}, HOME)).toEqual({
+      kind: 'error',
+      message: expect.stringMatching(/^--backlight: expected auto, off, sysfs.*got "hdmi"$/),
+    });
+    expect(parseCli([], { CARHEADSUP_BACKLIGHT: 'pwm:0/0,min=80' }, HOME)).toEqual({
+      kind: 'error',
+      message: expect.stringMatching(
+        /^CARHEADSUP_BACKLIGHT: unknown or invalid PWM option "min=80"/,
+      ),
+    });
+    expect(USAGE).toContain('pwm:<chip>/<channel>');
+  });
+
+  it('never dims a monitor over DDC/CI from the simulator unless asked to', () => {
+    expect(run(['--sim']).backlight).toBe('sysfs');
+    expect(run(['--sim', '--backlight', 'auto']).backlight).toBe('sysfs');
+    expect(run(['--sim', '--backlight', 'ddc']).backlight).toBe('ddc');
+    expect(run(['--sim', '--backlight', 'off']).backlight).toBe(false);
+  });
+
   it('answers --help and --version', () => {
     expect(parseCli(['--help'], {}, HOME)).toEqual({ kind: 'help' });
     expect(parseCli(['-h', '--port', 'bad'], {}, HOME)).toEqual({ kind: 'help' });

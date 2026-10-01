@@ -1,6 +1,7 @@
 import { isAbsolute, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { isDnsName, isLoopbackAddress } from './http/auth.ts';
+import { parseBacklightSpec } from './outputs/backlight-spec.ts';
 import { LOG_LEVELS, isLogLevel } from './logger.ts';
 import type { LogLevel } from './logger.ts';
 
@@ -17,7 +18,10 @@ export interface CliOptions {
   /** Overrides `server.tlsPort` when set (null: no TLS listener). */
   tlsPort: number | null | undefined;
   rendererDir: string | undefined;
-  /** Backlight device directory; null = auto-detect; false = off. */
+  /**
+   * Which backlight to dim (a valid `--backlight` setting, see `outputs/backlight-spec.ts`);
+   * null = auto-detect; false = off.
+   */
   backlight: string | null | false;
   /** Extra host names the HUD may be reached by (DNS-rebinding protection). */
   allowedHosts: string[];
@@ -48,8 +52,12 @@ Options:
                          (0 = any free port, off = no TLS listener)
   --host <addr>          Bind address, overriding server.host
   --renderer-dir <dir>   Built renderer to serve (default: packages/hud-renderer/dist)
-  --backlight <dir|off>  Backlight device (e.g. /sys/class/backlight/rpi_backlight),
-                         "auto" to detect it (default) or "off"
+  --backlight <how>      The backlight the HUD dims: "auto" (default: a Linux backlight
+                         device, else a display that takes DDC/CI; with --sim only the
+                         former), "sysfs[:<dir>]" (e.g. /sys/class/backlight/rpi_backlight),
+                         "ddc[:<i2c bus>]" (an HDMI monitor or driver board, via ddcutil),
+                         "pwm:<chip>/<channel>[,hz=<Hz>][,min=<%>][,inverted]" (a PWM channel
+                         wired to the panel's dimming input) or "off"
   --allowed-hosts <names>
                          Extra host names (comma-separated) browsers may use to reach the
                          HUD; IP addresses, localhost, <hostname> and <hostname>.local always
@@ -100,12 +108,13 @@ function parseHostList(raw: string, source: string): string[] | string {
   return bad === undefined ? names : `${source}: "${bad}" is not a host name`;
 }
 
-function parseBacklight(raw: string): string | null | false {
-  const value = raw.trim();
-  const lower = value.toLowerCase();
-  if (lower === 'off' || lower === 'none' || lower === 'false' || lower === '0') return false;
-  if (lower === 'auto' || value === '') return null;
-  return value;
+/** The `--backlight` setting (false = off, null = auto, else the validated text), or an error. */
+function parseBacklight(raw: string, source: string): string | null | false | { error: string } {
+  const spec = parseBacklightSpec(raw);
+  if (typeof spec === 'string') return { error: `${source}: ${spec}` };
+  if (spec.kind === 'off') return false;
+  if (spec.kind === 'auto') return null;
+  return raw.trim();
 }
 
 /**
@@ -194,6 +203,18 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
     nonEmpty(env['CARHEADSUP_DATA_DIR']) ??
     defaultDataDir(env, home, sim);
   const rawBacklight = values.backlight ?? env['CARHEADSUP_BACKLIGHT'];
+  // The simulator never dims a monitor over DDC/CI unless asked to (a developer's screen).
+  let backlight: string | null | false = sim ? 'sysfs' : null;
+  if (rawBacklight !== undefined) {
+    const parsed = parseBacklight(
+      rawBacklight,
+      values.backlight !== undefined ? '--backlight' : 'CARHEADSUP_BACKLIGHT',
+    );
+    if (parsed !== null && typeof parsed === 'object') {
+      return { kind: 'error', message: parsed.error };
+    }
+    backlight = parsed === null && sim ? 'sysfs' : parsed;
+  }
   const rawHosts = values['allowed-hosts'] ?? env['CARHEADSUP_ALLOWED_HOSTS'] ?? '';
   const allowedHosts = parseHostList(
     rawHosts,
@@ -211,7 +232,7 @@ export function parseCli(argv: readonly string[], env: Env, home: string): CliPa
       tlsPort,
       host: host?.trim(),
       rendererDir: nonEmpty(values['renderer-dir']) ?? nonEmpty(env['CARHEADSUP_RENDERER_DIR']),
-      backlight: rawBacklight === undefined ? null : parseBacklight(rawBacklight),
+      backlight,
       allowedHosts,
       logLevel: level,
     },

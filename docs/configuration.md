@@ -195,9 +195,10 @@ local time against `nightHours`, and with that off it keeps the last level. So s
 time zone (`sudo timedatectl set-timezone Europe/Berlin`); the server warns at start-up when it
 has no location and nothing else tells day from night. The driver's
 brightness-up/down input trims the result by ±0.1 per step (at most ±0.5), and the final value
-never drops below 0.05. It is applied to the display's Linux backlight device when it has one
-(through a 2.2 gamma; the page is then drawn at full brightness, so the content is not dimmed
-twice), and otherwise as a CSS brightness on the page.
+never drops below 0.05. It is applied to the display's backlight when the HUD can drive it — a
+Linux backlight device, a monitor over DDC/CI or a PWM dimming input (`--backlight`, see
+[dimming the backlight](hardware.md#dimming-the-backlight)) — through a 2.2 gamma, and the page is then drawn at full
+brightness, so the content is not dimmed twice; otherwise as a CSS brightness on the page.
 
 ### display.layout
 
@@ -633,7 +634,7 @@ A real flat tyre that reads exactly 0 from the moment the HUD starts therefore s
 | `--tls-port <n\|off>` | `CARHEADSUP_TLS_PORT` | `server.tlsPort` | Override the TLS port of the phone link and of other devices' browsers (`0` = any free port, `off` = no TLS listener). Not saved. |
 | `--host <addr>` | `CARHEADSUP_HOST` | `server.host` | Override the bind address. Not saved. |
 | `--renderer-dir <dir>` | `CARHEADSUP_RENDERER_DIR` | `packages/hud-renderer/dist` | Built web pages to serve. |
-| `--backlight <dir\|auto\|off>` | `CARHEADSUP_BACKLIGHT` | `auto` | Backlight device (e.g. `/sys/class/backlight/rpi_backlight`), `auto` = the first writable device, `off` = never touch it (the page is dimmed instead). A device that is missing or not writable at start-up is looked for again every 10 s. |
+| `--backlight <how>` | `CARHEADSUP_BACKLIGHT` | `auto` (with `--sim`: `sysfs`) | The backlight the HUD dims ([which one to use](hardware.md#dimming-the-backlight)): `auto` = the first writable Linux backlight device, else a display that takes its brightness over DDC/CI (when `ddcutil` is installed); `sysfs` or `sysfs:<dir>` (or just the directory, e.g. `/sys/class/backlight/rpi_backlight`) = a Linux backlight device; `ddc` or `ddc:<bus>` = an HDMI monitor or driver board over DDC/CI (`/dev/i2c-<bus>`; written at most once a second, only for changes of 3 % or more, and used only after it has applied a test change); `pwm:<chip>/<channel>[,hz=<Hz>][,min=<%>][,inverted]` = a PWM channel wired to the panel's dimming input (default 25 kHz, minimum duty 1 %); `off` = never touch it (the page is dimmed instead). A device that is missing or not usable at start-up is looked for again every 10 s (a DDC/CI display at most every minute). |
 | `--allowed-hosts <names>` | `CARHEADSUP_ALLOWED_HOSTS` | none | Extra host names (comma-separated) under which browsers may reach the HUD: DNS names (letters, digits, hyphens, underscores; anything else stops the server with an error). IP addresses, `localhost`, the machine's host name and `<hostname>.local` always work; requests for any other name get `403` ([DNS-rebinding protection](architecture.md#security-model)). |
 | `--log-level <level>` | `CARHEADSUP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `-h`, `--help` | | | Usage. |

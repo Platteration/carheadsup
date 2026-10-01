@@ -2,3 +2,7 @@
 # so the HUD can dim a panel that has a Linux backlight device (DSI displays, some HDMI panels).
 # Installed to /etc/udev/rules.d/ by deploy/install.sh.
 ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video $sys$devpath/brightness", RUN+="/bin/chmod g+w $sys$devpath/brightness"
+# The same for PWM channels wired to a panel's dimming input (--backlight pwm:<chip>/<channel>):
+# the group may export a channel and set it. Exporting one signals a "change" of its chip, which
+# reaches the new channel's files.
+ACTION=="add|change", SUBSYSTEM=="pwm", RUN+="/bin/sh -c 'chgrp -R video $sys$devpath && chmod -R g+w $sys$devpath'"

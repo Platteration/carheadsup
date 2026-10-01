@@ -6,7 +6,10 @@
 # debug | info | warn | error
 #CARHEADSUP_LOG_LEVEL=info
 
-# Backlight device directory, "auto" (first writable /sys/class/backlight device) or "off".
+# The backlight the HUD dims (docs/hardware.md, "Dimming the backlight"): "auto" (the first writable
+# /sys/class/backlight device, else a display that takes DDC/CI when ddcutil is installed),
+# "sysfs[:<dir>]", "ddc[:<i2c bus>]", "pwm:<chip>/<channel>[,hz=<Hz>][,min=<%>][,inverted]"
+# (e.g. pwm:0/0 with dtoverlay=pwm,pin=18,func=2) or "off".
 #CARHEADSUP_BACKLIGHT=auto
 
 # Override server.port / server.host without touching the config file. If you change the port,

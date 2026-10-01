@@ -1,14 +1,18 @@
 /**
- * Display backlight driven by the composed frames: `frame.theme.brightness` (0–1, perceptual)
- * is written to a Linux sysfs backlight device (`<dir>/brightness`, scaled by
- * `<dir>/max_brightness`) through a ~2.2 gamma, since backlight PWM duty is linear in luminance.
+ * Display backlight driven by the composed frames: `frame.theme.brightness` (0–1, perceptual) is
+ * written to the panel's backlight through a ~2.2 gamma, since backlight luminance is linear in
+ * the PWM duty a backlight level sets. Where it goes is a {@link BacklightDriver}: a Linux sysfs
+ * backlight device (this module: `<dir>/brightness`, scaled by `<dir>/max_brightness`), a monitor
+ * over DDC/CI (`backlight-ddc.ts`) or a PWM channel wired to the panel's dimming input
+ * (`backlight-pwm.ts`).
  *
- *  - Blanked frames drive the backlight to its minimum (0 is never written because some panels
+ *  - Blanked frames drive the backlight to its minimum (sysfs never writes 0, because some panels
  *    switch off completely and take seconds to come back) — unless something breaks through the
  *    blank (a critical alert, a collision cue): that is lit as brightly as ever.
- *  - Writes happen only when the level moves by at least 1 % of the brightness range, and at
- *    most 10 times per second; the latest value always lands eventually.
- *  - A missing or unwritable device is logged once and looked for again every
+ *  - Writes happen only when the level moves by at least the driver's minimum change (sysfs: 1 %
+ *    of the brightness range), and at most once per its minimum interval (sysfs: 10 times per
+ *    second); the latest value always lands eventually.
+ *  - A missing or unusable device is logged once and looked for again every
  *    {@link BACKLIGHT_REPROBE_MS} (the driver or the udev rule that grants write access may
  *    come up after the HUD at boot); a device whose writes start failing is given up and looked
  *    for again the same way. The backlight is left as it is on stop: restoring a daytime level at
@@ -83,7 +87,34 @@ export function frameBacklightBrightness(frame: HudFrame): number | null {
   return typeof b === 'number' && Number.isFinite(b) ? Math.min(1, Math.max(0, b)) : null;
 }
 
-export interface BacklightSinkOptions {
+/** A backlight the sink writes to, as a {@link BacklightDriver} opened it. */
+export interface BacklightOutput {
+  /** What is driven, for the log, e.g. "/sys/class/backlight/rpi_backlight (max 255)". */
+  readonly description: string;
+  /** Minimum interval between writes, ms. */
+  readonly minIntervalMs: number;
+  /** Smallest change of brightness (0–1) worth a write; 0 and 1 are always written. */
+  readonly minChange: number;
+  /** The raw level for a brightness 0–1 (a write is skipped when it would not change). */
+  level(brightness: number): number;
+  /** Set the raw level. Rejects when the device fails (the sink then gives it up). */
+  write(level: number): Promise<void>;
+}
+
+/** What a look for the device found. */
+export type BacklightOpenResult =
+  | { output: BacklightOutput }
+  /** Nothing there to drive (logged once, as information). */
+  | { absent: string }
+  /** Something there that cannot be used (yet): logged as a warning on the first look. */
+  | { problem: string };
+
+/** Finds and opens one kind of backlight. */
+export interface BacklightDriver {
+  open(): Promise<BacklightOpenResult>;
+}
+
+export interface SysfsBacklightOptions {
   /** Device directory; null = first writable device under `root`. */
   directory: string | null;
   /** Where devices are looked for when auto-detecting (default /sys/class/backlight). */
@@ -91,20 +122,128 @@ export interface BacklightSinkOptions {
   fs?: BacklightFs;
 }
 
-interface Device {
-  directory: string;
-  maxBrightness: number;
+/** A sysfs backlight device: the default kind (DSI displays, some HDMI panels). */
+export class SysfsBacklightOutput implements BacklightOutput {
+  readonly directory: string;
+  readonly maxBrightness: number;
+  readonly minIntervalMs = BACKLIGHT_MIN_INTERVAL_MS;
+  readonly minChange = BACKLIGHT_MIN_CHANGE;
+  private readonly fs: BacklightFs;
+
+  constructor(directory: string, maxBrightness: number, fs: BacklightFs) {
+    this.directory = directory;
+    this.maxBrightness = maxBrightness;
+    this.fs = fs;
+  }
+
+  get description(): string {
+    return `${this.directory} (max ${this.maxBrightness})`;
+  }
+
+  level(brightness: number): number {
+    return backlightLevel(brightness, this.maxBrightness);
+  }
+
+  write(level: number): Promise<void> {
+    return this.fs.writeFile(join(this.directory, 'brightness'), String(level));
+  }
 }
+
+/** Linux sysfs backlight devices (`/sys/class/backlight/*`). */
+export class SysfsBacklightDriver implements BacklightDriver {
+  private readonly options: SysfsBacklightOptions;
+  private readonly fs: BacklightFs;
+
+  constructor(options: SysfsBacklightOptions) {
+    this.options = options;
+    this.fs = options.fs ?? nodeBacklightFs;
+  }
+
+  /** The configured directory, or the first usable device under the root. */
+  async open(): Promise<BacklightOpenResult> {
+    const { directory } = this.options;
+    if (directory !== null) {
+      const result = await this.probe(directory);
+      return typeof result === 'string'
+        ? { problem: `${directory} ${result}` }
+        : { output: result };
+    }
+    const root = this.options.root ?? SYS_CLASS_BACKLIGHT;
+    let entries: string[];
+    try {
+      entries = (await this.fs.readdir(root)).sort();
+    } catch {
+      entries = [];
+    }
+    const problems: string[] = [];
+    for (const entry of entries) {
+      const result = await this.probe(join(root, entry));
+      if (typeof result !== 'string') return { output: result };
+      problems.push(`${entry} ${result}`);
+    }
+    if (problems.length === 0) return { absent: 'no backlight device found' };
+    return {
+      problem: `no usable backlight device (${problems.join('; ')}). ${BACKLIGHT_PERMISSION_HINT}`,
+    };
+  }
+
+  /** The device at `directory`, or why it cannot be used. */
+  private async probe(directory: string): Promise<SysfsBacklightOutput | string> {
+    let maxText: string;
+    try {
+      maxText = await this.fs.readFile(join(directory, 'max_brightness'));
+    } catch (err) {
+      return `has no readable max_brightness (${errorCode(err) ?? errorMessage(err)})`;
+    }
+    const maxBrightness = Number.parseInt(maxText.trim(), 10);
+    if (!Number.isFinite(maxBrightness) || maxBrightness < 1) {
+      return `reports an invalid max_brightness "${maxText.trim().slice(0, 20)}"`;
+    }
+    try {
+      await this.fs.checkWritable(join(directory, 'brightness'));
+    } catch (err) {
+      return `brightness is not writable (${errorCode(err) ?? errorMessage(err)})`;
+    }
+    return new SysfsBacklightOutput(directory, maxBrightness, this.fs);
+  }
+}
+
+/**
+ * Several kinds tried in order (`--backlight auto`: a sysfs device, else a monitor over DDC/CI):
+ * the first that opens wins; otherwise the problems, or what is absent, are reported together.
+ */
+export class FirstBacklightDriver implements BacklightDriver {
+  private readonly drivers: readonly BacklightDriver[];
+
+  constructor(drivers: readonly BacklightDriver[]) {
+    this.drivers = drivers;
+  }
+
+  async open(): Promise<BacklightOpenResult> {
+    const problems: string[] = [];
+    const absent: string[] = [];
+    for (const driver of this.drivers) {
+      const result = await driver.open();
+      if ('output' in result) return result;
+      if ('problem' in result) problems.push(result.problem);
+      else absent.push(result.absent);
+    }
+    return problems.length > 0
+      ? { problem: problems.join('; ') }
+      : { absent: absent.join(', and ') };
+  }
+}
+
+export type BacklightSinkOptions = SysfsBacklightOptions | { driver: BacklightDriver };
 
 export class BacklightSink implements FrameSink {
   readonly name = 'backlight';
   private readonly deps: RuntimeDeps;
-  private readonly options: BacklightSinkOptions;
+  private readonly driver: BacklightDriver;
   /** For the rate limit: a wall-clock step back must not hold writes back for its length. */
   private readonly clock: Clock;
-  private readonly fs: BacklightFs;
-  private readonly ready: Promise<Device | null>;
-  private device: Device | null = null;
+  private readonly ready: Promise<BacklightOutput | null>;
+  private device: BacklightOutput | null = null;
   private stopped = false;
   /** Latest requested brightness (0–1). */
   private wanted: number | null = null;
@@ -122,9 +261,8 @@ export class BacklightSink implements FrameSink {
 
   constructor(options: BacklightSinkOptions, deps: RuntimeDeps) {
     this.deps = deps;
-    this.options = options;
+    this.driver = 'driver' in options ? options.driver : new SysfsBacklightDriver(options);
     this.clock = monotonicView(deps.now);
-    this.fs = options.fs ?? nodeBacklightFs;
     this.ready = this.open(true).then(
       (device) => {
         this.use(device);
@@ -153,7 +291,7 @@ export class BacklightSink implements FrameSink {
    * Resolves with the device found by the first look, or null when there was none (the sink
    * then keeps looking every {@link BACKLIGHT_REPROBE_MS}).
    */
-  whenReady(): Promise<{ directory: string; maxBrightness: number } | null> {
+  whenReady(): Promise<BacklightOutput | null> {
     return this.ready;
   }
 
@@ -186,7 +324,7 @@ export class BacklightSink implements FrameSink {
   }
 
   /** Start using `device` (or, with null, keep looking for one). */
-  private use(device: Device | null): void {
+  private use(device: BacklightOutput | null): void {
     if (this.stopped) return;
     const changed = (device === null) !== (this.device === null);
     this.device = device;
@@ -235,13 +373,13 @@ export class BacklightSink implements FrameSink {
     const wanted = this.wanted;
     if (device === null || wanted === null || this.stopped) return;
     if (this.writing !== null || this.timer !== null) return; // re-checked when those finish
-    const level = backlightLevel(wanted, device.maxBrightness);
+    const level = device.level(wanted);
     if (level === this.writtenLevel) return;
     const written = this.written;
     // Small drifts are skipped, but the ends of the range are always reached exactly.
     const atEnd = wanted === 0 || wanted === 1;
-    if (written !== null && Math.abs(wanted - written) < BACKLIGHT_MIN_CHANGE && !atEnd) return;
-    const wait = this.lastWriteAt + BACKLIGHT_MIN_INTERVAL_MS - this.clock();
+    if (written !== null && Math.abs(wanted - written) < device.minChange && !atEnd) return;
+    const wait = this.lastWriteAt + device.minIntervalMs - this.clock();
     if (wait > 0) {
       this.timer = this.deps.timers.setTimeout(() => {
         this.timer = null;
@@ -256,15 +394,15 @@ export class BacklightSink implements FrameSink {
     });
   }
 
-  private async write(device: Device, level: number, brightness: number): Promise<void> {
+  private async write(device: BacklightOutput, level: number, brightness: number): Promise<void> {
     try {
-      await this.fs.writeFile(join(device.directory, 'brightness'), String(level));
+      await device.write(level);
       if (this.device !== device) return;
       this.written = brightness;
       this.writtenLevel = level;
     } catch (err) {
       if (this.device !== device) return;
-      const message = `Backlight: writing ${join(device.directory, 'brightness')} failed (${errorCode(err) ?? errorMessage(err)}); backlight control stopped, looking for the device again every ${BACKLIGHT_REPROBE_MS / 1000} s`;
+      const message = `Backlight: writing ${device.description} failed (${errorCode(err) ?? errorMessage(err)}); backlight control stopped, looking for the device again every ${BACKLIGHT_REPROBE_MS / 1000} s`;
       if (this.writeFailedBefore) this.deps.logger.debug(message);
       else this.deps.logger.warn(message);
       this.writeFailedBefore = true;
@@ -273,70 +411,25 @@ export class BacklightSink implements FrameSink {
   }
 
   /**
-   * Find the device: the configured directory, or the first usable one under the root. The
-   * first look logs what it found or why nothing is usable; later looks log only a success.
+   * Look for the device. The first look logs what it found or why nothing is usable; later looks
+   * log only a success.
    */
-  private async open(first: boolean): Promise<Device | null> {
+  private async open(first: boolean): Promise<BacklightOutput | null> {
     const { logger } = this.deps;
-    const options = this.options;
-    const quiet = (line: string): void => (first ? logger.warn(line) : logger.debug(line));
-    if (options.directory !== null) {
-      const problem = await this.probe(options.directory);
-      if (typeof problem === 'string') {
-        quiet(
-          `Backlight: ${options.directory} ${problem}; brightness is applied by the renderer until it is usable (checked every ${BACKLIGHT_REPROBE_MS / 1000} s)`,
-        );
-        return null;
-      }
-      logger.info(`Backlight: controlling ${options.directory} (max ${problem.maxBrightness})`);
-      return problem;
+    const result = await this.driver.open();
+    if ('output' in result) {
+      logger.info(`Backlight: controlling ${result.output.description}`);
+      return result.output;
     }
-    const root = options.root ?? SYS_CLASS_BACKLIGHT;
-    let entries: string[];
-    try {
-      entries = (await this.fs.readdir(root)).sort();
-    } catch {
-      entries = [];
-    }
-    const problems: string[] = [];
-    for (const entry of entries) {
-      const directory = join(root, entry);
-      const result = await this.probe(directory);
-      if (typeof result !== 'string') {
-        logger.info(`Backlight: controlling ${directory} (max ${result.maxBrightness})`);
-        return result;
-      }
-      problems.push(`${entry} ${result}`);
-    }
-    if (problems.length === 0) {
+    if ('absent' in result) {
       if (first) {
-        logger.info(
-          'Backlight: no backlight device found; brightness is applied by the renderer only',
-        );
+        logger.info(`Backlight: ${result.absent}; brightness is applied by the renderer only`);
       }
-    } else {
-      quiet(`Backlight: no usable device (${problems.join('; ')}). ${BACKLIGHT_PERMISSION_HINT}`);
+      return null;
     }
+    const line = `Backlight: ${result.problem}; brightness is applied by the renderer until it is usable (checked every ${BACKLIGHT_REPROBE_MS / 1000} s)`;
+    if (first) logger.warn(line);
+    else logger.debug(line);
     return null;
-  }
-
-  /** The device at `directory`, or why it cannot be used. */
-  private async probe(directory: string): Promise<Device | string> {
-    let maxText: string;
-    try {
-      maxText = await this.fs.readFile(join(directory, 'max_brightness'));
-    } catch (err) {
-      return `has no readable max_brightness (${errorCode(err) ?? errorMessage(err)})`;
-    }
-    const maxBrightness = Number.parseInt(maxText.trim(), 10);
-    if (!Number.isFinite(maxBrightness) || maxBrightness < 1) {
-      return `reports an invalid max_brightness "${maxText.trim().slice(0, 20)}"`;
-    }
-    try {
-      await this.fs.checkWritable(join(directory, 'brightness'));
-    } catch (err) {
-      return `brightness is not writable (${errorCode(err) ?? errorMessage(err)})`;
-    }
-    return { directory, maxBrightness };
   }
 }

@@ -25,7 +25,7 @@ contract between all of them.
 | --- | --- | --- |
 | `@carheadsup/core` | All domain logic and the shared types. No I/O, no clock, no randomness; runs in Node.js and the browser. | `state/reducer.ts`, `compose/compose.ts`, `alerts/`, `display/` (context, brightness, sun, shift light), `vehicle/` (fuel, gear), `trip/`, `maintenance/`, `obd/` (PIDs, formulas, DTC database), `config/` (defaults, presets, schema), `protocol/` (message validation, phone authentication, pairing URI) |
 | `@carheadsup/obd` | Talks to the car. | `transport.ts` (serial, TCP), `elm327.ts` (driver), `poller.ts` (PID scheduling), `service.ts` (connect / reconnect loop, events), `sim/` (ELM327 emulator and vehicle simulator) |
-| `@carheadsup/hud-server` | The on-car service that wires everything together. | `app.ts` (composition), `engine.ts` (reducer loop, effects, frame timer), `http/` (REST API, static files, auth), `ws/` (phone and renderer sockets), `tls/` (the HUD's self-signed certificate: DER encoder, X.509 builder, `tls.pem`), `phone/auth.ts` (the phone proofs), `sensors/` (light, gesture, GPIO buttons, steering-wheel buttons over CAN or an ADC, ADAS UDP), `outputs/backlight.ts`, `store/` (config, state, trips), `discovery/mdns.ts`, `sim/` |
+| `@carheadsup/hud-server` | The on-car service that wires everything together. | `app.ts` (composition), `engine.ts` (reducer loop, effects, frame timer), `http/` (REST API, static files, auth), `ws/` (phone and renderer sockets), `tls/` (the HUD's self-signed certificate: DER encoder, X.509 builder, `tls.pem`), `phone/auth.ts` (the phone proofs), `sensors/` (light, gesture, GPIO buttons, steering-wheel buttons over CAN or an ADC, ADAS UDP, the system time zone), `outputs/` (the backlight: sysfs, DDC/CI, PWM), `store/` (config, state, trips), `discovery/mdns.ts`, `sim/` |
 | `@carheadsup/hud-renderer` | The three web pages. | `hud/` (projected HUD), `settings/` (settings app), `dev/` (developer console), `common/` (WebSocket feed, REST client, staleness) |
 | `companion-android` | The phone app. `:protocol` mirrors the TypeScript contract in Kotlin; `:app` is the Android UI and services. | see [its README](../companion-android/README.md) |
 
@@ -547,8 +547,8 @@ What remains:
   second you get depends on the adapter and the car; see [obd.md](obd.md#polling).
 - **Sensors**: light sensor at 5 Hz, gesture sensor polled every 40 ms, steering-wheel ladder ADC
   at 50 Hz, CAN button frames filtered in the kernel (only the configured ids reach the HUD),
-  backlight written at most 10 times a second and only on a change of at least 1 % (looked for
-  every 10 s while missing).
+  backlight written at most 10 times a second and only on a change of at least 1 % (DDC/CI: once
+  a second, 3 %; looked for every 10 s while missing).
 - **Rendering**: the page is Preact with a single CSS `matrix3d()` transform for mirroring,
   rotation and keystone correction, which the browser composites on the GPU.
 - **Disk**: persistence is coalesced (see above), so the SD card sees a few small writes per
