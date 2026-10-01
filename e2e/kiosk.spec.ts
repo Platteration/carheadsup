@@ -94,10 +94,17 @@ test('sends its heartbeat while it draws, and reports the errors it catches', as
     (await (await fetch(`${hud.base}/api/kiosk/health`)).json()) as ApiKioskHealth;
   await page.goto(`${hud.base}/`);
   // The kiosk launcher (deploy/kiosk.sh) restarts the browser after 5 s without a heartbeat.
+  // The server still remembers the previous test's page (its last heartbeat outlives it), so
+  // wait for this page's display socket and a fresh heartbeat in the same reading.
   await expect
-    .poll(async () => (await health()).aliveAgoMs ?? Number.POSITIVE_INFINITY, { timeout: 10_000 })
-    .toBeLessThan(1500);
-  expect((await health()).displays).toBeGreaterThanOrEqual(1);
+    .poll(
+      async () => {
+        const { displays, aliveAgoMs } = await health();
+        return displays >= 1 && aliveAgoMs !== null && aliveAgoMs < 1500;
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(true);
   await page.waitForTimeout(2500);
   expect((await health()).aliveAgoMs).toBeLessThan(1500);
 
