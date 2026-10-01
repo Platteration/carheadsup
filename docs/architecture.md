@@ -134,7 +134,9 @@ So there are two clocks:
   re-derives maintenance status and night mode at once.
 - **The time zone** arrives as `{ type: 'clock/zone', zone: { name, utcOffsetMin, location } }`
   from the server's time-zone source (`hud-server/src/sensors/time-zone.ts`) on start and
-  whenever the offset changes (daylight saving, checked every minute). The core uses it only for
+  whenever the offset changes (daylight saving, checked every minute). The offset is the one at
+  the HUD's wall clock above, not at the system clock, which without network time may be months
+  behind — on the other side of daylight saving. The core uses it only for
   night mode: the zone's principal city (`location`, from a table generated from the tz
   database) stands in for the car's position until the phone sends one, and the local time
   (`utcOffsetMin`) decides `display.brightness.nightHours` when no location is known at all.

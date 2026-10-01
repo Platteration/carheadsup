@@ -206,6 +206,33 @@ describe('TimeZoneSource', () => {
     expect(clock.pendingTimers).toBe(0);
   });
 
+  it('reads the offset at the HUD’s wall clock (the phone’s time), not the system clock', async () => {
+    // A Pi without network time restored a winter time; the phone has told the HUD it is summer.
+    const clock = new FakeClock(Date.UTC(2026, 0, 15, 12));
+    let wall = Date.UTC(2026, 6, 15, 12);
+    const berlin: TimeZoneProbe = {
+      name: () => 'Europe/Berlin',
+      utcOffsetMin: (epochMs) =>
+        epochMs >= Date.UTC(2026, 2, 29, 1) && epochMs < Date.UTC(2026, 9, 25, 1) ? 120 : 60,
+    };
+    const { ctx, ofType } = recordingContext(clock);
+    const source = new TimeZoneSource(config(), berlin, () => wall);
+    await source.start(ctx);
+    expect(ofType('clock/zone').map((e) => e.zone.utcOffsetMin)).toEqual([120]);
+    // The wall clock reaches the end of daylight saving.
+    wall = Date.UTC(2026, 9, 25, 1);
+    await clock.advance(TIME_ZONE_CHECK_MS, false);
+    expect(ofType('clock/zone').map((e) => e.zone.utcOffsetMin)).toEqual([120, 60]);
+    await source.stop();
+
+    // Without the HUD's wall clock: the system clock's (the sources' context).
+    const plain = recordingContext(clock);
+    const system = new TimeZoneSource(config(), berlin);
+    await system.start(plain.ctx);
+    expect(plain.ofType('clock/zone').map((e) => e.zone.utcOffsetMin)).toEqual([60]);
+    await system.stop();
+  });
+
   it('warns about a zone without a location when nothing else tells day from night', async () => {
     const clock = new FakeClock();
     const { ctx, ofType, logger } = recordingContext(clock);

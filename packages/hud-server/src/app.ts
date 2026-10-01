@@ -649,7 +649,10 @@ export function createHudServer(options: HudServerOptions): HudServer {
 
     let sensorSources: EventSource[] = [];
     try {
-      sensorSources = (options.createSensorSources ?? defaultCreateSensorSources)(config);
+      sensorSources = options.createSensorSources
+        ? options.createSensorSources(config)
+        : // The time zone's offset at the HUD's wall clock, which the phone may have corrected.
+          defaultCreateSensorSources(config, { wallNow: () => wallClock.now() });
     } catch (err) {
       logger.error(`Sensors: cannot create the sensor sources: ${describe(err)}`);
     }

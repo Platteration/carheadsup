@@ -4,8 +4,12 @@
  * rough location for sun-based night mode — so a HUD without a light sensor dims at night even
  * before the phone has ever sent its location. Reported as `clock/zone` on start and whenever
  * the zone or its offset changes (daylight saving), checked every {@link TIME_ZONE_CHECK_MS}.
+ * The offset is the one at the HUD's wall clock — the time the reducer adds it to — not at the
+ * system clock, which on a Pi without network time can be months behind (another side of
+ * daylight saving) while the phone's time corrects the HUD's.
  */
 import type { GeoPoint, HudConfig, TimeZoneInfo } from '@carheadsup/core';
+import type { Clock } from '@carheadsup/obd/runtime';
 import type { EventSource, SourceContext } from '../sources/types.ts';
 import { ZONE_LINKS, ZONE_LOCATIONS } from './zone-locations.ts';
 
@@ -72,14 +76,24 @@ function formatOffset(minutes: number): string {
 export class TimeZoneSource implements EventSource {
   readonly name = 'time-zone';
   private readonly probe: TimeZoneProbe;
+  private readonly wallNow: Clock | null;
   private config: HudConfig;
   private ctx: SourceContext | null = null;
   private timer: unknown = null;
   private last: TimeZoneInfo | null = null;
 
-  constructor(config: HudConfig, probe: TimeZoneProbe = SYSTEM_TIME_ZONE) {
+  /**
+   * `wallNow` is the HUD's wall clock (see `WallClock`), at which the offset is read; null: the
+   * source context's clock (the system clock).
+   */
+  constructor(
+    config: HudConfig,
+    probe: TimeZoneProbe = SYSTEM_TIME_ZONE,
+    wallNow: Clock | null = null,
+  ) {
     this.config = config;
     this.probe = probe;
+    this.wallNow = wallNow;
   }
 
   start(ctx: SourceContext): Promise<void> {
@@ -105,7 +119,7 @@ export class TimeZoneSource implements EventSource {
     this.timer = null;
     let zone: TimeZoneInfo | null = null;
     try {
-      zone = readTimeZone(this.probe, ctx.now());
+      zone = readTimeZone(this.probe, (this.wallNow ?? ctx.now)());
     } catch (err) {
       if (first) ctx.logger.warn(`Time zone: cannot read it: ${describe(err)}`);
     }

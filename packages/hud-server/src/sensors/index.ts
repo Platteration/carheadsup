@@ -1,4 +1,5 @@
 import type { HudConfig } from '@carheadsup/core';
+import type { Clock } from '@carheadsup/obd/runtime';
 import type { EventSource } from '../sources/types.ts';
 import { AdasUdpSource, defaultUdpSocketFactory, type UdpSocketFactory } from './adas-udp.ts';
 import { CanButtonSource } from './can/source.ts';
@@ -34,6 +35,11 @@ export interface SensorIo {
   i2cRetryMs?: number;
   /** The system time zone (default: the one Node runs in). */
   timeZone?: TimeZoneProbe;
+  /**
+   * The HUD's wall clock, at which the time zone's UTC offset is read (default: the sources'
+   * clock, the system clock).
+   */
+  wallNow?: Clock;
 }
 
 /**
@@ -61,6 +67,6 @@ export function createSensorSources(config: HudConfig, io: SensorIo = {}): Event
       createSocket: io.createUdpSocket ?? defaultUdpSocketFactory,
       bindAddress: io.adasBindAddress,
     }),
-    new TimeZoneSource(config, io.timeZone),
+    new TimeZoneSource(config, io.timeZone, io.wallNow ?? null),
   ];
 }

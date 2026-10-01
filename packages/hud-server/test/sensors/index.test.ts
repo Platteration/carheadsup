@@ -72,6 +72,27 @@ describe('createSensorSources', () => {
     expect(clock.pendingTimers).toBe(0);
   });
 
+  it('gives the time zone the HUD’s wall clock to read the offset at', async () => {
+    const clock = new FakeClock(Date.UTC(2026, 0, 15, 12)); // the system clock: winter
+    const summer = Date.UTC(2026, 6, 15, 12); // the HUD's wall clock, from the phone
+    const sources = createSensorSources(config(), {
+      openI2c: vi.fn<I2cOpener>(),
+      spawn: fakeSpawn(),
+      createUdpSocket: fakeUdpFactory().factory,
+      timeZone: {
+        name: () => 'Europe/Berlin',
+        utcOffsetMin: (epochMs) => (epochMs === summer ? 120 : 60),
+      },
+      wallNow: () => summer,
+    });
+    const zone = sources.find((s) => s.name === 'time-zone');
+    if (zone === undefined) throw new Error('no time-zone source');
+    const { ctx, events } = recordingContext(clock);
+    await zone.start(ctx);
+    expect(events).toMatchObject([{ type: 'clock/zone', zone: { utcOffsetMin: 120 } }]);
+    await zone.stop();
+  });
+
   it('enables sensors at runtime through updateConfig, restarting only what changed', async () => {
     const clock = new FakeClock();
     const opened: number[] = [];
