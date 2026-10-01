@@ -214,7 +214,21 @@ describe('DdcBacklightDriver', () => {
     const asked = new DdcBacklightDriver({ ...options, required: true });
     expect(await asked.open()).toEqual({
       problem: 'ddcutil is not installed, so no display is dimmed over DDC/CI',
+      final: true,
     });
+  });
+
+  it('says that installing ddcutil takes a restart when it was asked for', async () => {
+    const { deps, logger } = setup();
+    const ddc = new FakeDdc();
+    ddc.installed = false;
+    const [sink] = createFrameSinks({ backlight: 'ddc' }, deps, { spawn: ddc.spawn });
+    expect(await (sink as BacklightSink).whenReady()).toBeNull();
+    expect(logger.lines('warn')).toEqual([
+      'Backlight: ddcutil is not installed, so no display is dimmed over DDC/CI; brightness is ' +
+        'applied by the renderer until that is fixed and the HUD restarted',
+    ]);
+    await sink!.stop();
   });
 
   it('says how to get access when the I²C devices are not usable', async () => {

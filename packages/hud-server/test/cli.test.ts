@@ -127,6 +127,7 @@ describe('parseCli', () => {
     expect(run(['--backlight', 'none']).backlight).toBe(false);
     expect(run(['--backlight', 'auto']).backlight).toBeNull();
     expect(run(['--backlight', '/sys/x']).backlight).toBe('/sys/x');
+    expect(run(['--backlight', './backlight/x']).backlight).toBe('./backlight/x');
   });
 
   it('takes the other backlight kinds, and refuses what it does not understand', () => {

@@ -106,8 +106,11 @@ export type BacklightOpenResult =
   | { output: BacklightOutput }
   /** Nothing there to drive (logged once, as information). */
   | { absent: string }
-  /** Something there that cannot be used (yet): logged as a warning on the first look. */
-  | { problem: string };
+  /**
+   * Something there that cannot be used (yet): logged as a warning on the first look. `final`:
+   * looking again cannot help until the HUD restarts (a tool that is not installed).
+   */
+  | { problem: string; final?: boolean };
 
 /** Finds and opens one kind of backlight. */
 export interface BacklightDriver {
@@ -222,15 +225,19 @@ export class FirstBacklightDriver implements BacklightDriver {
   async open(): Promise<BacklightOpenResult> {
     const problems: string[] = [];
     const absent: string[] = [];
+    let final = true;
     for (const driver of this.drivers) {
       const result = await driver.open();
       if ('output' in result) return result;
-      if ('problem' in result) problems.push(result.problem);
-      else absent.push(result.absent);
+      if ('problem' in result) {
+        problems.push(result.problem);
+        final &&= result.final === true;
+      } else {
+        absent.push(result.absent);
+      }
     }
-    return problems.length > 0
-      ? { problem: problems.join('; ') }
-      : { absent: absent.join(', and ') };
+    if (problems.length === 0) return { absent: absent.join(', and ') };
+    return final ? { problem: problems.join('; '), final } : { problem: problems.join('; ') };
   }
 }
 
@@ -427,7 +434,11 @@ export class BacklightSink implements FrameSink {
       }
       return null;
     }
-    const line = `Backlight: ${result.problem}; brightness is applied by the renderer until it is usable (checked every ${BACKLIGHT_REPROBE_MS / 1000} s)`;
+    const until =
+      result.final === true
+        ? 'until that is fixed and the HUD restarted'
+        : `until it is usable (checked every ${BACKLIGHT_REPROBE_MS / 1000} s)`;
+    const line = `Backlight: ${result.problem}; brightness is applied by the renderer ${until}`;
     if (first) logger.warn(line);
     else logger.debug(line);
     return null;

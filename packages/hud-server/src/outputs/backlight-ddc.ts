@@ -159,8 +159,8 @@ export class DdcBacklightDriver implements BacklightDriver {
 
   private async look(onNotInstalled: () => void): Promise<BacklightOpenResult> {
     const { required } = this.options;
-    const missing = (what: string): BacklightOpenResult =>
-      required ? { problem: what } : { absent: what };
+    const missing = (what: string, final = false): BacklightOpenResult =>
+      required ? { problem: what, ...(final ? { final } : {}) } : { absent: what };
     try {
       let buses: number[];
       if (this.options.bus !== null) {
@@ -180,7 +180,7 @@ export class DdcBacklightDriver implements BacklightDriver {
     } catch (err) {
       if (err instanceof CommandNotFoundError) {
         onNotInstalled();
-        return missing('ddcutil is not installed, so no display is dimmed over DDC/CI');
+        return missing('ddcutil is not installed, so no display is dimmed over DDC/CI', true);
       }
       const detail = errorMessage(err);
       const access = /permission|EACCES|i2c-dev|\/dev\/i2c/i.test(detail)

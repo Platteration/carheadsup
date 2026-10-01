@@ -3,7 +3,7 @@
  *
  *  - `auto` (default): the first usable Linux backlight device, else a display that takes its
  *    brightness over DDC/CI (when `ddcutil` is installed);
- *  - `sysfs` or `sysfs:<dir>` (or just `<dir>`, an absolute path): a Linux backlight device;
+ *  - `sysfs` or `sysfs:<dir>` (or just `<dir>`, any path): a Linux backlight device;
  *  - `ddc` or `ddc:<bus>`: a monitor or driver board over DDC/CI (`/dev/i2c-<bus>`);
  *  - `pwm:<chip>/<channel>[,hz=<Hz>][,min=<%>][,inverted]`: a PWM channel wired to the panel's
  *    dimming input (`/sys/class/pwm/pwmchip<chip>/pwm<channel>`);
@@ -92,8 +92,6 @@ export function parseBacklightSpec(raw: string | null | false): BacklightSpec | 
       ? `expected sysfs:<directory>, got "${raw}"`
       : { kind: 'sysfs', directory };
   }
-  // A bare path, as earlier versions took it.
-  if (value.startsWith('/')) return { kind: 'sysfs', directory: value };
   if (lower === 'ddc') return { kind: 'ddc', bus: null };
   if (lower.startsWith('ddc:')) {
     const bus = /^(?:\/dev\/)?(?:i2c-)?(\d{1,4})$/.exec(lower.slice('ddc:'.length).trim());
@@ -102,5 +100,7 @@ export function parseBacklightSpec(raw: string | null | false): BacklightSpec | 
       : { kind: 'ddc', bus: Number(bus[1]) };
   }
   if (lower.startsWith('pwm:')) return parsePwm(value.slice('pwm:'.length));
+  // A bare path, as earlier versions took any value that was not a keyword.
+  if (value.includes('/')) return { kind: 'sysfs', directory: value };
   return `expected ${BACKLIGHT_SPEC_FORMS}, got "${raw}"`;
 }
