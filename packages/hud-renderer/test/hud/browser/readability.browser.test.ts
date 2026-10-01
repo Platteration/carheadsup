@@ -78,8 +78,11 @@ async function measure(page: Page, frame: HudFrame): Promise<Styles> {
     const blink = banner.getAnimations()[0];
     if (blink === undefined) throw new Error('the critical banner does not blink');
     blink.pause();
-    // 1 s step-end cycle: the dim half runs from 500 to 1000 ms.
-    blink.currentTime = 750 - (Number(blink.effect?.getTiming().delay) || 0);
+    // 1 s step-end cycle: the dim half runs from 500 to 1000 ms of each iteration. The blink is
+    // phased by a negative delay (see flash.ts): active time = current time − delay.
+    let at = 750 + (Number(blink.effect?.getTiming().delay) || 0);
+    while (at < 0) at += 1000;
+    blink.currentTime = at;
     const blinkFloor = Number(getComputedStyle(banner).opacity);
     return {
       strokeWidth: Number.parseFloat(style.webkitTextStrokeWidth),
