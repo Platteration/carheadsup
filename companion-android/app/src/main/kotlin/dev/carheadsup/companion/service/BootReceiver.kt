@@ -15,7 +15,8 @@ import dev.carheadsup.companion.CompanionApp
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action !in STARTING_ACTIONS) return
+        val action = intent.action ?: return
+        if (action !in STARTING_ACTIONS) return
         val graph = (context.applicationContext as CompanionApp).graph
         if (!graph.settings.value.serviceEnabled) return
         if (!HudConnectionService.startInBackground(context)) graph.notifier.linkStopped()
