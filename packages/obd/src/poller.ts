@@ -534,7 +534,12 @@ export class ObdPoller {
     }
   }
 
-  /** After the full fast batch failed: do speed and rpm together (one frame) work? */
+  /**
+   * After the full fast batch failed: do speed and rpm together (one frame) work? If not, one
+   * PID per request — once a lone request has shown to work: when it fails too the link (or the
+   * vehicle) is failing, not the batching, and the batching is left to the step-down while
+   * polling (the discovery is reused on reconnects, so a wrong verdict would last the whole run).
+   */
   private async probeShortBatch(fast: readonly number[], failure: ElmError): Promise<void> {
     const primary = fast.filter((pid) => PRIMARY_PIDS.has(pid));
     const pair = primary.length === 2 ? primary : fast.slice(0, 2);
@@ -547,6 +552,16 @@ export class ObdPoller {
     } catch (err) {
       if (isLinkFatal(err)) throw err;
       this.logger.debug(`OBD: multi-PID probe failed: ${errorMessage(err)}`);
+    }
+    const lone = pair[0];
+    if (lone === undefined) return;
+    try {
+      const single = await this.driver.queryMode01([lone]);
+      if (!single.answers.has(lone)) return;
+    } catch (err) {
+      if (isLinkFatal(err)) throw err;
+      this.logger.debug(`OBD: multi-PID probe inconclusive: ${errorMessage(err)}`);
+      return;
     }
     this.setPidsPerRequest(1, `multi-PID requests fail (${failure.code})`);
   }

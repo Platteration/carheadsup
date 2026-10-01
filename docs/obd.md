@@ -142,7 +142,8 @@ slow request later in the cycle must not make earlier values look fresher than t
 and clones without working ISO-TP flow control cannot receive those (they print the first frame
 only). The poller checks this right after discovery: if the fast batch fails twice but speed and
 rpm together (a one-frame answer) work, requests are kept to answers that fit one frame (up to
-three PIDs); if even that fails, it polls one PID per request. While polling, a PID that keeps
+three PIDs); if even that fails while a lone request works, it polls one PID per request (when
+lone requests fail too, the link is failing, not the batching). While polling, a PID that keeps
 failing in multi-PID requests (three in a row, or answers with frames missing) while a request
 for it alone works makes requests smaller again — 6 → 3 → 2 → 1 PIDs — once the same multi-PID
 request has failed one more time (a link that merely stalled for a few seconds works again by
@@ -158,9 +159,9 @@ the medium tier. Coolant is read before the other medium PIDs once its reading i
 overheating alert needs it fresh). Trouble codes (four requests) and the VIN are read in a cycle
 of their own with only speed and rpm, and are put off while the car moves — read at the next
 stop, or after 5 minutes at the latest; reading them after clearing codes is never put off. At
-250 ms per request a typical 2000s K-line car then gets speed every 1.3 s and never older than
-1.5 s (it used to go stale for half a second at every trouble-code read), and coolant every
-4–6 s.
+250 ms per request a typical 2000s K-line car then gets speed every 1.3 s, never more than about
+1.5 s apart (it used to go stale for half a second at every trouble-code read), and coolant
+every 4–6 s.
 
 How many cycles per second you get depends on the car's response time and the adapter: STN-based
 adapters (OBDLink) and genuine ELM327s answer quickly, many clones slowly. The developer console

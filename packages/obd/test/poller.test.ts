@@ -642,6 +642,29 @@ describe('ObdPoller with adapters that cannot take multi-PID requests', () => {
     );
   });
 
+  it('keeps multi-PID requests when the link fails during the check (lone requests too)', async () => {
+    // A stall right after the bitmap walk: the fast batch (twice), speed + rpm and a lone
+    // request all time out. That says nothing about batching; polling one PID per request for
+    // the rest of the run (the discovery is reused on reconnects) would be wrong.
+    const ctx = make();
+    const query = ctx.driver.queryMode01.bind(ctx.driver);
+    let walked = false;
+    let stalledRequests = 0;
+    ctx.driver.queryMode01 = async (pids) => {
+      if (pids.length > 1) walked = true;
+      if (!walked || stalledRequests >= 4) return query(pids);
+      stalledRequests += 1;
+      ctx.driver.calls.push({ at: ctx.clock.now(), kind: 'mode01', pids: [...pids] });
+      throw new ElmError('TIMEOUT', 'No response within 1000 ms');
+    };
+    await ctx.poller.discover();
+    expect(stalledRequests).toBe(4);
+    expect(ctx.poller.pidsPerRequest).toBe(6);
+    await runFor(ctx, 1000);
+    expect(ofType(ctx.events, 'obd/link')).toEqual([]);
+    expect(ctx.driver.calls.at(-1)?.pids?.length).toBeGreaterThan(1);
+  });
+
   it('makes requests smaller when multi-PID requests start failing while polling', async () => {
     const ctx = make({ link: { adapter: 'ELM327 v2.1', protocol: 'ISO 15765-4 (CAN 11/500)' } });
     await ctx.poller.discover();
