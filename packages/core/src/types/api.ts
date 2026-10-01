@@ -25,6 +25,7 @@ import type { ObdLinkStatus } from './vehicle.ts';
  *   POST   /api/odometer                  { odometerKm: number }  → { ok: true }
  *   POST   /api/input                     { action: InputAction } → { ok: true }
  *   POST   /api/pairing/show                 → ApiPairingShowResult (refused unless parked)
+ *   GET    /api/kiosk/health                 → ApiKioskHealth  (the HUD itself only; 403 otherwise)
  *   GET    /api/sim                          → SimStatus         (404 when not simulating)
  *   POST   /api/sim                       SimControl → SimStatus (404 when not simulating)
  *
@@ -48,6 +49,22 @@ export interface ApiInfo {
   phoneConnected: boolean;
   /** The TLS listener the phone connects to, or null when it is off or failed to start. */
   tls: ApiTlsInfo | null;
+}
+
+/**
+ * Whether the HUD's own display still draws, for the kiosk launcher (`deploy/kiosk.sh`), which
+ * restarts the browser when the page stops sending its heartbeat (`RendererAlive`).
+ */
+export interface ApiKioskHealth {
+  /**
+   * Time since the last heartbeat from a page on the HUD itself, or null when none arrived since
+   * the server started.
+   */
+  aliveAgoMs: number | null;
+  /** How long the server has been running. */
+  uptimeMs: number;
+  /** Renderer connections from the HUD itself right now (the kiosk, a local developer console). */
+  displays: number;
 }
 
 /** The HUD's TLS listener (`server.tlsPort`) and its certificate. */

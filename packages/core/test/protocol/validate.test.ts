@@ -613,12 +613,45 @@ describe('parseRendererMessage', () => {
     });
   });
 
+  it('accepts the kiosk heartbeat', () => {
+    expect(ok(parseRendererMessage(json({ t: 'alive', frameAt: 5 })))).toEqual({ t: 'alive' });
+  });
+
+  it('accepts a page error with a multi-line stack, or without one', () => {
+    const stack = 'TypeError: x is undefined\n    at render (hud-AbC.js:1:2)\n\tat main';
+    expect(
+      ok(parseRendererMessage(json({ t: 'client-error', message: 'x is undefined', stack }))),
+    ).toEqual({ t: 'client-error', message: 'x is undefined', stack });
+    expect(ok(parseRendererMessage(json({ t: 'client-error', message: 'boom' })))).toEqual({
+      t: 'client-error',
+      message: 'boom',
+      stack: null,
+    });
+  });
+
+  it('takes a page error of the largest size', () => {
+    const message = json({
+      t: 'client-error',
+      message: 'm'.repeat(PROTOCOL_LIMITS.clientErrorMessage),
+      stack: 's'.repeat(PROTOCOL_LIMITS.clientErrorStack),
+    });
+    expect(message.length).toBeLessThanOrEqual(PROTOCOL_LIMITS.rendererFrameChars);
+    expect(parseRendererMessage(message).ok).toBe(true);
+  });
+
   it.each([
     [json({ t: 'frame', frame: {} }), 'unknown message type "frame"'],
     [json({ t: 'input', action: 'launch' }), /^input\.action: expected one of/],
     [json({ t: 'input' }), 'input.action: required'],
     ['nope', 'invalid JSON'],
-    [json({ t: 'input', action: 'primary', pad: 'x'.repeat(2000) }), /^message too large/],
+    [json({ t: 'input', action: 'primary', pad: 'x'.repeat(5000) }), /^message too large/],
+    [json({ t: 'client-error' }), 'client-error.message: required'],
+    [json({ t: 'client-error', message: 'a\u0007b' }), /^client-error\.message: must not contain/],
+    [
+      json({ t: 'client-error', message: 'm'.repeat(PROTOCOL_LIMITS.clientErrorMessage + 1) }),
+      /^client-error\.message: /,
+    ],
+    [json({ t: 'client-error', message: 'm', stack: 's'.repeat(3000) }), /^client-error\.stack: /],
   ])('rejects %s', (raw, error) => {
     const message = err(parseRendererMessage(raw));
     if (typeof error === 'string') expect(message).toBe(error);

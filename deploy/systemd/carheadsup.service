@@ -28,6 +28,13 @@ EnvironmentFile=-/etc/default/carheadsup
 ExecStart=/usr/bin/node /opt/carheadsup/packages/hud-server/src/main.ts --config /etc/carheadsup/config.json --data-dir /var/lib/carheadsup --renderer-dir /opt/carheadsup/packages/hud-renderer/dist
 Restart=always
 RestartSec=2
+# Restart it as well when it hangs: the server pings systemd from its frame loop every 5 s
+# (`systemd-notify WATCHDOG=1`, a child process, hence NotifyAccess=all), so an event loop stuck in
+# an endless loop, or frames that can no longer be composed, end in a restart after 20 s instead
+# of a HUD that stays dark until the power is cycled. (A frozen kernel is the hardware watchdog's
+# job, see RuntimeWatchdogSec in docs/install-raspberry-pi.md.)
+WatchdogSec=20
+NotifyAccess=all
 # SIGTERM makes the server flush trips and state; each shutdown step has its own 5 s limit.
 TimeoutStopSec=30
 UMask=0077

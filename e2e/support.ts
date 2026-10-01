@@ -61,6 +61,8 @@ export interface SimulatedHud {
   /** SHA-256 of the HUD's certificate (what the companion app pins). */
   fingerprint: string;
   dataDir: string;
+  /** The server's warnings and errors so far, one log line each. */
+  warnings: string[];
   /** POST /api/sim. */
   sim(control: SimControl): Promise<SimStatus>;
   /** PATCH /api/config; throws when the HUD rejects a field. */
@@ -167,10 +169,14 @@ export async function startSimulatedHud(options: StartOptions = {}): Promise<Sim
     options.rendererDir ??
     process.env[RENDERER_DIR_ENV] ??
     join(REPO_ROOT, 'packages', 'hud-renderer', 'dist');
+  const warnings: string[] = [];
+  const record = (...args: unknown[]): void => void warnings.push(args.map(String).join(' '));
+  const quiet = (): void => undefined;
   const server = createHudServer({
     dataDir,
     rendererDir,
     sim: true,
+    logger: { debug: quiet, info: quiet, warn: record, error: record },
     port: options.port ?? 0,
     tlsPort: 0,
     host,
@@ -216,6 +222,7 @@ export async function startSimulatedHud(options: StartOptions = {}): Promise<Sim
     tlsPort,
     fingerprint,
     dataDir,
+    warnings,
     sim: (control) => json<SimStatus>('POST', '/api/sim', control),
     patchConfig: async (patch) => {
       const result = await json<{ config: HudConfig; errors: string[] }>(

@@ -188,7 +188,10 @@ share test vectors with the server). What has **not** been verified:
 - **Raspberry Pi peripherals.** The GPIO buttons, I²C light and gesture sensors, the
   steering-wheel inputs (CAN HAT with `candump`, ADS1115 ladder), backlight control, the kiosk on
   a real display, the hotspot, mDNS on the car's Wi-Fi and the ignition power-down are covered by
-  tests with fakes and by script linting, not on a Pi or in a car.
+  tests with fakes and by script linting, not on a Pi or in a car. So are the watchdogs (the kiosk
+  restarting a hung or crashed page, systemd restarting a hung server, the hardware watchdog) and
+  the installer's rollback: how Chromium on a Pi really hangs or crashes, and a power cut during
+  an update, have not been tried.
 - **The Android app (`:app`).** It could not be compiled here (no Android SDK); only its
   `:protocol` module is built and tested, and the app code was type-checked against stubs. The
   notification parsing, media, calls, discovery, pairing screens, the QR scanner (CameraX), file

@@ -159,16 +159,20 @@ sudo deploy/install.sh --obd-mac 00:1D:A5:68:98:8B
    the server, and **`carheadsup-kiosk`** (groups `video`, `render`, `input`) that runs the
    browser;
 3. copies the code to **`/opt/carheadsup`** (owned by root, devDependencies pruned), after
-   checking that the copy starts;
+   checking that the copy starts — flushed to disk before and after it replaces the installed
+   copy, which it keeps as `/opt/carheadsup.prev` (see [Updating](#updating));
 4. creates **`/var/lib/carheadsup`** (data, mode 0700) and **`/etc/carheadsup`** (config, mode
    0750), both owned by `carheadsup`. The server writes `/etc/carheadsup/config.json` with the
    defaults on its first start; existing files are kept;
 5. installs `/etc/default/carheadsup` (once), a udev rule that lets the `video` group set the
    display backlight, the kiosk's PAM stack, the static Avahi advertisement if `avahi-utils` is
    missing, and the systemd units;
-6. enables `carheadsup.service`, `carheadsup-kiosk.service` (and makes `graphical.target` the
+6. lets the [hardware watchdog](#watchdogs) reset a frozen system
+   (`/etc/systemd/system.conf.d/carheadsup-watchdog.conf`, when the Pi has a watchdog device);
+7. enables `carheadsup.service`, `carheadsup-kiosk.service` (and makes `graphical.target` the
    default boot target, which starts it) and `obd-rfcomm@<MAC>.service`;
-7. restarts the services.
+8. restarts the services and waits up to 60 s for the server to answer. After an update that
+   does not, it puts the previous version back by itself.
 
 | Option | Effect |
 | --- | --- |
@@ -176,6 +180,9 @@ sudo deploy/install.sh --obd-mac 00:1D:A5:68:98:8B
 | `--no-kiosk` | No kiosk (headless, e.g. a test machine); removes a previously installed kiosk |
 | `--no-start` | Install and enable, but do not (re)start anything now |
 | `--no-prune` | Keep devDependencies in `/opt/carheadsup` |
+| `--no-hardware-watchdog` | Do not let the hardware watchdog reset a frozen system; removes the setting if it was installed |
+| `--start-timeout <s>` | Wait this long for the restarted server (default 60; `0`: do not wait, and never roll back by itself) |
+| `--rollback` | Go back to the version before the last update, see [Updating](#updating) |
 
 After a minute the display shows the HUD — mirrored, because it is meant to be seen in the glass.
 
@@ -189,8 +196,8 @@ After a minute the display shows the HUD — mirrored, because it is meant to be
   --renderer-dir /opt/carheadsup/packages/hud-renderer/dist
 ```
 
-as `carheadsup`, restarts it whenever it exits (`Restart=always`), gives it 30 s to save its state
-on stop, waits for the file systems that hold `/var/lib/carheadsup` and `/etc/carheadsup` to be
+as `carheadsup`, restarts it whenever it exits (`Restart=always`) or hangs (the
+[service watchdog](#watchdogs)), gives it 30 s to save its state on stop, waits for the file systems that hold `/var/lib/carheadsup` and `/etc/carheadsup` to be
 mounted (`RequiresMountsFor`, see [read-only root](#read-only-root-file-system)), and confines
 it: `NoNewPrivileges`, no capabilities, `ProtectSystem=strict` with
 `ReadWritePaths=` only for `/var/lib/carheadsup`, `/etc/carheadsup` and `/sys/class/backlight`,
@@ -211,7 +218,9 @@ crash-looping, or listening on another port — the screen stays black (cage dra
 long that lasts, and every `CARHEADSUP_KIOSK_WAIT_S` seconds the kiosk's log says why ("no
 answer", "HTTP 503" …). Should a page still fail later, Chromium runs with dark error pages. cage
 has no idle timeout, so the screen never blanks by itself; if cage or Chromium exits, systemd
-restarts it. Settings (in a drop-in, `sudo systemctl edit carheadsup-kiosk`):
+restarts it. Once Chromium runs, the launcher also restarts it when the page stops drawing (the
+[kiosk watchdog](#watchdogs)), and Chromium's own warnings and errors go to the kiosk's journal.
+Settings (in a drop-in, `sudo systemctl edit carheadsup-kiosk`):
 
 ```ini
 [Service]
@@ -219,11 +228,17 @@ Environment=CARHEADSUP_KIOSK_URL=http://localhost:8080/
 Environment=CARHEADSUP_KIOSK_WAIT_S=60
 Environment=CARHEADSUP_KIOSK_SCALE=1
 Environment=CARHEADSUP_KIOSK_FLAGS=
+Environment=CARHEADSUP_KIOSK_GRACE_S=30
+Environment=CARHEADSUP_KIOSK_STALE_S=5
 ```
 
 `CARHEADSUP_KIOSK_WAIT_S` is how often a warning is logged while the kiosk waits (it keeps
 waiting); `CARHEADSUP_KIOSK_SCALE` is Chromium's device scale factor (1 = one CSS pixel per panel
-pixel); `CARHEADSUP_KIOSK_FLAGS` are extra Chromium flags, separated by spaces. When the server
+pixel); `CARHEADSUP_KIOSK_FLAGS` are extra Chromium flags, separated by spaces;
+`CARHEADSUP_KIOSK_GRACE_S` is how long Chromium gets after it starts before the page must send
+its heartbeat (raise it if a slow board needs longer to show the HUD), and
+`CARHEADSUP_KIOSK_STALE_S` how long the page may go without one (`0` switches the kiosk watchdog
+off). When the server
 moves to another port (`server.port`, `CARHEADSUP_PORT`), change `CARHEADSUP_KIOSK_URL` with it —
 until then the kiosk stays black. Likewise when it listens on one network address only
 (`server.host`, e.g. `10.42.0.1`): `localhost` does not reach it then, so use
@@ -233,6 +248,28 @@ the Pi itself: plain http, no token.
 `-s` lets you switch to a text console with `Ctrl+Alt+F2` when a keyboard is attached. The kiosk
 page maps keys to HUD inputs (Enter / Escape / arrows / B / + / −, see
 [architecture.md](architecture.md#driver-input)).
+
+### Watchdogs
+
+Every stale-data guard of the HUD page runs inside that page. Three watchdogs outside it make
+sure that a hang anywhere ends in a dark panel and a restart, never in a frozen image that looks
+live ([architecture](architecture.md#liveness-outside-the-page)):
+
+- **Kiosk**: the page sends the server a heartbeat from its animation frames, about once a
+  second. When the server answers but has had none for 5 s — the page or the browser's
+  compositor hangs, or the renderer process crashed ("Aw, Snap!", e.g. killed for lack of memory)
+  — `kiosk.sh` stops Chromium and systemd starts the kiosk again: the panel is dark for a few
+  seconds. It never does so within 30 s of starting Chromium, nor while the server does not answer
+  (the page blanks itself then). The kiosk's journal says "the page has sent no heartbeat for …;
+  restarting the browser".
+- **Server**: the server pings systemd from its frame loop every 5 s (`WatchdogSec=20`). An event
+  loop stuck in an endless loop, or frames that can no longer be composed, end in a restart after
+  20 s (`journalctl -u carheadsup` says "Watchdog timeout").
+- **System**: a frozen kernel stops everything above — and leaves the last image on the panel
+  until the power is cut. The installer lets the Pi's hardware watchdog reset it after 15 s
+  (`RuntimeWatchdogSec=15` in `/etc/systemd/system.conf.d/carheadsup-watchdog.conf`, applied with
+  `systemctl daemon-reexec`; skipped where there is no `/dev/watchdog`). Check it with
+  `systemctl show -p RuntimeWatchdogUSec` (`15s`); `--no-hardware-watchdog` removes it.
 
 **`obd-rfcomm@.service`** ([source](../deploy/systemd/obd-rfcomm@.service)) runs
 `rfcomm bind rfcomm0 <MAC> 1` before the server starts (channel 1 is the serial port profile on
@@ -342,6 +379,12 @@ This file is a single line; append options with a space, on the same line:
 - `consoleblank=0` keeps the text console from blanking (the kiosk never blanks by itself);
 - a bar display that does not announce its resolution can be forced to it, e.g.
   `video=HDMI-A-1:1280x480M@60` (check the display's documentation for its mode);
+- an HDMI panel that powers up after the Pi, or whose connector loses contact on a bumpy road,
+  can leave the Pi without a mode or with the wrong one. Add `D` to force the connector on with
+  that mode whatever the panel reports: `video=HDMI-A-1:1280x480M@60D`. Without a panel the kiosk
+  [watchdog](#watchdogs) restarts the browser every half minute or so (the page draws nothing);
+  that is expected and stops once the panel is back. Try it on the bench: unplug and replug the
+  panel while the simulator runs;
 - `video=DSI-1:800x480@60,rotate=180` turns the console of an upside-down DSI panel.
 
 ## 10. Configure the HUD
@@ -533,7 +576,18 @@ sudo deploy/install.sh
 
 The installer replaces `/opt/carheadsup`, keeps `/etc/carheadsup` and `/var/lib/carheadsup`,
 leaves an enabled `obd-rfcomm@…` unit enabled (no need to repeat `--obd-mac`) and restarts the
-services. Config files from older versions are read leniently: new options get their defaults,
+services. The update is safe against a power cut — the ignition going off right afterwards: the
+new copy is flushed to the card before it replaces the old one and again after, so it can never
+come back as empty files after a cut. The replaced version stays in `/opt/carheadsup.prev`. When
+the restarted server does not answer within 60 s (`--start-timeout`), the installer puts the
+previous version back, with its systemd units, and says so ("the update failed and was rolled
+back"); the failed one is then in `/opt/carheadsup.prev`. To go back by hand — a version that
+starts but misbehaves in the car:
+
+```sh
+sudo /opt/carheadsup/deploy/install.sh --rollback   # the version before the last update
+sudo /opt/carheadsup/deploy/install.sh --rollback   # again: forward to the newer one
+``` Config files from older versions are read leniently: new options get their defaults,
 and a file that had to be corrected is kept as `config.json.bak`. With a read-only root, switch
 the overlay off first ([changing the system later](#read-only-root-file-system)).
 
@@ -560,6 +614,9 @@ renderer clients pass their token) or message content.
 | Settings, odometer or trips are back to old values after every start | With a read-only root: the data partition is under the overlay (`findmnt /var/lib/carheadsup` says `overlay`) — see [step 4 of the recipe](#read-only-root-file-system). |
 | All settings back to defaults after a hand edit, the phone cannot connect, settings cannot be saved | The file is not valid JSON (the log says "is not valid JSON"); the HUD runs locked until it is fixed — see [editing by hand](#10-configure-the-hud). |
 | Only a tiny red dot in a corner | The page is loaded but receives no frames: the server is down or restarting (`systemctl status carheadsup`). |
+| The display goes dark for a few seconds and the HUD comes back | A watchdog restarted something: `journalctl -u carheadsup-kiosk -b \| grep heartbeat` (the page hung or its renderer crashed — on a 512 MB board often for lack of memory) or `journalctl -u carheadsup -b \| grep -i watchdog` (the server hung). Page errors are in the server's log ("page error on the HUD's display"). See [Watchdogs](#watchdogs). |
+| The kiosk restarts every half minute | Its page draws nothing: no panel connected or detected (force the connector on, see [cmdline.txt](#bootfirmwarecmdlinetxt)), or a board too slow to show the page within `CARHEADSUP_KIOSK_GRACE_S` (raise it). |
+| The installer says "the update failed and was rolled back" | The new version did not answer within 60 s; the previous one runs again. The journal lines it printed say why; `sudo /opt/carheadsup/deploy/install.sh --rollback` tries the new one again (`--start-timeout 180` for a slow first start). |
 | Only a tiny ring in a corner | The HUD is blanked: hold the primary button, press B on a keyboard, or send `toggle-blank` from the companion's remote. |
 | Text reads backwards / upside down on the glass | *Projection*: `mirrorX`, `mirrorY`, *Panel rotation*. |
 | OBD never connects | `journalctl -u carheadsup` shows the reason. Ignition on? `/dev/rfcomm0` present (`systemctl status obd-rfcomm@<MAC>`)? Adapter paired *and* trusted? Another device (a phone app) connected to it? For USB: right `obd.serialPath` and `obd.baudRate`? Try `obd.protocol` = `"6"` (CAN 11-bit 500 kbit/s) instead of automatic on a modern car. |
@@ -598,6 +655,7 @@ sudo nmcli connection delete carheadsup-hotspot  # if you created the hotspot
 | Path | Owner / mode | What |
 | --- | --- | --- |
 | `/opt/carheadsup` | root, read-only to others | Code, production dependencies, built pages, `deploy/`, `docs/` |
+| `/opt/carheadsup.prev` | root | The version before the last update (`install.sh --rollback`) |
 | `/etc/carheadsup/config.json` | `carheadsup`, 0600 | Configuration (contains the tokens); `config.json.bak` after a correction |
 | `/var/lib/carheadsup` | `carheadsup`, 0700 | `state.json` (odometer, learned gears, service records), `trips.jsonl`, `hud-id` and `tls.pem` (the HUD's identity and TLS key and certificate, which paired phones pin — keep them when moving to a new card, or pair the phone again) |
 | `/var/lib/carheadsup-kiosk` | `carheadsup-kiosk`, 0700 | Home of the kiosk user |
@@ -605,6 +663,7 @@ sudo nmcli connection delete carheadsup-hotspot  # if you created the hotspot
 | `/etc/systemd/system/carheadsup.service` | root | The server |
 | `/etc/systemd/system/carheadsup-kiosk.service` | root | The kiosk |
 | `/etc/systemd/system/obd-rfcomm@.service` | root | Bluetooth OBD binding, one instance per adapter MAC |
+| `/etc/systemd/system.conf.d/carheadsup-watchdog.conf` | root | Hardware watchdog (`RuntimeWatchdogSec=15`), see [Watchdogs](#watchdogs) |
 | `/etc/pam.d/carheadsup-kiosk` | root | Session setup for the kiosk |
 | `/etc/udev/rules.d/99-carheadsup-backlight.rules` | root | Backlight writable by the `video` group |
 | `/etc/avahi/services/carheadsup.service` | root | Static mDNS advertisement, only when `avahi-utils` is missing |

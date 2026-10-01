@@ -7,13 +7,16 @@
 # tty1 and is restarted whenever cage or Chromium exits. cage has no idle timeout, so the panel
 # never blanks by itself; the only blanking is the HUD's own (blank button / B key). Until the
 # HUD page loads (server starting, stopped, or on another port) the screen stays black: the
-# launcher never shows Chromium's bright error page on the windshield.
+# launcher never shows Chromium's bright error page on the windshield. Once it runs, the launcher
+# watches the page's heartbeat and restarts the browser when the page hangs or its renderer
+# crashed (never while the server is down: the page blanks itself then).
 #
 # Change the page, the scale or extra Chromium flags (CARHEADSUP_KIOSK_FLAGS, see kiosk.sh) with
 # a drop-in (`sudo systemctl edit carheadsup-kiosk`):
 #   [Service]
 #   Environment=CARHEADSUP_KIOSK_URL=http://localhost:8081/
 #   Environment=CARHEADSUP_KIOSK_SCALE=1.25
+#   Environment=CARHEADSUP_KIOSK_GRACE_S=60
 
 [Unit]
 Description=carheadsup HUD kiosk (Chromium in cage)
@@ -43,6 +46,10 @@ UtmpMode=user
 ExecStart=/usr/bin/cage -d -s -- /opt/carheadsup/deploy/kiosk.sh
 Restart=always
 RestartSec=3
+# Chromium logs to stderr (--enable-logging): keep a misbehaving GPU driver from flooding the
+# journal.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=300
 
 [Install]
 WantedBy=graphical.target

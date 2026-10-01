@@ -85,12 +85,35 @@ expect_tls "--tls-port from a drop-in beats everything" 9445 "$dropin_tls" "${WO
 expect_tls "--tls-port=OFF" off "$dropin_tls_off" "${WORK}/env-tls" "${WORK}/tls-config.json"
 expect_tls "--port does not set the TLS port" 8443 "$dropin_port" "${WORK}/env-port" "${WORK}/missing.json"
 
+# The address the installer asks the restarted server at: --host, CARHEADSUP_HOST, server.host,
+# else all addresses.
+printf '{ "server": { "host": "10.42.0.1" } }\n' >"${WORK}/host-config.json"
+printf 'CARHEADSUP_HOST="192.168.4.1"\n' >"${WORK}/env-host"
+dropin_host=$(printf '%s\n[Service]\nExecStart=\nExecStart=/usr/bin/node main.ts --host=127.0.0.1\n' "$shipped")
+
+# expect_host <description> <expected> <unit text> <env file> <default config>
+expect_host() {
+  local description=$1 expected=$2 actual
+  actual=$(effective_host "$3" "$4" "$5")
+  if [[ $actual == "$expected" ]]; then
+    printf 'ok    install.sh host: %s\n' "$description"
+  else
+    printf 'FAIL  install.sh host: %s: expected %s, got %s\n' "$description" "$expected" "$actual" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+expect_host "nothing configured" 0.0.0.0 "" "${WORK}/missing-env" "${WORK}/missing.json"
+expect_host "server.host in the config file" 10.42.0.1 "" "${WORK}/env-empty" "${WORK}/host-config.json"
+expect_host "CARHEADSUP_HOST beats server.host" 192.168.4.1 "" "${WORK}/env-host" "${WORK}/host-config.json"
+expect_host "--host from a drop-in beats everything" 127.0.0.1 "$dropin_host" "${WORK}/env-host" "${WORK}/host-config.json"
+
 # The static Avahi file gets both ports, or no tls record when TLS is off.
 readonly AVAHI_TEMPLATE="${TEST_DIR}/../avahi/carheadsup.service"
 expect_avahi() {
   local description=$1 port=$2 tls=$3 pattern=$4 absent=$5 text
   text=$(static_avahi_service "$port" "$tls" <"$AVAHI_TEMPLATE")
-  if [[ $text == *"$pattern"* && ( -z $absent || $text != *"$absent"* ) ]]; then
+  if [[ $text == *"$pattern"* && (-z $absent || $text != *"$absent"*) ]]; then
     printf 'ok    install.sh Avahi file: %s\n' "$description"
   else
     printf 'FAIL  install.sh Avahi file: %s\n%s\n' "$description" "$text" >&2

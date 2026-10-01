@@ -7,6 +7,11 @@ import { INPUT_ACTIONS } from '../types/events.ts';
 import { HAZARD_TYPES, LANE_DIRECTIONS, MANEUVER_TYPES } from '../types/nav.ts';
 import type { RoadClass } from '../types/nav.ts';
 import type { CallState } from '../types/phone.ts';
+import {
+  CLIENT_ERROR_MESSAGE_CHARS,
+  CLIENT_ERROR_STACK_CHARS,
+  RENDERER_FRAME_CHARS,
+} from '../types/protocol.ts';
 import type { AdasMessage, PhoneToHud, RendererToServer } from '../types/protocol.ts';
 import { AUTH_ID_PATTERN, AUTH_PROOF_PATTERN, PHONE_AUTH } from './phone-auth.ts';
 
@@ -18,6 +23,11 @@ export const PROTOCOL_LIMITS = {
   phoneFrameChars: 128 * 1024,
   /** Whole renderer / ADAS frame. */
   smallFrameChars: 1024,
+  /** Whole renderer frame (a `client-error` carries a stack trace). */
+  rendererFrameChars: RENDERER_FRAME_CHARS,
+  /** A renderer's `client-error`: the message and the stack trace. */
+  clientErrorMessage: CLIENT_ERROR_MESSAGE_CHARS,
+  clientErrorStack: CLIENT_ERROR_STACK_CHARS,
   /** Names and labels: device, app, source, street, sender, caller name … */
   name: 100,
   /** Media title / artist / album (song titles can be long). */
@@ -254,6 +264,12 @@ export const phoneToHudSchema = z.discriminatedUnion('t', phoneSchemas);
 /** Strict schema for renderer → server messages. */
 export const rendererToServerSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('input'), action: z.enum(INPUT_ACTIONS) }),
+  z.object({ t: z.literal('alive') }),
+  z.object({
+    t: z.literal('client-error'),
+    message: freeText(L.clientErrorMessage),
+    stack: orNull(freeText(L.clientErrorStack)),
+  }),
 ]);
 
 /** Strict schema for ADAS module messages. */
@@ -353,7 +369,7 @@ export function parsePhoneMessage(raw: string): ParseResult<PhoneToHud> {
 
 /** Strictly validate a frame from the renderer / dev console (see `parsePhoneMessage`). */
 export function parseRendererMessage(raw: string): ParseResult<RendererToServer> {
-  return parseFrame(raw, L.smallFrameChars, rendererToServerSchema, RENDERER_TYPES, null);
+  return parseFrame(raw, L.rendererFrameChars, rendererToServerSchema, RENDERER_TYPES, null);
 }
 
 /** Strictly validate one newline-delimited JSON datagram from the ADAS module. */

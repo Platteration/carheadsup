@@ -1,5 +1,5 @@
 import { DEFAULT_CONFIG } from '@carheadsup/core';
-import type { HudFrame, RendererDisplayMessage } from '@carheadsup/core';
+import type { ApiKioskHealth, HudFrame, RendererDisplayMessage } from '@carheadsup/core';
 import type { FrameSink } from '../../src/sources/types.ts';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ClientOptions } from 'ws';
@@ -8,6 +8,7 @@ import {
   TestSocket,
   lanAddress,
   otherDevice,
+  sleep,
   startTestServer,
   waitFor,
 } from '../helpers.ts';
@@ -178,8 +179,84 @@ describe('/ws/hud', () => {
     expect(await socket.closed).toBe(1001);
   });
 
+  it("records the HUD display's heartbeat for GET /api/kiosk/health", async () => {
+    const t = await start();
+    const health = async (): Promise<ApiKioskHealth> =>
+      (await (await fetch(`${t.base}/api/kiosk/health`)).json()) as ApiKioskHealth;
+    const until = async (check: (h: ApiKioskHealth) => boolean, what: string) => {
+      const deadline = Date.now() + 2000;
+      while (!check(await health())) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+        await sleep(10);
+      }
+    };
+    const before = await health();
+    expect(before).toMatchObject({ aliveAgoMs: null, displays: 0 });
+    expect(before.uptimeMs).toBeGreaterThanOrEqual(0);
+
+    const socket = connect(`${t.wsBase}/ws/hud`);
+    await socket.opened;
+    await until((h) => h.displays === 1, 'the display counted');
+    expect((await health()).aliveAgoMs).toBeNull();
+    socket.send({ t: 'alive' });
+    await until((h) => h.aliveAgoMs !== null, 'the heartbeat');
+    expect((await health()).aliveAgoMs).toBeLessThan(1000);
+    // It ages while nothing more arrives, and stays after the page disconnects.
+    await sleep(250);
+    expect((await health()).aliveAgoMs).toBeGreaterThanOrEqual(200);
+    socket.close();
+    await until((h) => h.displays === 0, 'the display gone');
+    expect((await health()).aliveAgoMs).not.toBeNull();
+    expect(t.logger.text('debug')).toContain("the HUD's display is drawing");
+  });
+
+  it('logs page errors at warn, a few at a time', async () => {
+    const t = await start();
+    const socket = connect(`${t.wsBase}/ws/hud`);
+    await socket.opened;
+    socket.send({
+      t: 'client-error',
+      message: 'x is undefined',
+      stack: 'TypeError: x is undefined\n    at render (hud-AbC.js:1:2)',
+    });
+    await waitFor(() => t.logger.text('warn').includes('page error'), 2000, 'the logged error');
+    expect(t.logger.text('warn')).toContain(
+      "Renderer: page error on the HUD's display: TypeError: x is undefined\n    at render (hud-AbC.js:1:2)",
+    );
+    // A page in a reload loop does not flood the log: three at once, then one per 20 s.
+    for (let i = 0; i < 6; i += 1) socket.send({ t: 'client-error', message: `boom ${i}` });
+    socket.send({ t: 'input', action: 'toggle-blank' });
+    await waitFor(() => t.server.engine.state.ui.blanked, 2000, 'the input after the errors');
+    const logged = t.logger.lines.filter((l) => l.text.includes('page error'));
+    expect(
+      logged.map((l) => l.text.replace("Renderer: page error on the HUD's display: ", '')),
+    ).toEqual(['TypeError: x is undefined\n    at render (hud-AbC.js:1:2)', 'boom 0', 'boom 1']);
+  });
+
   const lan = lanAddress();
   const device = otherDevice(lan);
+
+  it.skipIf(lan === null)(
+    "ignores other devices' heartbeats and keeps the health endpoint to the HUD itself",
+    async () => {
+      const t = await start({ host: '0.0.0.0' });
+      const remote = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud`);
+      sockets.push(remote);
+      await remote.opened;
+      remote.send({ t: 'alive' });
+      remote.send({ t: 'client-error', message: 'remote boom' });
+      await waitFor(
+        () => t.logger.text('warn').includes('remote boom'),
+        2000,
+        'the remote page error',
+      );
+      expect(t.logger.text('warn')).toContain(`page error on a display at ${lan}: remote boom`);
+      const local = (await (await fetch(`${t.base}/api/kiosk/health`)).json()) as ApiKioskHealth;
+      expect(local).toMatchObject({ aliveAgoMs: null, displays: 0 });
+      const fromDevice = await device.request(`https://${lan}:${t.tlsPort}/api/kiosk/health`);
+      expect(fromDevice.status).toBe(403);
+    },
+  );
 
   it.skipIf(lan === null)('requires the API token from remote clients', async () => {
     const t = await start({ host: '0.0.0.0', config: { server: { apiToken: 's3cret' } } });

@@ -3,8 +3,10 @@
 #
 #   deploy/check.sh
 #
-# - bash -n on every script (and on the tests in test/), and shellcheck when it is installed;
-# - the behaviour tests in test/ (stub commands in a temporary directory, about 15 s);
+# - bash -n on every script (and on the tests in test/), and shellcheck and shfmt (2-space
+#   indent, indented case labels) when they are installed;
+# - the behaviour tests in test/ (stub commands in a temporary directory, about a minute and a
+#   half: the kiosk tests wait for the launcher's polls);
 # - systemd-analyze verify on the units when available (complaints about binaries or units that
 #   only exist on the Pi, such as cage, rfcomm or bluetooth.service, are expected and filtered);
 # - xmllint on the Avahi service file when available.
@@ -40,6 +42,15 @@ check_scripts() {
     fi
   else
     skip "shellcheck (not installed)"
+  fi
+  if command -v shfmt >/dev/null 2>&1; then
+    if shfmt -d -i 2 -ci "${DEPLOY_DIR}"/*.sh "${DEPLOY_DIR}"/test/*.sh; then
+      pass "shfmt"
+    else
+      fail "shfmt"
+    fi
+  else
+    skip "shfmt (not installed)"
   fi
 }
 

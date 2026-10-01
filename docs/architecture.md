@@ -184,7 +184,7 @@ Other data has its own lifetime:
 
 | Data | Rule |
 | --- | --- |
-| The whole HUD | The kiosk page blanks everything but a small "no signal" dot when the frame time has not advanced for 1 s (two frame intervals at a frame rate below 2, at most 2.5 s) or the socket is closed; after (re)connecting it waits for a second, newer frame, so a server's cached frame is never taken for live (`hud-renderer/src/common/staleness.ts`). |
+| The whole HUD | The kiosk page blanks everything but a small "no signal" dot when the frame time has not advanced for 1 s (two frame intervals at a frame rate below 2, at most 2.5 s) or the socket is closed; after (re)connecting it waits for a second, newer frame, so a server's cached frame is never taken for live (`hud-renderer/src/common/staleness.ts`). What that page cannot catch itself is watched from outside, see [below](#liveness-outside-the-page). |
 | Blind-spot and collision state | Ignored 1 s after the module's last report; the module counts as disconnected after 2 s of silence. A collision *warning* is held for 1 s after the module last reported one, whatever it reports meanwhile, so it cannot flicker. |
 | Light-sensor reading | Stops driving the brightness after 5 s; the sun position (or the last level) takes over. |
 | Speed limit | Shown only while the phone is connected, and dropped when the phone has not re-sent the road for 75 s (it does every 30 s while it has location fixes). |
@@ -196,6 +196,22 @@ Other data has its own lifetime:
 Navigation and hazard distances are dead-reckoned between phone updates using the distance the
 car itself has travelled (integrated from the OBD speed), so the countdown stays smooth even if
 the phone reports only once a second.
+
+### Liveness outside the page
+
+The page's guards run on the page's own main thread. When that thread or the browser's
+compositor hangs, or the renderer process crashes (Chromium then shows "Aw, Snap!" and does not
+exit), the last image would stay on the glass, looking live. Three watchdogs outside the page,
+each fed by the code path whose liveness it proves, end that:
+
+| Hangs | Noticed by | Then |
+| --- | --- | --- |
+| The page, the browser's compositor or renderer process | The kiosk page sends `{ "t": "alive" }` over `/ws/hud` from its animation frames, about once a second (`hud/heartbeat.ts`); the server keeps the time of the last one from the Pi's own display and serves its age at `GET /api/kiosk/health`; the kiosk launcher (`deploy/kiosk.sh`) asks every 2 s. | After 5 s without one while the server answers, the launcher stops Chromium; systemd starts the kiosk again. Never while the server does not answer (stopped, restarting — the page blanks itself then), never within 30 s of starting the browser, and never on an answer without the fields (an older server). |
+| The server's event loop or its frame composer | The server pings systemd (`systemd-notify WATCHDOG=1`) from its frame loop, at most every 5 s (`hud-server/src/system/watchdog.ts`); `WatchdogSec=20` in `carheadsup.service`. | systemd restarts the server; the page blanks meanwhile. |
+| The kernel or systemd | systemd pets the hardware watchdog (`RuntimeWatchdogSec=15`, set by the installer). | The SoC resets: the panel goes dark and the HUD boots again. |
+
+The page also reports the errors it catches (`{ "t": "client-error" }`: an exception that made it
+start over, or one no code handled), which the server logs at warn, a few at a time.
 
 ## Driving contexts and adaptive clutter
 

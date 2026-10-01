@@ -3,8 +3,10 @@ import { adoptTokenFromUrl, localStorageTokenStore } from './common/api.ts';
 import { useHudFeed } from './common/useHudFeed.ts';
 import { HudView } from './hud/HudView.tsx';
 import { KioskBoundary } from './hud/KioskBoundary.tsx';
+import { useKioskHeartbeat } from './hud/heartbeat.ts';
 import { readKioskParams, useFixture, useKioskKeyboard, useWakeLock } from './hud/kiosk.ts';
 import type { KioskParams } from './hud/kiosk.ts';
+import { PageErrorReporter, reportUncaughtErrors, usePageErrorSender } from './hud/page-errors.ts';
 import './hud/kiosk.css';
 
 /**
@@ -17,12 +19,22 @@ import './hud/kiosk.css';
  * address the server listens on) and needs no token. Opened from another device
  * once `server.apiToken` is set, the page uses the token stored on that device (by the settings
  * app, or `?token=` on this page).
+ *
+ * Live, the page also sends the server its heartbeat (the kiosk launcher restarts the browser
+ * when it stops: a hung or crashed page) and the errors it catches, for the server's log.
  */
-function Kiosk({ fixture, preview, token }: KioskParams & { token: string }) {
+function Kiosk({
+  fixture,
+  preview,
+  token,
+  pageErrors,
+}: KioskParams & { token: string; pageErrors: PageErrorReporter }) {
   const live = fixture === null;
   const feed = useHudFeed({ enabled: live, token });
   const sample = useFixture(fixture);
   useKioskKeyboard(feed.send, live);
+  useKioskHeartbeat(feed.send, live);
+  usePageErrorSender(pageErrors, feed.send, live && feed.connected);
   useWakeLock();
 
   if (!live) {
@@ -49,9 +61,15 @@ if (root) {
   window.addEventListener('contextmenu', (event) => event.preventDefault());
   const tokens = localStorageTokenStore();
   adoptTokenFromUrl(tokens);
+  const pageErrors = new PageErrorReporter();
+  reportUncaughtErrors(pageErrors, window);
   render(
-    <KioskBoundary>
-      <Kiosk {...readKioskParams(window.location.search)} token={tokens.get()} />
+    <KioskBoundary onError={(error) => pageErrors.report(error)}>
+      <Kiosk
+        {...readKioskParams(window.location.search)}
+        token={tokens.get()}
+        pageErrors={pageErrors}
+      />
     </KioskBoundary>,
     root,
   );

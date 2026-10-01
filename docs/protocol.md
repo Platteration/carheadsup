@@ -576,8 +576,18 @@ plain sockets with code 4005.
   or `hardwareBrightness` change. A client that cannot keep up (more than 1 MiB unsent) skips
   frames. Clients on other devices are limited to 4 per address and 16 in total (the upgrade is
   refused with 503 beyond that); the Pi's own display is never limited.
-- **From the client**: only `input`, e.g. `{ "t": "input", "action": "next-page" }`, at most 20
-  per second (bursts of 40), frames ≤ 1024 characters. Anything else is ignored.
+- **From the client**, at most 20 messages per second (bursts of 40), frames ≤ 4096 characters;
+  anything else is ignored:
+  - `input`, e.g. `{ "t": "input", "action": "next-page" }`: a driver input.
+  - `alive` (`{ "t": "alive" }`): the HUD page's heartbeat, sent about once a second from its
+    animation frames, which run only while the page's main thread and the browser's compositor
+    do. Recorded only from the Pi's own display; its age is what
+    [`GET /api/kiosk/health`](#kiosk-health) reports, and the kiosk launcher restarts the browser
+    when it stops ([architecture.md](architecture.md#liveness-outside-the-page)).
+  - `client-error`, e.g. `{ "t": "client-error", "message": "x is undefined", "stack": "TypeError: x is undefined\n    at …" }`:
+    an error the page caught. `message` ≤ 500 characters, `stack` ≤ 2500 or null; tab, CR and
+    LF are allowed, other control characters are not. The server logs it at warn — three per
+    connection at once, then one per 20 s (the page itself sends no more than that either).
 
 ```json
 {
@@ -771,6 +781,7 @@ HUD's certificate.
 | `POST /api/odometer` | `{ "odometerKm": number }` | `{ "ok": true }` |
 | `POST /api/input` | `{ "action": InputAction }` | `{ "ok": true }` |
 | `POST /api/pairing/show` | | `ApiPairingShowResult`; 409 unless parked |
+| `GET /api/kiosk/health` | | `ApiKioskHealth`; 403 for anyone but the Pi itself |
 | `GET /api/sim` | | `SimStatus`, or 404 without `--sim` |
 | `POST /api/sim` | `SimControl` | `SimStatus`, or 404 without `--sim` |
 
@@ -803,6 +814,24 @@ name, `<hostname>.local` and localhost, not the HUD's Wi-Fi addresses.)
 reason in `message`). `tls` is the phone link's TLS listener — its port and its certificate's
 [fingerprint](#tls-and-the-huds-certificate) — or `null` when it is off (`server.tlsPort` null)
 or could not start (the log says why).
+
+### Kiosk health
+
+For the kiosk launcher (`deploy/kiosk.sh`) on the Pi itself; other devices get `403`, whatever
+their token.
+
+```sh
+curl http://localhost:8080/api/kiosk/health
+```
+
+```json
+{ "aliveAgoMs": 412, "uptimeMs": 735021, "displays": 1 }
+```
+
+`aliveAgoMs` is the time since the last heartbeat (`alive`) from a page on the Pi itself, or
+`null` when none came since the server started; `uptimeMs` how long the server has been
+running; `displays` the renderer connections from the Pi itself right now (the kiosk, a
+developer console opened on the Pi).
 
 ### Config
 

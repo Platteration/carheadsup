@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import type { ApiKioskHealth } from '@carheadsup/core';
 import { findChromium, startSimulatedHud } from './support.ts';
 import type { SimulatedHud } from './support.ts';
 
@@ -83,4 +84,33 @@ test('blanks to the "no signal" dot as soon as the server stops, and recovers af
   });
   await expect(page.locator('[data-no-signal="true"]')).toHaveCount(0);
   expect(errors).toEqual([]);
+});
+
+test('sends its heartbeat while it draws, and reports the errors it catches', async ({ page }) => {
+  const health = async (): Promise<ApiKioskHealth> =>
+    (await (await fetch(`${hud.base}/api/kiosk/health`)).json()) as ApiKioskHealth;
+  await page.goto(`${hud.base}/`);
+  // The kiosk launcher (deploy/kiosk.sh) restarts the browser after 5 s without a heartbeat.
+  await expect
+    .poll(async () => (await health()).aliveAgoMs ?? Number.POSITIVE_INFINITY, { timeout: 10_000 })
+    .toBeLessThan(1500);
+  expect((await health()).displays).toBeGreaterThanOrEqual(1);
+  await page.waitForTimeout(2500);
+  expect((await health()).aliveAgoMs).toBeLessThan(1500);
+
+  // An error no code handles reaches the server's log.
+  await page.evaluate(() => {
+    setTimeout(() => {
+      throw new Error('e2e: an uncaught page error');
+    }, 0);
+  });
+  await expect
+    .poll(() => hud.warnings.find((line) => line.includes('e2e: an uncaught page error')))
+    .toContain("Renderer: page error on the HUD's display");
+
+  // No page, no heartbeat.
+  await page.close();
+  await expect
+    .poll(async () => (await health()).aliveAgoMs ?? 0, { timeout: 10_000 })
+    .toBeGreaterThan(2000);
 });

@@ -13,6 +13,7 @@ import type {
   ApiConfigResult,
   ApiDiagnostics,
   ApiInfo,
+  ApiKioskHealth,
   ApiPairingShowResult,
   ApiTlsInfo,
   DeepPartial,
@@ -29,6 +30,8 @@ import { clearDtcsRefusal } from '../obd/obd-link.ts';
 import type { Simulation } from '../sources/types.ts';
 import { TripLogUnavailableError } from '../store/trip-store.ts';
 import type { TripStore } from '../store/trip-store.ts';
+import type { KioskHealth } from '../ws/renderer-channel.ts';
+import { isHudItself } from './auth.ts';
 import { HttpError } from './respond.ts';
 import type { HttpReply } from './respond.ts';
 import { Router } from './router.ts';
@@ -69,6 +72,8 @@ export interface ApiDeps {
   tls(): ApiTlsInfo | null;
   /** Look up where phones reach the HUD again (before the pairing page comes up). */
   refreshPairing?(): void;
+  /** The heartbeat of the HUD's own display (`GET /api/kiosk/health`). */
+  kioskHealth?(): KioskHealth;
 }
 
 /** Why `POST /api/pairing/show` is refused right now, or null when the page may come up. */
@@ -293,6 +298,21 @@ export function createApiRouter(deps: ApiDeps): Router {
     deps.engine.dispatch({ type: 'pairing/show', at: deps.now() });
     const { status } = composePairing(deps.engine.state, deps.engine.config);
     const result: ApiPairingShowResult = { ok: true, message: PAIRING_SHOWN[status], status };
+    return ok(result);
+  });
+
+  // The kiosk launcher's watchdog (deploy/kiosk.sh). Only the HUD itself asks; nothing here is
+  // secret, but nothing else has a use for it either.
+  router.add('GET', '/api/kiosk/health', (ctx) => {
+    if (!isHudItself(ctx.req.socket.remoteAddress, ctx.req.socket.localAddress)) {
+      throw new HttpError(403, "Only the HUD itself may ask for its display's health");
+    }
+    const health = deps.kioskHealth?.() ?? { aliveAgoMs: null, displays: 0 };
+    const result: ApiKioskHealth = {
+      aliveAgoMs: health.aliveAgoMs,
+      uptimeMs: Math.max(0, Math.round(deps.now() - deps.startedAt)),
+      displays: health.displays,
+    };
     return ok(result);
   });
 

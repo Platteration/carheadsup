@@ -285,7 +285,36 @@ export interface RendererInput {
   action: InputAction;
 }
 
-export type RendererToServer = RendererInput;
+/**
+ * The kiosk page's heartbeat, sent about once a second from a `requestAnimationFrame` callback:
+ * it proves that the page's main thread and the browser's compositor still run (the page's own
+ * staleness guards cannot catch a hang of either). The server records it for the HUD's own
+ * display only and reports its age at `GET /api/kiosk/health`, where the kiosk launcher looks
+ * and restarts the browser when it stops.
+ */
+export interface RendererAlive {
+  t: 'alive';
+}
+
+/**
+ * An error the page caught (an exception that made the kiosk page start over, or one no code
+ * handled), so that it reaches the server's log. Rate-limited by the page and the server.
+ */
+export interface RendererClientError {
+  t: 'client-error';
+  /** The error's message (at most {@link CLIENT_ERROR_MESSAGE_CHARS} characters). */
+  message: string;
+  /** Its stack trace, if any (at most {@link CLIENT_ERROR_STACK_CHARS} characters). */
+  stack: string | null;
+}
+
+/** Largest renderer → server frame, in UTF-16 code units. */
+export const RENDERER_FRAME_CHARS = 4096;
+/** Longest `client-error` message and stack trace; the page shortens longer ones. */
+export const CLIENT_ERROR_MESSAGE_CHARS = 500;
+export const CLIENT_ERROR_STACK_CHARS = 2500;
+
+export type RendererToServer = RendererInput | RendererAlive | RendererClientError;
 
 // ---------------------------------------------------------------------------
 // ADAS module → HUD (newline-delimited JSON over UDP, see `sensors.adasUdpPort`)

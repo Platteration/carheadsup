@@ -54,6 +54,8 @@ import { HUD_ID_FILE, loadHudId } from './store/hud-id.ts';
 import { PersistStore } from './store/persist-store.ts';
 import { TripStore } from './store/trip-store.ts';
 import type { CertificateBundle } from './tls/certificate.ts';
+import { createSystemdWatchdog } from './system/watchdog.ts';
+import type { WatchdogOptions } from './system/watchdog.ts';
 import { systemClockSynchronized } from './time-sync.ts';
 import { TLS_FILE, loadTlsIdentity } from './tls/identity.ts';
 import { PhoneChannel } from './ws/phone-channel.ts';
@@ -135,6 +137,11 @@ export interface HudServerOptions {
   createSensorSources?: (config: HudConfig) => EventSource[];
   createFrameSinks?: (options: FrameSinkOptions, deps: RuntimeDeps) => FrameSink[];
   advertiseHud?: (config: HudConfig, advert: MdnsAdvert, deps: RuntimeDeps) => Service | null;
+  /**
+   * The systemd watchdog's frame sink, or null without one. Default: from the environment
+   * systemd gives the service (`WatchdogSec=`), see `system/watchdog.ts`.
+   */
+  createWatchdog?: (options: WatchdogOptions) => FrameSink | null;
   /**
    * The HUD's addresses for the pairing QR code, most preferred first, given the address the
    * server listens on. Default: from the network interfaces and the host name (see
@@ -620,6 +627,13 @@ export function createHudServer(options: HudServerOptions): HudServer {
       logger.error(`Outputs: cannot create the frame sinks: ${describe(err)}`);
       sinks = [];
     }
+    // Pinged from the frame path: frames that keep being composed prove the HUD is alive.
+    const watchdog = (options.createWatchdog ?? createSystemdWatchdog)({
+      monotonic: () => hudEngine.now(),
+      timers,
+      logger,
+    });
+    if (watchdog !== null) sinks.push(watchdog);
 
     phone = new PhoneChannel({
       hudId: id,
@@ -650,6 +664,8 @@ export function createHudServer(options: HudServerOptions): HudServer {
       simulated,
       // The kiosk leaves dimming to the backlight while a sink drives one (no double dimming).
       hardwareBrightness: () => sinks.some((sink) => sink.drivesBrightness === true),
+      // Engine time: a step of the system clock does not age the kiosk's heartbeat.
+      monotonic: () => hudEngine.now(),
       authorize: (auth, cfg) =>
         isAuthorized({
           remoteAddress: auth.remoteAddress,
@@ -709,6 +725,7 @@ export function createHudServer(options: HudServerOptions): HudServer {
       trips: tripStore,
       tls: tlsInfo,
       refreshPairing: refreshPairingEndpoint,
+      kioskHealth: () => rendererChannel.kioskHealth(),
       simulation:
         sim === null
           ? null

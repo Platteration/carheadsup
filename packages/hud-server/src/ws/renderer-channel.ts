@@ -3,6 +3,7 @@ import type {
   HudConfig,
   HudEvent,
   HudFrame,
+  RendererClientError,
   RendererDisplayMessage,
   RendererFrameMessage,
 } from '@carheadsup/core';
@@ -19,6 +20,9 @@ export const MAX_RENDERER_BACKLOG_BYTES = 1024 * 1024;
 /** Input actions accepted per renderer client and second (burst 40). */
 const INPUT_RATE_PER_S = 20;
 const INPUT_BURST = 40;
+/** Page errors (`client-error`) logged per renderer client: 3 at once, then one per 20 s. */
+const CLIENT_ERROR_RATE_PER_S = 1 / 20;
+const CLIENT_ERROR_BURST = 3;
 /** Close code for a client whose credentials stopped being valid (the API token changed). */
 export const CLOSE_UNAUTHORIZED = 4001;
 /**
@@ -66,39 +70,89 @@ export interface RendererChannelOptions {
    * `https-only.ts`.
    */
   listenerAllowed?(auth: RendererClientAuth, config: HudConfig): boolean;
+  /**
+   * Called with each page error a client reports (`client-error`, within the rate limit), after
+   * it was logged.
+   */
+  onClientError?(report: PageErrorReport): void;
   now: Clock;
+  /**
+   * Monotonic clock for the age of the kiosk's heartbeat (default `now`; the server passes engine
+   * time, which a step of the system clock does not move).
+   */
+  monotonic?: Clock;
   timers: Timers;
   logger: Logger;
+}
+
+/** A page error as a renderer client reported it. */
+export interface PageErrorReport {
+  /** From the HUD's own display (see `isHudItself`), not another device. */
+  fromHud: boolean;
+  message: string;
+  stack: string | null;
+}
+
+/** What `GET /api/kiosk/health` reports about the HUD's own display. */
+export interface KioskHealth {
+  /** Time since the last heartbeat from a page on the HUD itself; null when none came yet. */
+  aliveAgoMs: number | null;
+  /** Renderer connections from the HUD itself right now. */
+  displays: number;
 }
 
 interface Client {
   ws: WebSocket;
   auth: RendererClientAuth;
+  /** Connected from the HUD itself (the kiosk, a local developer console). */
+  fromHud: boolean;
   inputs: TokenBucket;
+  errors: TokenBucket;
+  /** Page errors dropped by the rate limit since the last one logged. */
+  suppressedErrors: number;
+  /** Whether it has sent a heartbeat yet. */
+  alive: boolean;
 }
 
 /**
  * `/ws/hud`: the projected display and the dev console. On connect a client gets the
  * `display` message and the latest frame; afterwards every composed frame (serialised once for
  * all clients), a new `display` message whenever the projection or `hardwareBrightness`
- * changes, and it may send `input` actions, which become input events.
+ * changes, and it may send `input` actions, which become input events. The kiosk page also
+ * sends a heartbeat (`alive`, recorded for clients on the HUD itself: {@link kioskHealth}) and
+ * the errors it catches (`client-error`, logged at warn).
  */
 export class RendererChannel {
   private readonly options: RendererChannelOptions;
+  private readonly monotonic: Clock;
   private readonly clients = new Map<WebSocket, Client>();
   private readonly unsubscribe: () => void;
   /** The `display` message last sent to every client. */
   private displayJson: string;
+  /** When a page on the HUD itself last sent its heartbeat (`monotonic`), if ever. */
+  private lastAliveAt: number | null = null;
   private closed = false;
 
   constructor(options: RendererChannelOptions) {
     this.options = options;
+    this.monotonic = options.monotonic ?? options.now;
     this.displayJson = JSON.stringify(this.displayMessage(options.getConfig()));
     this.unsubscribe = options.engine.onFrame((frame) => this.broadcastFrame(frame));
   }
 
   get clientCount(): number {
     return this.clients.size;
+  }
+
+  /** Whether the HUD's own display still draws: the age of its latest heartbeat. */
+  kioskHealth(): KioskHealth {
+    let displays = 0;
+    for (const client of this.clients.values()) if (client.fromHud) displays += 1;
+    const last = this.lastAliveAt;
+    return {
+      aliveAgoMs: last === null ? null : Math.max(0, Math.round(this.monotonic() - last)),
+      displays,
+    };
   }
 
   /**
@@ -129,7 +183,11 @@ export class RendererChannel {
     const client: Client = {
       ws,
       auth,
+      fromHud: isHudItself(auth.remoteAddress, auth.localAddress),
       inputs: new TokenBucket(INPUT_RATE_PER_S, INPUT_BURST, this.options.now),
+      errors: new TokenBucket(CLIENT_ERROR_RATE_PER_S, CLIENT_ERROR_BURST, this.options.now),
+      suppressedErrors: 0,
+      alive: false,
     };
     this.clients.set(ws, client);
     ws.on('message', (data, isBinary) => this.onMessage(client, data, isBinary));
@@ -212,10 +270,61 @@ export class RendererChannel {
       this.options.logger.debug(`Renderer: ignoring invalid message: ${parsed.error}`);
       return;
     }
-    this.options.engine.dispatch({
-      type: 'input',
-      action: parsed.value.action,
-      at: this.options.now(),
-    });
+    const message = parsed.value;
+    switch (message.t) {
+      case 'input':
+        this.options.engine.dispatch({
+          type: 'input',
+          action: message.action,
+          at: this.options.now(),
+        });
+        return;
+      case 'alive':
+        // Only the HUD's own display: a page on a laptop says nothing about the windshield.
+        if (!client.fromHud) return;
+        this.lastAliveAt = this.monotonic();
+        if (!client.alive) {
+          client.alive = true;
+          this.options.logger.debug("Renderer: the HUD's display is drawing (heartbeat)");
+        }
+        return;
+      case 'client-error':
+        this.pageError(client, message);
+        return;
+      default: {
+        const unknown: never = message;
+        void unknown;
+      }
+    }
+  }
+
+  /** Log a page error (rate-limited per client) and pass it on. */
+  private pageError(client: Client, message: RendererClientError): void {
+    if (!client.errors.take()) {
+      client.suppressedErrors += 1;
+      return;
+    }
+    const where = client.fromHud
+      ? "the HUD's display"
+      : `a display at ${client.auth.remoteAddress ?? '?'}`;
+    const { stack } = message;
+    // A stack trace usually starts with the message already.
+    const detail =
+      stack === null
+        ? message.message
+        : stack.includes(message.message)
+          ? stack
+          : `${message.message} | ${stack}`;
+    const suppressed =
+      client.suppressedErrors > 0 ? ` (${client.suppressedErrors} more not logged)` : '';
+    client.suppressedErrors = 0;
+    this.options.logger.warn(`Renderer: page error on ${where}: ${detail}${suppressed}`);
+    try {
+      this.options.onClientError?.({ fromHud: client.fromHud, message: message.message, stack });
+    } catch (err) {
+      this.options.logger.debug(
+        `Renderer: handling a page error failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }

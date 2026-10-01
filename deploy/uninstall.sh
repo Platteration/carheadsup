@@ -23,6 +23,7 @@ readonly SYSTEM_FILES=(
   /etc/udev/rules.d/99-carheadsup-backlight.rules
 )
 readonly AVAHI_SERVICE=/etc/avahi/services/carheadsup.service
+readonly WATCHDOG_CONF=/etc/systemd/system.conf.d/carheadsup-watchdog.conf
 readonly ENV_FILE=/etc/default/carheadsup
 
 opt_purge=0
@@ -98,10 +99,20 @@ remove_files() {
   if [[ -f $AVAHI_SERVICE ]] && grep -q '_carheadsup._tcp' "$AVAHI_SERVICE"; then
     rm -f -- "$AVAHI_SERVICE"
   fi
-  rm -rf -- "$PREFIX" "${PREFIX}.new" "${PREFIX}.old"
-  log "removed ${PREFIX} and the system files"
+  rm -rf -- "$PREFIX" "${PREFIX}.new" "${PREFIX}.old" "${PREFIX}.prev" "${PREFIX}.swap"
+  log "removed ${PREFIX} (and the previous version) and the system files"
+  local watchdog=0
+  if [[ -e $WATCHDOG_CONF ]]; then
+    rm -f -- "$WATCHDOG_CONF"
+    watchdog=1
+    log "removed ${WATCHDOG_CONF} (the hardware watchdog setting)"
+  fi
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload || true
+    if ((watchdog)); then
+      systemctl daemon-reexec || true
+    else
+      systemctl daemon-reload || true
+    fi
   fi
   if command -v udevadm >/dev/null 2>&1; then
     udevadm control --reload-rules || true

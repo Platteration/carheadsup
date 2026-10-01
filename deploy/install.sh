@@ -4,20 +4,24 @@
 # have completed:
 #
 #   sudo deploy/install.sh [--obd-mac AA:BB:CC:DD:EE:FF] [--no-kiosk] [--no-start] [--no-prune]
+#   sudo deploy/install.sh --rollback
 #
 # What it does (every step is idempotent, so re-running it after
 # `git pull && npm ci && npm run build` is how you update):
 #
 #   - creates the system user "carheadsup" (groups i2c, gpio, dialout, video) that runs the
 #     server, and "carheadsup-kiosk" (video, render, input) that runs the kiosk browser;
-#   - copies the built code to /opt/carheadsup (owned by root, without devDependencies);
+#   - copies the built code to /opt/carheadsup (owned by root, without devDependencies), flushed
+#     to disk before and after it replaces the old copy, which is kept as /opt/carheadsup.prev;
 #   - creates /var/lib/carheadsup (data) and /etc/carheadsup (config.json, created with defaults
 #     and a random pairing code by the server on its first start), keeping whatever is already
 #     there;
 #   - installs /etc/default/carheadsup (once), a udev rule for the display backlight, the kiosk's
 #     PAM stack, the static Avahi advertisement when avahi-utils is missing, and the systemd
 #     units carheadsup.service, carheadsup-kiosk.service and obd-rfcomm@.service;
-#   - enables and (re)starts the services.
+#   - lets the hardware watchdog reset a frozen system (RuntimeWatchdogSec, when there is one);
+#   - enables and (re)starts the services, and waits until the server answers: after an update
+#     that does not, it goes back to the previous version by itself.
 #
 # See docs/install-raspberry-pi.md for the whole procedure, and deploy/uninstall.sh to undo it.
 set -euo pipefail
@@ -36,6 +40,7 @@ readonly PAM_FILE=/etc/pam.d/carheadsup-kiosk
 readonly UDEV_RULE=/etc/udev/rules.d/99-carheadsup-backlight.rules
 readonly AVAHI_DIR=/etc/avahi/services
 readonly AVAHI_SERVICE=${AVAHI_DIR}/carheadsup.service
+readonly WATCHDOG_CONF=/etc/systemd/system.conf.d/carheadsup-watchdog.conf
 readonly SERVICE_GROUPS=(i2c gpio dialout video)
 readonly KIOSK_GROUPS=(video render input)
 # What the HUD needs at runtime (docs are referenced by the units' Documentation= lines).
@@ -47,11 +52,17 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)
 readonly SCRIPT_DIR REPO_ROOT
 
 opt_kiosk=1
+opt_kiosk_given=0
 opt_start=1
 opt_prune=1
 opt_obd_mac=""
+opt_rollback=0
+opt_hardware_watchdog=1
+opt_start_timeout=60
 NODE_BIN=""
 WORK_DIR=""
+# Set by install_code when this run replaced an installed version (which can be rolled back to).
+code_replaced=0
 
 usage() {
   cat <<'EOF'
@@ -65,6 +76,15 @@ Options:
   --no-kiosk       Do not install the Chromium kiosk (removes it if it was installed)
   --no-start       Install and enable the services, but do not (re)start them now
   --no-prune       Keep devDependencies in /opt/carheadsup
+  --no-hardware-watchdog
+                   Do not let the hardware watchdog reset a frozen system (removes the setting
+                   if it was installed)
+  --start-timeout <s>
+                   How long to wait for the restarted server to answer (default 60; 0: do not
+                   wait). After an update that does not answer in time, the previous version
+                   is put back by itself.
+  --rollback       Go back to the version before the last update (/opt/carheadsup.prev, with its
+                   systemd units); running it again goes forward again
   -h, --help       Show this help
 EOF
 }
@@ -79,9 +99,20 @@ die() {
 parse_args() {
   while (($# > 0)); do
     case $1 in
-      --no-kiosk) opt_kiosk=0 ;;
+      --no-kiosk)
+        opt_kiosk=0
+        opt_kiosk_given=1
+        ;;
       --no-start) opt_start=0 ;;
       --no-prune) opt_prune=0 ;;
+      --no-hardware-watchdog) opt_hardware_watchdog=0 ;;
+      --rollback) opt_rollback=1 ;;
+      --start-timeout)
+        (($# >= 2)) || die "--start-timeout needs a number of seconds"
+        opt_start_timeout=$2
+        shift
+        ;;
+      --start-timeout=*) opt_start_timeout=${1#*=} ;;
       --obd-mac)
         (($# >= 2)) || die "--obd-mac needs a MAC address"
         opt_obd_mac=$2
@@ -99,6 +130,9 @@ parse_args() {
     esac
     shift
   done
+  [[ $opt_start_timeout =~ ^[0-9]{1,5}$ ]] ||
+    die "--start-timeout needs a whole number of seconds, got '${opt_start_timeout}'"
+  opt_start_timeout=$((10#$opt_start_timeout))
   if [[ -n $opt_obd_mac ]]; then
     opt_obd_mac=${opt_obd_mac^^}
     [[ $opt_obd_mac =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]] ||
@@ -133,13 +167,21 @@ preflight() {
   [[ $NODE_BIN =~ ^[A-Za-z0-9._/+-]+$ ]] || die "unsupported characters in the Node.js path: ${NODE_BIN}"
   node_version_ok || die "Node.js $("$NODE_BIN" --version) is too old; carheadsup needs 22.18 or newer"
 
-  [[ -d ${REPO_ROOT}/node_modules/@carheadsup ]] ||
-    die "dependencies are missing: run 'npm ci' in ${REPO_ROOT} first"
-  local page
-  for page in "${RENDERER_PAGES[@]}"; do
-    [[ -f ${REPO_ROOT}/packages/hud-renderer/dist/${page} ]] ||
-      die "the renderer is not built: run 'npm run build' in ${REPO_ROOT} first"
-  done
+  if ((opt_rollback)); then
+    [[ -d ${PREFIX}.prev ]] || die "there is no previous version to go back to (${PREFIX}.prev)"
+    # Keep the kiosk as it is installed, unless told otherwise.
+    if ((!opt_kiosk_given)) && [[ ! -e ${UNIT_DIR}/carheadsup-kiosk.service ]]; then
+      opt_kiosk=0
+    fi
+  else
+    [[ -d ${REPO_ROOT}/node_modules/@carheadsup ]] ||
+      die "dependencies are missing: run 'npm ci' in ${REPO_ROOT} first"
+    local page
+    for page in "${RENDERER_PAGES[@]}"; do
+      [[ -f ${REPO_ROOT}/packages/hud-renderer/dist/${page} ]] ||
+        die "the renderer is not built: run 'npm run build' in ${REPO_ROOT} first"
+    done
+  fi
 
   if ((opt_kiosk)); then
     command -v cage >/dev/null 2>&1 ||
@@ -184,15 +226,84 @@ ensure_directories() {
   find "$CONFIG_DIR" -maxdepth 1 -type f -exec chmod 0600 {} +
 }
 
+# Put the staged tree <stage> in place as <prefix>, keeping the tree it replaces as
+# <prefix>.prev (for --rollback). Safe against a power cut — likely in a car, right after an
+# update: the staged files are flushed to disk before the renames (ext4 can hold freshly written
+# files in RAM for half a minute, and a power cut would leave them empty: a server that cannot
+# start, ever), and the renames before the services restart. The two renames normally reach the
+# disk together; should a power cut fall between them, the next run of the installer finds no
+# <prefix> and puts <prefix>.prev back (finish_interrupted_swap).
+#
+#   swap_in <stage> <prefix>
+swap_in() {
+  local stage=$1 prefix=$2
+  sync
+  if [[ -e $prefix ]]; then
+    rm -rf -- "${prefix}.prev"
+    mv -- "$prefix" "${prefix}.prev"
+  fi
+  mv -- "$stage" "$prefix"
+  sync
+}
+
+# Swap <prefix> and <prefix>.prev: the version before the last update becomes the installed one,
+# and the installed one becomes <prefix>.prev, so that running it again goes forward again.
+# Fails (changing nothing) when there is no <prefix>.prev.
+#
+#   swap_previous <prefix>
+swap_previous() {
+  local prefix=$1
+  [[ -d ${prefix}.prev ]] || return 1
+  rm -rf -- "${prefix}.swap"
+  sync
+  if [[ -e $prefix ]]; then
+    mv -- "$prefix" "${prefix}.swap"
+  fi
+  mv -- "${prefix}.prev" "$prefix"
+  if [[ -e ${prefix}.swap ]]; then
+    mv -- "${prefix}.swap" "${prefix}.prev"
+  fi
+  sync
+}
+
+# Repair what a power cut between the renames of swap_in or swap_previous left behind: no
+# <prefix> (put back the one that was moved away), or a <prefix>.swap still waiting to become
+# <prefix>.prev.
+#
+#   finish_interrupted_swap <prefix>
+finish_interrupted_swap() {
+  local prefix=$1
+  if [[ ! -e $prefix ]]; then
+    if [[ -e ${prefix}.swap ]]; then
+      mv -- "${prefix}.swap" "$prefix"
+    elif [[ -d ${prefix}.prev ]]; then
+      mv -- "${prefix}.prev" "$prefix"
+    else
+      return 0
+    fi
+    warn "an earlier update was cut short; ${prefix} is back"
+  elif [[ -e ${prefix}.swap ]]; then
+    if [[ -e ${prefix}.prev ]]; then
+      rm -rf -- "${prefix}.swap"
+    else
+      mv -- "${prefix}.swap" "${prefix}.prev"
+    fi
+  else
+    return 0
+  fi
+  sync
+}
+
 # Copy the runtime files into a staging directory, drop devDependencies, check that the copy
-# runs, then swap it into place.
+# runs, then swap it into place (see swap_in).
 install_code() {
   if [[ $REPO_ROOT == "$PREFIX" ]]; then
     log "running from ${PREFIX} itself; using the checkout in place"
     return
   fi
-  local stage="${PREFIX}.new" old="${PREFIX}.old" item
-  rm -rf -- "$stage" "$old"
+  local stage="${PREFIX}.new" item
+  # .old: left behind by installers before the rollback.
+  rm -rf -- "$stage" "${PREFIX}.old"
   install -d -m 0755 "$stage"
   log "copying the HUD to ${PREFIX}"
   for item in "${COPY_ITEMS[@]}"; do
@@ -215,10 +326,9 @@ install_code() {
   "$NODE_BIN" "${stage}/packages/hud-server/src/main.ts" --version >/dev/null ||
     die "the copied server does not start; ${PREFIX} was left unchanged"
   if [[ -e $PREFIX ]]; then
-    mv -- "$PREFIX" "$old"
+    code_replaced=1
   fi
-  mv -- "$stage" "$PREFIX"
-  rm -rf -- "$old"
+  swap_in "$stage" "$PREFIX"
 }
 
 # The unit's effective ExecStart line: a drop-in resets ExecStart with an empty
@@ -344,6 +454,74 @@ effective_tls_port() {
   ' "$config"
 }
 
+# The address the server will listen on, resolved like the port: `--host` on the unit's
+# ExecStart, else CARHEADSUP_HOST from the environment file, else server.host in the config file,
+# else 0.0.0.0.
+#
+#   effective_host <unit files, concatenated> <environment file> <default config file>
+effective_host() {
+  local unit_text=$1 env_file=$2 config=$3
+  local flag_host="" env_host="" line
+
+  local -a words=()
+  read -r -a words <<<"$(exec_start_line "$unit_text")"
+  local i
+  for ((i = 0; i < ${#words[@]}; i++)); do
+    case ${words[i]} in
+      --host) flag_host=${words[i + 1]:-} ;;
+      --host=*) flag_host=${words[i]#*=} ;;
+      --config) config=${words[i + 1]:-$config} ;;
+      --config=*) config=${words[i]#*=} ;;
+    esac
+  done
+
+  if [[ -r $env_file ]]; then
+    while IFS= read -r line; do
+      if [[ $line =~ ^[[:space:]]*CARHEADSUP_HOST=[\"\']?([0-9A-Za-z.:%_-]+)[\"\']?[[:space:]]*$ ]]; then
+        env_host=${BASH_REMATCH[1]}
+      fi
+    done <"$env_file"
+  fi
+
+  local candidate
+  for candidate in "$flag_host" "$env_host"; do
+    if [[ $candidate =~ ^[0-9A-Za-z.:%_-]+$ ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+  "$NODE_BIN" -e '
+    let host = "0.0.0.0";
+    try {
+      const config = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+      const value = config?.server?.host;
+      if (typeof value === "string" && /^[0-9A-Za-z.:%_-]+$/.test(value)) host = value;
+    } catch {}
+    process.stdout.write(host);
+  ' "$config"
+}
+
+# Where the installer asks the server whether it runs: /api/info at an address the server listens
+# on (loopback when it listens on all of them).
+#
+#   info_url <host> <port>
+info_url() {
+  local host=$1 port=$2
+  case $host in
+    '' | 0.0.0.0) host=127.0.0.1 ;;
+    ::) host='[::1]' ;;
+    *:*) host="[${host}]" ;;
+  esac
+  printf 'http://%s:%s/api/info' "$host" "$port"
+}
+
+# effective_host for the installed unit, its drop-ins and /etc/default/carheadsup.
+config_host() {
+  local unit_text
+  unit_text=$(cat -- "${UNIT_DIR}/carheadsup.service" "${UNIT_DIR}/carheadsup.service.d/"*.conf 2>/dev/null || true)
+  effective_host "$unit_text" "$ENV_FILE" "$CONFIG_FILE"
+}
+
 # effective_port for the installed unit, its drop-ins and /etc/default/carheadsup.
 config_port() {
   local unit_text
@@ -407,6 +585,54 @@ install_system_files() {
   fi
 }
 
+# The systemd drop-in that lets the hardware watchdog reset a frozen system.
+watchdog_conf() {
+  cat <<'EOF'
+# carheadsup (deploy/install.sh): let the hardware watchdog reset the system when the kernel or
+# systemd freezes, instead of a frozen HUD keeping its last image (speed, alerts) on the
+# windshield as if it were live. systemd pets the watchdog while it runs. 15 s is the longest the
+# Raspberry Pi's watchdog can wait. Remove with: sudo deploy/install.sh --no-hardware-watchdog
+[Manager]
+RuntimeWatchdogSec=15
+EOF
+}
+
+# Write the watchdog drop-in to <file> unless it already says the same. True when it changed.
+#
+#   write_watchdog_conf <file>
+write_watchdog_conf() {
+  local file=$1 wanted
+  wanted=$(watchdog_conf)
+  if [[ -f $file && $(<"$file") == "$wanted" ]]; then
+    return 1
+  fi
+  install -d -m 0755 "$(dirname -- "$file")"
+  printf '%s\n' "$wanted" >"${file}.tmp"
+  chmod 0644 "${file}.tmp"
+  mv -- "${file}.tmp" "$file"
+}
+
+# With --no-hardware-watchdog, remove the drop-in; otherwise install it where there is a
+# watchdog device. systemd reads its own settings only when it starts (or re-executes).
+configure_hardware_watchdog() {
+  if ((!opt_hardware_watchdog)); then
+    if [[ -e $WATCHDOG_CONF ]]; then
+      rm -f -- "$WATCHDOG_CONF"
+      systemctl daemon-reexec
+      log "removed ${WATCHDOG_CONF} (--no-hardware-watchdog)"
+    fi
+    return
+  fi
+  if ! compgen -G '/dev/watchdog*' >/dev/null; then
+    warn "no hardware watchdog (/dev/watchdog): a frozen system keeps its last image on the display until the power is cut"
+    return
+  fi
+  if write_watchdog_conf "$WATCHDOG_CONF"; then
+    systemctl daemon-reexec
+    log "hardware watchdog: a frozen system resets after 15 s (${WATCHDOG_CONF})"
+  fi
+}
+
 install_kiosk() {
   ensure_user "$KIOSK_USER" "$KIOSK_HOME" "carheadsup kiosk browser" "${KIOSK_GROUPS[@]}"
   install -d -m 0700 -o "$KIOSK_USER" -g "$KIOSK_USER" "$KIOSK_HOME"
@@ -447,11 +673,73 @@ start_services() {
       warn "could not bind /dev/rfcomm0 (is the adapter paired? see docs/obd.md)"
   fi
   log "starting carheadsup.service"
-  systemctl restart carheadsup.service
+  # A failure shows when the server does not answer (verify_started).
+  systemctl restart carheadsup.service || warn "carheadsup.service did not start"
   if ((opt_kiosk)); then
     log "starting carheadsup-kiosk.service"
-    systemctl restart carheadsup-kiosk.service
+    systemctl restart carheadsup-kiosk.service || warn "carheadsup-kiosk.service did not start"
   fi
+}
+
+# True once GET <url> (the server's /api/info) answers as carheadsup, within <timeout> seconds.
+#
+#   hud_answers <url> <timeout, s>
+hud_answers() {
+  "$NODE_BIN" -e '
+    const [url, timeoutS] = [process.argv[1], Number(process.argv[2])];
+    const deadline = Date.now() + timeoutS * 1000;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    (async () => {
+      for (;;) {
+        try {
+          const res = await fetch(url, { signal: AbortSignal.timeout(2000), redirect: "manual" });
+          if (res.ok && (await res.json())?.name === "carheadsup") process.exit(0);
+        } catch {}
+        if (Date.now() >= deadline) process.exit(1);
+        await sleep(1000);
+      }
+    })();
+  ' "$1" "$2"
+}
+
+# The server's last log lines, for a start that failed.
+show_recent_log() {
+  if command -v journalctl >/dev/null 2>&1; then
+    journalctl -u carheadsup.service -n 15 --no-pager >&2 || true
+  fi
+}
+
+# Put the previous version back (with its units: the newer ones may expect what it lacks) and
+# start it.
+roll_back() {
+  swap_previous "$PREFIX" || die "there is no previous version to go back to (${PREFIX}.prev)"
+  configure_system
+  start_services
+}
+
+# After a (re)start: wait until the server answers. When it does not and this run replaced an
+# installed version, go back to that one, so that a failed update does not leave the car without
+# a HUD.
+verify_started() {
+  ((opt_start_timeout > 0)) || return 0
+  local url
+  url=$(info_url "$(config_host)" "$(config_port)")
+  log "waiting up to ${opt_start_timeout} s for carheadsup to answer at ${url}"
+  if hud_answers "$url" "$opt_start_timeout"; then
+    log "carheadsup answers"
+    return 0
+  fi
+  show_recent_log
+  if ((!code_replaced)); then
+    die "carheadsup does not answer at ${url} (journalctl -u carheadsup -b; --start-timeout to wait longer)"
+  fi
+  warn "the new version does not answer within ${opt_start_timeout} s; going back to the previous one"
+  roll_back
+  if hud_answers "$url" "$opt_start_timeout"; then
+    die "the update failed and was rolled back: the previous version runs again. The new one is kept in ${PREFIX}.prev (sudo deploy/install.sh --rollback to try it again); see journalctl -u carheadsup -b"
+  fi
+  show_recent_log
+  die "neither the new nor the previous version answers at ${url}; see journalctl -u carheadsup -b"
 }
 
 # Warn about optional tools that are missing, with the package that provides each.
@@ -497,23 +785,37 @@ EOF
   fi
 }
 
-main() {
-  parse_args "$@"
-  preflight
-  WORK_DIR=$(mktemp -d)
-  trap 'rm -rf -- "$WORK_DIR"' EXIT
-  ensure_user "$SERVICE_USER" "$DATA_DIR" "carheadsup HUD server" "${SERVICE_GROUPS[@]}"
-  ensure_directories
-  install_code
+# Install the system files and units of the code in ${PREFIX}, and enable the services.
+configure_system() {
   install_system_files
   if ((opt_kiosk)); then
     install_kiosk
   else
     remove_kiosk
   fi
+  configure_hardware_watchdog
   enable_services
+}
+
+main() {
+  parse_args "$@"
+  ((EUID == 0)) || die "run this as root: sudo $0"
+  finish_interrupted_swap "$PREFIX"
+  preflight
+  WORK_DIR=$(mktemp -d)
+  trap 'rm -rf -- "$WORK_DIR"' EXIT
+  if ((opt_rollback)); then
+    swap_previous "$PREFIX" || die "there is no previous version to go back to (${PREFIX}.prev)"
+    log "${PREFIX} is the previous version again; the one it replaced is ${PREFIX}.prev"
+  else
+    ensure_user "$SERVICE_USER" "$DATA_DIR" "carheadsup HUD server" "${SERVICE_GROUPS[@]}"
+    ensure_directories
+    install_code
+  fi
+  configure_system
   if ((opt_start)); then
     start_services
+    verify_started
   fi
   report_missing_tools
   summary

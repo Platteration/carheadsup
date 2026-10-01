@@ -650,6 +650,8 @@ Flags win over environment variables, which win over the defaults. `CARHEADSUP_S
 
 The kiosk launcher reads `CARHEADSUP_KIOSK_URL`, `CARHEADSUP_KIOSK_WAIT_S` (how often it logs a
 warning while it waits for the page; it never starts the browser on a page that does not load),
-`CARHEADSUP_KIOSK_SCALE` and `CARHEADSUP_KIOSK_FLAGS`
+`CARHEADSUP_KIOSK_SCALE`, `CARHEADSUP_KIOSK_FLAGS`, and `CARHEADSUP_KIOSK_GRACE_S` /
+`CARHEADSUP_KIOSK_STALE_S` (its [watchdog](install-raspberry-pi.md#watchdogs): when the page has
+to send its first heartbeat, and how long it may go without one)
 ([install guide](install-raspberry-pi.md#the-units)); the renderer's development server reads
 `HUD_SERVER` (where to proxy `/api` and `/ws`, default `http://localhost:8080`).

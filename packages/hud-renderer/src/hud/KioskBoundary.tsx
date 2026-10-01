@@ -27,6 +27,8 @@ export async function pageAnswers(): Promise<boolean> {
 
 export interface KioskBoundaryProps {
   children?: ComponentChildren;
+  /** Told about the error that made the page start over (the kiosk reports it to the server). */
+  onError?: (error: unknown) => void;
   /** Default `location.reload()`. */
   reload?: () => void;
   /**
@@ -59,6 +61,12 @@ export class KioskBoundary extends Component<KioskBoundaryProps, KioskBoundarySt
 
   override componentDidCatch(error: unknown): void {
     console.error('HUD: the kiosk page failed; reloading', error);
+    try {
+      // Still connected here: Preact draws the fallback (and unmounts the feed) only afterwards.
+      this.props.onError?.(error);
+    } catch {
+      // Reporting must never stand in the way of starting over.
+    }
     if (this.timer === null) this.scheduleReload();
   }
 

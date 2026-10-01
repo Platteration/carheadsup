@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import type { HudFrame, WidgetFrame } from '@carheadsup/core';
 import { render } from 'preact';
-import { useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HudView } from '../../src/hud/HudView.tsx';
@@ -206,6 +206,38 @@ describe('kiosk boundary', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('reports the error while the page is still connected, before it goes dark', () => {
+    // The feed below the boundary must still be up when the error is reported: Preact calls
+    // componentDidCatch before it unmounts the children for the fallback.
+    const events: string[] = [];
+    let breakIt: () => void = () => undefined;
+    function Feed() {
+      const [broken, setBroken] = useState(false);
+      breakIt = () => setBroken(true);
+      useEffect(() => {
+        events.push('connected');
+        return () => void events.push('disconnected');
+      }, []);
+      return broken ? <Broken /> : <p>live</p>;
+    }
+    act(() =>
+      render(
+        <KioskBoundary
+          reload={() => undefined}
+          serverAnswers={async () => false}
+          onError={(error) => events.push(`reported ${(error as Error).message}`)}
+        >
+          <Feed />
+        </KioskBoundary>,
+        container,
+      ),
+    );
+    expect(events).toEqual(['connected']);
+    act(() => breakIt());
+    expect(events).toEqual(['connected', 'reported boom', 'disconnected']);
+    expect(container.querySelector('[data-no-signal]')).not.toBeNull();
   });
 
   it('renders its children untouched while they work', () => {
