@@ -223,7 +223,10 @@ interface Exchange {
 
 /** How a replay went: commands answered from the transcript, again, or not at all. */
 export interface ReplayStats {
-  /** Answered with the next recorded answer to the same command. */
+  /**
+   * Answered with the next recorded answer to the same command (for service 01, possibly the
+   * same PIDs recorded in another order).
+   */
   answered: number;
   /** Asked more often than recorded: answered with the last recorded answer again. */
   repeated: number;
@@ -231,6 +234,26 @@ export interface ReplayStats {
   unknown: number;
   /** The distinct unknown commands, in order of appearance. */
   unknownCommands: string[];
+}
+
+/**
+ * A service 01 request for several PIDs, keyed by the PIDs it asks for whatever their order
+ * ("01" and the PID bytes sorted), or null for any other command. The poller orders a request's
+ * PIDs by urgency, which depends on the clock (coolant goes first once its reading is 3 s old,
+ * and a PID never read yet counts from the clock's origin), so a replay — on a clock that starts
+ * at 0 — can ask for the PIDs of a recorded request in another order. The answer is the same:
+ * each PID comes back with its own data, and the driver finds them by number, not by place.
+ */
+export function mode01PidSet(command: string): string | null {
+  if (!/^01(?:[0-9A-F]{2}){2,}$/.test(command)) return null;
+  const pids = command.slice(2).match(/[0-9A-F]{2}/g) ?? [];
+  return `01${pids.sort().join('')}`;
+}
+
+/** The recorded answers to one command, next first. */
+interface AnswerSlot {
+  queue: Exchange[];
+  last: Exchange | null;
 }
 
 export interface TranscriptTransportOptions {
@@ -246,16 +269,20 @@ export interface TranscriptTransportOptions {
  * the recorded delays, on the injected timers. A command asked more often than recorded gets
  * its last answer again; a command never recorded gets `OK` (AT commands) or `NO DATA`. That
  * keeps a replay going when the poller asks in a different order than it did in the car, and
- * {@link stats} tells how close the replay stayed to the recording. Chunks recorded before the
- * first command (an adapter's banner on connect) arrive after `open()`, and a link that broke in
- * the recording breaks at the same time after `open()` in the replay.
+ * {@link stats} tells how close the replay stayed to the recording. A service 01 request for
+ * several PIDs that was never recorded in this order is answered like the same PIDs recorded in
+ * another order (see {@link mode01PidSet}). Chunks recorded before the first command (an
+ * adapter's banner on connect) arrive after `open()`, and a link that broke in the recording
+ * breaks at the same time after `open()` in the replay.
  */
 export class TranscriptTransport implements Transport {
   readonly description: string;
   readonly stats: ReplayStats = { answered: 0, repeated: 0, unknown: 0, unknownCommands: [] };
   private readonly options: TranscriptTransportOptions;
   private readonly events = new TransportEvents();
-  private readonly answers = new Map<string, { queue: Exchange[]; last: Exchange | null }>();
+  private readonly answers = new Map<string, AnswerSlot>();
+  /** The recorded service 01 multi-PID requests by their PIDs (see {@link mode01PidSet}). */
+  private readonly samePids = new Map<string, AnswerSlot[]>();
   private readonly greeting: Exchange = { chunks: [] };
   private readonly pending = new Set<unknown>();
   /** When and how the recorded link broke, if it did. */
@@ -276,6 +303,8 @@ export class TranscriptTransport implements Transport {
           if (slot === undefined) {
             slot = { queue: [], last: null };
             this.answers.set(key, slot);
+            const pids = mode01PidSet(key);
+            if (pids !== null) this.samePids.set(pids, [...(this.samePids.get(pids) ?? []), slot]);
           }
           slot.queue.push(exchange);
         }
@@ -336,7 +365,7 @@ export class TranscriptTransport implements Transport {
 
   private answerTo(command: string): Exchange {
     const key = normalizeCommand(command);
-    const slot = this.answers.get(key);
+    const slot = this.answers.get(key) ?? this.reordered(key);
     const next = slot?.queue.shift();
     if (slot !== undefined && next !== undefined) {
       slot.last = next;
@@ -351,6 +380,17 @@ export class TranscriptTransport implements Transport {
     if (!this.stats.unknownCommands.includes(key)) this.stats.unknownCommands.push(key);
     const text = key.startsWith('AT') || key.startsWith('ST') ? 'OK' : 'NO DATA';
     return { chunks: [{ delayMs: this.options.unknownDelayMs ?? 20, data: `${text}\r\r>` }] };
+  }
+
+  /**
+   * For a service 01 request never recorded in this order: the same PIDs recorded in another
+   * order — one with an answer not used yet, else one already used.
+   */
+  private reordered(key: string): AnswerSlot | undefined {
+    const pids = mode01PidSet(key);
+    const slots = pids === null ? undefined : this.samePids.get(pids);
+    if (slots === undefined) return undefined;
+    return slots.find((slot) => slot.queue.length > 0) ?? slots.find((slot) => slot.last !== null);
   }
 
   private play(exchange: Exchange): void {

@@ -11,6 +11,7 @@ import {
   RecordingTransport,
   TRANSCRIPT_FORMAT,
   TranscriptTransport,
+  mode01PidSet,
   normalizeCommand,
   parseTranscript,
 } from '../src/transcript.ts';
@@ -261,6 +262,51 @@ describe('TranscriptTransport', () => {
 
   it('normalises commands the way the adapter reads them', () => {
     expect(normalizeCommand('at sp 6\r')).toBe('ATSP6');
+  });
+
+  it('answers service 01 PIDs asked in another order than recorded', async () => {
+    // The poller puts coolant first once its reading is old, which depends on the clock: a
+    // replay on a clock from 0 can ask for the recorded PIDs in another order.
+    const clock = new FakeClock();
+    const transport = new TranscriptTransport(
+      {
+        header: HEADER,
+        entries: [
+          { t: 0, tx: '0105040B\r' },
+          { t: 30, rx: '7E80741055704000B21\r\r>' },
+          { t: 100, tx: '0105040B\r' },
+          { t: 130, rx: '7E80741055804000B22\r\r>' },
+          { t: 200, tx: '0104\r' },
+          { t: 230, rx: '7E803410400\r\r>' },
+        ],
+      },
+      { timers: clock },
+    );
+    const received: string[] = [];
+    transport.onData((chunk) => received.push(chunk));
+    await transport.open();
+    for (const command of ['01040B05\r', '010B0405\r', '01 04 05 0B\r', '010405\r', '010D04\r']) {
+      await transport.write(command);
+      await clock.advance(100);
+    }
+    expect(received).toEqual([
+      '7E80741055704000B21\r\r>',
+      '7E80741055804000B22\r\r>',
+      '7E80741055804000B22\r\r>',
+      // Other PIDs are other requests.
+      'NO DATA\r\r>',
+      'NO DATA\r\r>',
+    ]);
+    expect(transport.stats).toEqual({
+      answered: 2,
+      repeated: 1,
+      unknown: 2,
+      unknownCommands: ['010405', '010D04'],
+    });
+    expect(mode01PidSet('010C0D05')).toBe('01050C0D');
+    expect(mode01PidSet('010D')).toBeNull();
+    expect(mode01PidSet('ATSP6')).toBeNull();
+    expect(mode01PidSet('0902')).toBeNull();
   });
 });
 

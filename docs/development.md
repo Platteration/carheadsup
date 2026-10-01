@@ -207,9 +207,11 @@ npm run obd-replay -- obd-….jsonl --expect before.jsonl             # … and 
 
 The replay runs the real driver, poller and service on a manual clock (an hour replays in
 seconds) and answers each command with the chunks recorded after the same command, at the
-recorded delays. It reports how many commands it could answer from the recording: when the code
-asks differently than it did in the car, unknown commands get `OK` (AT commands) or `NO DATA`, so
-a replay of a long drive stays useful even after the poller changed.
+recorded delays — a service 01 request also with the same PIDs recorded in another order (the
+poller orders them by urgency, which depends on the clock). It reports how many commands it could
+answer from the recording: when the code asks differently than it did in the car, unknown
+commands get `OK` (AT commands) or `NO DATA`, so a replay of a long drive stays useful even after
+the poller changed.
 
 **From a field bug to a test.** Commit the transcript under `packages/obd/test/transcripts/` (it
 holds the car's VIN — replace it in the file if you mind) and add a case to
