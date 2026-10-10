@@ -129,7 +129,10 @@ describe('RendererChannel client limits', () => {
 describe('RendererChannel config changes', () => {
   it('drops plain clients from other devices once they must use TLS, before checking tokens', () => {
     let plainRemote = true;
-    let token = '';
+    // Remote clients now require a configured token even before the TLS policy
+    // changes; use a valid baseline token so this test isolates the policy
+    // transition it is exercising.
+    let token = 'old';
     const policy = {
       tlsEnabled: () => true,
       tlsPort: () => 8443,
