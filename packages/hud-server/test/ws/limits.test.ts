@@ -302,7 +302,10 @@ describe('/ws/hud from other devices', () => {
   });
 
   it.skipIf(lan === null)('refuses display upgrades beyond the per-device limit', async () => {
-    const t = (current = await startTestServer({ host: '0.0.0.0', config: { server: { apiToken: 'test-key' } } }));
+    const t = (current = await startTestServer({
+      host: '0.0.0.0',
+      config: { server: { apiToken: 'test-key' } },
+    }));
     // Other devices use TLS.
     for (let i = 0; i < MAX_RENDERER_CLIENTS_PER_ADDRESS; i += 1) {
       const socket = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud?token=test-key`);

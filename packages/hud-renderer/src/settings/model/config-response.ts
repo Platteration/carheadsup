@@ -42,7 +42,8 @@ export function acceptedApiToken(
     token === undefined ||
     token === REDACTED_CONFIG_TOKEN ||
     result.errors.some((error) => error.startsWith('server.apiToken:'))
-  ) return undefined;
+  )
+    return undefined;
   const returned = result.config.server.apiToken;
   return returned === token || returned === REDACTED_CONFIG_TOKEN ? token : undefined;
 }

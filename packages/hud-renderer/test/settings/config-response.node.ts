@@ -15,9 +15,8 @@ const hooks = registerHooks({
     );
   },
 });
-const { acceptedApiToken, rebaseConfigResult } = await import(
-  '../../src/settings/model/config-response.ts'
-);
+const { acceptedApiToken, rebaseConfigResult } =
+  await import('../../src/settings/model/config-response.ts');
 hooks.deregister();
 
 // Include an unrelated setting to check that secret acknowledgement does not discard other edits.

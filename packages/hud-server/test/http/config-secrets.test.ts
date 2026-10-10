@@ -2,10 +2,12 @@ import { DEFAULT_CONFIG, parseConfig } from '@carheadsup/core';
 import { describe, expect, it } from 'vitest';
 import { configForClient, keepConfigSecrets } from '../../src/http/config-secrets.ts';
 
-const config = () => parseConfig({
-  ...DEFAULT_CONFIG, server: { ...DEFAULT_CONFIG.server, apiToken: 'admin-secret' },
-  phone: { ...DEFAULT_CONFIG.phone, pairingToken: 'pairing-secret' },
-}).config;
+const config = () =>
+  parseConfig({
+    ...DEFAULT_CONFIG,
+    server: { ...DEFAULT_CONFIG.server, apiToken: 'admin-secret' },
+    phone: { ...DEFAULT_CONFIG.phone, pairingToken: 'pairing-secret' },
+  }).config;
 
 describe('config secret views', () => {
   it('masks every remote response without changing stored credentials or other settings', () => {
@@ -25,13 +27,21 @@ describe('config secret views', () => {
     const view = configForClient(stored, false);
     view.vehicle.name = 'Renamed';
     const restored = keepConfigSecrets(view, stored);
-    expect(restored).toMatchObject({ vehicle: { name: 'Renamed' },
-      server: { apiToken: 'admin-secret' }, phone: { pairingToken: 'pairing-secret' } });
+    expect(restored).toMatchObject({
+      vehicle: { name: 'Renamed' },
+      server: { apiToken: 'admin-secret' },
+      phone: { pairingToken: 'pairing-secret' },
+    });
     expect(view.server.apiToken).toBe('[redacted]');
-    expect(keepConfigSecrets({ server: { apiToken: '[redacted]' } }, stored))
-      .toEqual({ server: { apiToken: 'admin-secret' } });
-    expect(keepConfigSecrets({ server: { apiToken: 'new-secret' }, phone: { pairingToken: '' } }, stored))
-      .toEqual({ server: { apiToken: 'new-secret' }, phone: { pairingToken: '' } });
+    expect(keepConfigSecrets({ server: { apiToken: '[redacted]' } }, stored)).toEqual({
+      server: { apiToken: 'admin-secret' },
+    });
+    expect(
+      keepConfigSecrets(
+        { server: { apiToken: 'new-secret' }, phone: { pairingToken: '' } },
+        stored,
+      ),
+    ).toEqual({ server: { apiToken: 'new-secret' }, phone: { pairingToken: '' } });
   });
 
   it('keeps empty credentials visibly empty and leaves malformed input to schema validation', () => {
