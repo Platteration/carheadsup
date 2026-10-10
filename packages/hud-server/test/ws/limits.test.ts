@@ -46,7 +46,7 @@ function renderer(
 ): {
   channel: RendererChannel;
   /** A client from `address` that reached the HUD at `localAddress` (default 10.42.0.1). */
-  open: (address: string, listener?: Listener, localAddress?: string) => FakeSocket;
+  open: (address: string, listener?: Listener, localAddress?: string, token?: string | null) => FakeSocket;
 } {
   const clock = new FakeClock();
   const config = testConfig();
