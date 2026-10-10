@@ -162,8 +162,8 @@ describe('isAuthorized', () => {
     ).toBe(false);
   });
 
-  it('allows everyone when no token is configured', () => {
-    expect(isAuthorized({ ...remote, apiToken: '' })).toBe(true);
+  it('refuses remote clients when no token is configured', () => {
+    expect(isAuthorized({ ...remote, apiToken: '' })).toBe(false);
   });
 
   it('requires the right bearer token from remote clients', () => {

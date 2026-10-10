@@ -773,9 +773,45 @@ describe('remote clients', () => {
     expect((await device.request(`${remote}/api/info`, bearer('correct-horse'))).status).toBe(200);
   });
 
-  it.skipIf(lan === null)('are open when no token is configured', async () => {
-    const t = await start({ host: '0.0.0.0' });
-    expect((await device.request(`https://${lan}:${t.tlsPort}/api/info`)).status).toBe(200);
+  it.skipIf(lan === null)('masks remote config secrets and preserves them on PATCH and PUT', async () => {
+    const t = await start({ host: '0.0.0.0', config: {
+      server: { apiToken: 'admin-secret' }, phone: { pairingToken: 'physical-pairing-secret' },
+    } });
+    const remote = `https://${lan}:${t.tlsPort}/api/config`;
+    const headers = { authorization: 'Bearer admin-secret', 'content-type': 'application/json' };
+    const response = await device.request(remote, { headers });
+    expect(response.status).toBe(200);
+    expect(response.body).not.toContain('admin-secret');
+    expect(response.body).not.toContain('physical-pairing-secret');
+    const view = JSON.parse(response.body) as HudConfig;
+    expect(view.server.apiToken).toBe('[redacted]');
+    expect(view.phone.pairingToken).toBe('[redacted]');
+    for (const method of ['PATCH', 'PUT']) {
+      view.vehicle.name = method;
+      const saved = await device.request(remote, { method, headers, body: JSON.stringify(view) });
+      expect(saved.status).toBe(200);
+      expect(saved.body).not.toContain('physical-pairing-secret');
+      expect(saved.body).not.toContain('admin-secret');
+      const local = (await call(t, 'GET', '/api/config')).body as HudConfig;
+      expect(local.server.apiToken).toBe('admin-secret');
+      expect(local.phone.pairingToken).toBe('physical-pairing-secret');
+      expect(local.vehicle.name).toBe(method);
+    }
+    const rotated = await device.request(remote, { method: 'PATCH', headers,
+      body: JSON.stringify({ server: { apiToken: 'new-admin' } }),
+    });
+    expect(rotated.status).toBe(200);
+    expect(rotated.body).not.toContain('new-admin');
+    expect((await device.request(remote, { headers })).status).toBe(401);
+    expect((await device.request(remote, { headers: { authorization: 'Bearer new-admin' } })).status).toBe(200);
+  });
+
+  it.skipIf(lan === null)('deny remote administration when no token is configured', async () => {
+    const t = await start({ host: '0.0.0.0', config: { server: { apiToken: '' } } });
+    for (const path of ['/api/info', '/api/config', '/api/trips']) {
+      expect((await device.request(`https://${lan}:${t.tlsPort}${path}`)).status).toBe(401);
+    }
+    expect((await call(t, 'GET', '/api/config')).status).toBe(200);
   });
 });
 

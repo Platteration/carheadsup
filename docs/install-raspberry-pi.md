@@ -403,7 +403,7 @@ least:
    3 minutes and only exists while parked
    ([details](protocol.md#pairing-by-qr-code)). A HUD installed before this had no pairing code:
    generate one under *Phone → Pairing code*, save, then show the code.
-2. **Security**: *Server → API token* (generate), then enter it in the companion's *Setup*. To
+2. **Settings access**: on the HUD itself, copy *Server → API token*, then enter it in the companion's *Setup*. A new installation generates this credential independently of its phone-pairing code. Older installations with an empty API token keep local access and disable remote administration until you generate a token there. To
    pair by hand instead of scanning, enter *Phone → Pairing code* there too: when the companion
    connects the first time, it shows the HUD certificate's fingerprint (*Status*); it should be
    the one under *Phone → Encrypted link* in the settings app (or in

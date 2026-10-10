@@ -1,4 +1,4 @@
-import { isPairingToken, shortFingerprint } from '@carheadsup/core';
+import { REDACTED_CONFIG_TOKEN, isPairingToken, shortFingerprint } from '@carheadsup/core';
 import type { ApiPairingShowResult, ApiTlsInfo, HudConfig } from '@carheadsup/core';
 import { useState } from 'preact/hooks';
 import { describeError } from '../../common/api.ts';
@@ -32,7 +32,7 @@ export function SecretActions({
       <Button
         size="small"
         variant="ghost"
-        disabled={value === ''}
+        disabled={value === '' || value === REDACTED_CONFIG_TOKEN}
         aria-label={`Copy the ${label}`}
         onClick={async () => {
           setCopied((await copyText(value)) ? 'ok' : 'failed');

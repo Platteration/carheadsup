@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import type { ApiConfigResult } from '@carheadsup/core';
 import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHudApi, memoryTokenStore } from '../../src/common/api.ts';
@@ -998,17 +999,55 @@ describe('settings app', () => {
     expect(connectionOf({ ...info, error: locked })).toBe('locked');
   });
 
-  it('keeps access after changing the API token', async () => {
+  it('keeps access after changing the API token even when its reply is redacted', async () => {
     const hud = new MockHud();
     const tokens = memoryTokenStore();
-    const root = start(hud, createHudApi({ fetch: hud.fetch, tokens }));
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const response = await hud.fetch(input, init);
+      if (String(input).endsWith('/api/config') && init?.method === 'PATCH') {
+        const body = (await response.json()) as ApiConfigResult;
+        body.config.server.apiToken = '[redacted]';
+        return new Response(JSON.stringify(body), {
+          status: response.status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return response;
+    };
+    const root = start(hud, createHudApi({ fetch, tokens }));
     await ready(root);
     const tokenField = field(section(root, 'server'), 'API token');
     await type(tokenField.querySelector('input')!, 'new-token-123');
     await click(button(saveBar(root)!, 'Save'));
     await waitFor(() => tokens.get() === 'new-token-123');
+    await waitFor(() => text(saveBar(root)) === 'Saved');
     expect(hud.config.server.apiToken).toBe('new-token-123');
     expect(hud.writes()).toHaveLength(1);
+    expect(tokenField.querySelector('input')!.value).toBe('[redacted]');
+  });
+
+  it('keeps the device credential when a local config edit submits the reserved marker', async () => {
+    const hud = new MockHud();
+    hud.config.server.apiToken = 'existing-token';
+    const tokens = memoryTokenStore('existing-token');
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      if (String(input).endsWith('/api/config') && init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as { server?: { apiToken?: string } };
+        if (body.server?.apiToken === '[redacted]') {
+          body.server.apiToken = hud.config.server.apiToken;
+        }
+        return hud.fetch(input, { ...init, body: JSON.stringify(body) });
+      }
+      return hud.fetch(input, init);
+    };
+    const root = start(hud, createHudApi({ fetch, tokens }));
+    await ready(root);
+    await type(field(section(root, 'server'), 'API token').querySelector('input')!, '[redacted]');
+    await click(button(saveBar(root)!, 'Save'));
+    await waitFor(() => hud.writes().length === 1);
+    await waitFor(() => text(saveBar(root)) === 'Saved');
+    expect(tokens.get()).toBe('existing-token');
+    expect(hud.config.server.apiToken).toBe('existing-token');
   });
 });
 

@@ -462,7 +462,7 @@ export interface ServerConfig {
   allowPlainRemote: boolean;
   /** Bind address; "0.0.0.0" to allow the phone on the car's Wi-Fi. */
   host: string;
-  /** Bearer token required for the config API from non-local clients. Empty = open. */
+  /** Bearer token required for the config API from non-local clients. Empty = remote administration disabled. */
   apiToken: string;
   /** Advertise `_carheadsup._tcp` over mDNS so the phone can find the HUD. */
   mdns: boolean;

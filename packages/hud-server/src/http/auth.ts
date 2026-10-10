@@ -8,8 +8,8 @@ import { normalizeIpAddress } from '@carheadsup/core';
  *  - Clients on the HUD itself are always allowed: the kiosk browser and local tools (see
  *    {@link isHudItself}: over loopback, or from the very address they reached the HUD at).
  *  - Everyone else (the phone, a laptop on the car's Wi-Fi) must present
- *    `Authorization: Bearer <server.apiToken>` once a token is configured; with no token the
- *    API is open to the car's network.
+ *    `Authorization: Bearer <server.apiToken>`. Without a configured token, remote access is
+ *    refused until the driver sets one on the HUD itself.
  *  - Browsers are additionally protected from cross-site request forgery: state-changing requests
  *    and WebSocket upgrades whose `Origin` is not the HUD itself are refused.
  *  - DNS rebinding (a foreign site's name made to resolve to the HUD, which makes its pages
@@ -105,22 +105,22 @@ export interface AuthInput extends ConnectionAddresses {
   authorization?: string | string[] | null | undefined;
   /** A token passed another way (the `?token=` query parameter of a WebSocket URL). */
   token?: string | null | undefined;
-  /** `server.apiToken`; empty = no token required. */
+  /** `server.apiToken`; empty = remote access disabled. */
   apiToken: string;
 }
 
 /**
  * Whether a client may use the API: the HUD itself always (see {@link isHudItself}); otherwise
- * any client when no token is configured, else only with the right token (Bearer header or
- * explicit `token`).
+ * only with a nonempty configured token and the right credential (Bearer header or explicit
+ * `token`). An empty token keeps local setup available without opening remote administration.
  *
  * Whitespace around a token is not part of it: an HTTP header cannot carry it, and the settings
  * app trims what it keeps. Spaces inside a token are.
  */
 export function isAuthorized(input: AuthInput): boolean {
   if (isHudItself(input.remoteAddress, input.localAddress)) return true;
-  if (input.apiToken === '') return true;
   const expected = input.apiToken.trim();
+  if (expected === '') return false;
   const candidates = [bearerToken(input.authorization), input.token?.trim() ?? null];
   let ok = false;
   for (const candidate of candidates) {
