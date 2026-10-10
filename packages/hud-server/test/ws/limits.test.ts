@@ -64,12 +64,17 @@ function renderer(
     timers: clock,
     logger: memoryLogger(),
   });
-  const open = (address: string, listener: Listener = 'tls', localAddress = '10.42.0.1') => {
+  const open = (
+    address: string,
+    listener: Listener = 'tls',
+    localAddress = '10.42.0.1',
+    token: string | null = null,
+  ) => {
     const socket = new FakeSocket();
     channel.accept(socket as unknown as WebSocket, {
       remoteAddress: address,
       localAddress,
-      token: null,
+      token,
       listener,
     });
     return socket;
@@ -150,8 +155,8 @@ describe('RendererChannel config changes', () => {
           apiToken: token,
         }),
     });
-    const plain = open('10.42.0.23', 'plain');
-    const secure = open('10.42.0.24', 'tls');
+    const plain = open('10.42.0.23', 'plain', '10.42.0.1', 'old');
+    const secure = open('10.42.0.24', 'tls', '10.42.0.1', 'old');
     const kiosk = open('127.0.0.1', 'plain', '127.0.0.1');
     const kioskAtAddress = open('10.42.0.1', 'plain', '10.42.0.1');
     const all = [plain, secure, kiosk, kioskAtAddress];
