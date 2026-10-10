@@ -385,7 +385,7 @@ default `~/.local/share/carheadsup`, and its `sim` subdirectory with `--sim`) ho
 
 | File | Contents | Written |
 | --- | --- | --- |
-| `config.json` | The configuration (unless `--config` points elsewhere). Pretty-printed and hand-editable; if the server has to correct it on load, the original is kept as `config.json.bak`. A new file gets a random pairing token (24 letters and digits, about 139 bits), so a new HUD is never open to every phone; an existing file never gets one. | When missing at start; on every change from the API |
+| `config.json` | The configuration (unless `--config` points elsewhere). Pretty-printed and hand-editable; if the server has to correct it on load, the original is kept as `config.json.bak`. A new file gets an independent random API token and pairing token (24 letters and digits, about 139 bits), so remote administration and phone pairing both require credentials. An existing file never gets a new pairing token; an empty API token disables remote administration while local setup works. | When missing at start; on every change from the API |
 | `state.json` | Odometer (and, for cars that do not report it, the last dash reading entered and the learned speed-to-distance scale), learned gear ratios and (automatics) the 2nd-gear ratio that numbers them, long-run average consumption, service records, the trip in progress (`PersistedState.activeTrip`, with wall-clock times), the last trip's sequence number (`tripSeq`), the HUD's wall clock at the write (`lastWallMs`, the next start's [floor](#engine-time-and-the-wall-clock)) and the phone's last location rounded to about 11 km (`lastLocation`, for night mode before the phone connects). | Coalesced 2 s after a change; the odometer and the trip in progress at most once a minute while driving; when a trip starts or ends, or the system clock steps during one; first thing on shutdown |
 | `trips.jsonl` | One completed trip per line, oldest first; at most 5,000 trips (the oldest are dropped). | Appended when a trip ends |
 | `hud-id` | The HUD's identity on the phone link (22 base64url characters), which paired phones pin. A corrupt file is moved to `hud-id.corrupt` and replaced; phones then report a different HUD until paired again. | Once, on the first start |
@@ -439,10 +439,12 @@ The HUD runs on the car's own Wi-Fi, usually as the access point for one phone. 
   there unchanged. If the TLS listener could not start, other devices are refused rather than
   served in clear text. `server.allowPlainRemote` restores plain access for development
   (`http/https-only.ts`; [details](protocol.md#plain-http-and-other-devices)).
-- **API token.** When `server.apiToken` is set, every other client must send
-  `Authorization: Bearer <token>` to use `/api/*`, and remote renderer clients (`/ws/hud`) must
-  pass it as a Bearer header or `?token=`. With no token, anyone on the car's network can use the
-  API — set one unless the Wi-Fi is yours alone. Changing the token disconnects remote clients
+- **API token.** Every other client must send `Authorization: Bearer <token>` to use
+  `/api/*`, and remote renderer clients (`/ws/hud`) must pass it as a Bearer header or `?token=`.
+  New configurations generate a distinct random token; an empty token disables remote access
+  until local setup configures one. Ordinary remote configuration replies mask API and pairing
+  secrets as `[redacted]`, which preserves their values when saved back. The local kiosk can
+  view/copy credentials and show the physical pairing QR. Token changes disconnect remote clients
   that no longer match.
 - **An encrypted phone link, pinned to the HUD's certificate.** The companion talks to the HUD
   only over TLS (`wss://` and `https://` on `server.tlsPort`, 8443), so nobody on the Wi-Fi can

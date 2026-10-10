@@ -423,9 +423,16 @@ call and media state ([more](hardware.md#steering-wheel-buttons)).
 | `server.allowPlainPhone` | `false` | | Also serve the phone link (`/ws/phone`) on `server.port`, unencrypted, with nothing bound to a certificate — for development and custom clients only; the companion app always uses TLS. Off: a plain phone connection is refused (`403`); switching it off closes plain sessions at once. |
 | `server.allowPlainRemote` | `false` | | Also serve the pages, the API and the display socket to other devices on `server.port`, unencrypted — for development only. Off (while TLS is on): other devices' page requests on the plain port are redirected to HTTPS on `server.tlsPort`, their API requests and `/ws/hud` upgrades refused (`403`) without their token being looked at ([details](#remote-https)). The Pi itself always uses the plain port; `/ws/phone` follows `server.allowPlainPhone`. Applies at once; switching it off closes other devices' plain display sockets (4005). |
 | `server.host` | `"0.0.0.0"` | | Bind address. `0.0.0.0` lets the phone connect over Wi-Fi; `127.0.0.1` keeps the HUD to itself. Restart required. An address the kiosk cannot reach leaves it black. With a single network address (say `10.42.0.1`), point the kiosk at it (`CARHEADSUP_KIOSK_URL=http://10.42.0.1:8080/`; `localhost` no longer reaches the HUD): it connects from that address to that address, which the HUD knows as itself ([Remote HTTPS](#remote-https)). |
-| `server.apiToken` | `""` | ≤ 256 printable ASCII chars | Bearer token required from every client except the Pi itself. Empty = open to the car's network. Letters, digits, symbols and spaces only (not spaces alone): it travels in HTTP headers and `?token=` addresses, which carry nothing else. |
+| `server.apiToken` | random for a new config; `""` schema fallback | ≤ 256 printable ASCII chars | Bearer token required from every client except the Pi itself. Empty disables remote settings/API and display-socket access; local setup continues to work. New config files get an independent random token. Letters, digits, symbols and spaces only (not spaces alone): it travels in HTTP headers and `?token=` addresses, which carry nothing else. |
 | `server.mdns` | `true` | | Advertise `_carheadsup._tcp` so the companion finds the HUD. |
 | `server.frameRate` | `15` | 1–60 | Frames per second pushed to the HUD page. Keep it at 2 or more: at 2 fps and above the page blanks after 1 s without a frame, and slower rates make the HUD slow to notice a stalled server. Lower (10) on a Pi Zero 2 W. |
+
+Ordinary remote config GET/PUT/PATCH responses replace existing API and phone-pairing secrets
+with `[redacted]`. Sending that marker back preserves the saved value. View/copy the existing
+secrets on the HUD itself; remote clients can still generate and save replacement secrets, and
+request the parked pairing QR code on the physical display. Enter the API token from the HUD's
+local *Server → API token* field in the companion's *Setup*; scanning the phone-pairing QR code
+continues to pair the phone link without disclosing the independent administrative credential.
 
 #### Remote HTTPS
 

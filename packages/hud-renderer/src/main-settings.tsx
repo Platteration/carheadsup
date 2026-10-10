@@ -1,5 +1,6 @@
 // First: must run before any module that builds a zod schema (see the file).
 import './settings/zod-setup.ts';
+import { androidSettingsTransport } from './common/android-settings.ts';
 import { render } from 'preact';
 import { adoptTokenFromUrl, createHudApi, localStorageTokenStore } from './common/api.ts';
 import { SettingsApp } from './settings/App.tsx';
@@ -13,7 +14,8 @@ import { SettingsApp } from './settings/App.tsx';
  */
 const root = document.getElementById('app');
 if (root) {
-  const tokens = localStorageTokenStore();
-  adoptTokenFromUrl(tokens);
-  render(<SettingsApp api={createHudApi({ tokens })} />, root);
+  const native = androidSettingsTransport();
+  const tokens = native?.tokens ?? localStorageTokenStore();
+  if (!native) adoptTokenFromUrl(tokens);
+  render(<SettingsApp api={createHudApi({ tokens, fetch: native?.fetch })} />, root);
 }

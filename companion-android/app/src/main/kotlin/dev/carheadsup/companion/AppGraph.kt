@@ -42,6 +42,7 @@ import dev.carheadsup.protocol.nav.NavNotificationContent
 import dev.carheadsup.protocol.nav.NavParseStats
 import dev.carheadsup.protocol.traffic.TomTomTraffic
 import dev.carheadsup.protocol.traffic.TrafficState
+import dev.carheadsup.protocol.tls.HudTrustManager
 import dev.carheadsup.protocol.traffic.TrafficStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -170,6 +171,13 @@ class AppGraph(private val app: Application) {
 
     /** The pinned certificate REST calls trust (the one the HUD proved itself with). */
     private val restTrust = PinnedHudTrust()
+
+    /** Settings resources and REST calls must use exactly the same leaf-pin semantics. */
+    fun settingsClient(trust: HudTrustManager): OkHttpClient =
+        localNetwork.bind(hudHttpClient).withHudTrust(trust).newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
 
     val api =
         HudApi(

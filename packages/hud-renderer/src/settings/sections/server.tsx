@@ -94,8 +94,8 @@ export function ServerSection({ root }: { root: Scope<HudConfig> }) {
           monospace
           transform={trimToken}
           validate={tokenProblem}
-          placeholder="None — any device on the Wi-Fi can change settings"
-          hint="Devices other than the HUD itself must present this token to use the settings and API."
+          placeholder="None — remote administration disabled"
+          hint="Devices other than the HUD itself must present this token. Empty disables remote administration. Existing secrets appear as [redacted] on other devices; view or copy them on the HUD itself."
           actions={
             <SecretActions
               label="API token"

@@ -72,9 +72,9 @@ function lockTokens(config: HudConfig, fields: readonly string[]): HudConfig {
 /**
  * `config.json` in the data directory (or wherever `--config` points).
  *
- * Loading is forgiving: a missing file is created from DEFAULT_CONFIG — with a random pairing
- * token ({@link generatePairingToken}), so a new HUD is never open to every phone (the driver
- * pairs by scanning the QR code on the HUD itself; an existing file is never given one) —;
+ * Loading is forgiving: a missing file is created from DEFAULT_CONFIG — with distinct random
+ * administrative API and pairing tokens ({@link generatePairingToken}), so a new HUD is never
+ * open to every phone or network peer (the driver pairs by scanning the QR code on the HUD itself; an existing file is never given one) —;
  * invalid fields fall back to defaults field by field (see `parseConfig`) and are logged. When the loaded config differs
  * from the file it is saved back normalised, after keeping the original as `<file>.bak` so a
  * hand edit is never silently lost.
@@ -126,12 +126,13 @@ export class ConfigStore {
       const defaults = parseConfig(DEFAULT_CONFIG).config;
       const config: HudConfig = {
         ...defaults,
+        server: { ...defaults.server, apiToken: lockedToken() },
         phone: { ...defaults.phone, pairingToken: generatePairingToken() },
       };
       try {
         await this.save(config);
         this.logger.info(
-          `Config: created ${this.path} with default settings and a random pairing code ` +
+          `Config: created ${this.path} with default settings, a random API token and a random pairing code ` +
             '(pair the phone with the QR code on the HUD: parked, last dashboard page)',
         );
       } catch (err) {
@@ -165,6 +166,11 @@ export class ConfigStore {
       errors.some((error) => error.startsWith(`${field}:`)),
     );
     const config = lockTokens(parsed.config, badTokens);
+    if (config.server.apiToken.trim() === '') {
+      this.logger.warn(
+        'Config: remote settings/API access is disabled until an API token is set on the HUD itself (Server → API token); local kiosk access still works',
+      );
+    }
     for (const field of badTokens) {
       this.logger.error(
         `Config: ${field} in ${this.path} is not usable, so it was replaced by a random token rather than none (that would open the HUD to every device). Set a new one in the settings on the HUD itself or in the file.`,

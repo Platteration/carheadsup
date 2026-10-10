@@ -67,3 +67,7 @@ export function isPairingToken(token: string): boolean {
 export function isStoredPairingToken(value: unknown): value is string {
   return typeof value === 'string' && value.length <= MAX_PAIRING_TOKEN_CHARS;
 }
+
+/** Ordinary remote config responses preserve the existence of a secret without revealing it.
+ * Sending this marker back retains the current secret; it is never installed as a credential. */
+export const REDACTED_CONFIG_TOKEN = '[redacted]';

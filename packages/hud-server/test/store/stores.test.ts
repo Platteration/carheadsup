@@ -110,27 +110,34 @@ describe('writeFileAtomic', () => {
 });
 
 describe('ConfigStore', () => {
-  it('creates the file from the defaults when missing, with a random pairing token', async () => {
+  it('creates the file with separate random API and pairing tokens', async () => {
     const store = new ConfigStore(join(dir, 'config.json'), logger);
     const result = await store.load();
     expect(result.created).toBe(true);
     expect(result.errors).toEqual([]);
     const defaults = parseConfig(DEFAULT_CONFIG).config;
     const token = result.config.phone.pairingToken;
+    const apiToken = result.config.server.apiToken;
+    expect(apiToken).toMatch(/^[\w-]{32}$/);
+    expect(apiToken).not.toBe(token);
     expect(token).toMatch(TOKEN_PATTERN);
     expect(result.config).toEqual({
       ...defaults,
+      server: { ...defaults.server, apiToken },
       phone: { ...defaults.phone, pairingToken: token },
     });
     expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(serializeConfig(result.config));
     expect(logger.text('info')).toMatch(/random pairing code/);
-    // The defaults themselves stay open: only a new file gets a token.
+    // Only a new file gets pairing credentials; existing phone pairings keep their code.
     expect(DEFAULT_CONFIG.phone.pairingToken).toBe('');
     // Another new HUD gets another token; the file keeps its own across restarts.
     const other = await new ConfigStore(join(dir, 'other.json'), logger).load();
     expect(other.config.phone.pairingToken).toMatch(TOKEN_PATTERN);
     expect(other.config.phone.pairingToken).not.toBe(token);
-    expect((await store.load()).config.phone.pairingToken).toBe(token);
+    const reloaded = (await store.load()).config;
+    expect(reloaded.phone.pairingToken).toBe(token);
+    expect(reloaded.server.apiToken).toBe(apiToken);
+    expect(other.config.server.apiToken).not.toBe(apiToken);
   });
 
   it('leaves an existing config without a pairing token open', async () => {

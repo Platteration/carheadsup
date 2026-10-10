@@ -46,7 +46,12 @@ function renderer(
 ): {
   channel: RendererChannel;
   /** A client from `address` that reached the HUD at `localAddress` (default 10.42.0.1). */
-  open: (address: string, listener?: Listener, localAddress?: string) => FakeSocket;
+  open: (
+    address: string,
+    listener?: Listener,
+    localAddress?: string,
+    token?: string | null,
+  ) => FakeSocket;
 } {
   const clock = new FakeClock();
   const config = testConfig();
@@ -64,12 +69,17 @@ function renderer(
     timers: clock,
     logger: memoryLogger(),
   });
-  const open = (address: string, listener: Listener = 'tls', localAddress = '10.42.0.1') => {
+  const open = (
+    address: string,
+    listener: Listener = 'tls',
+    localAddress = '10.42.0.1',
+    token: string | null = null,
+  ) => {
     const socket = new FakeSocket();
     channel.accept(socket as unknown as WebSocket, {
       remoteAddress: address,
       localAddress,
-      token: null,
+      token,
       listener,
     });
     return socket;
@@ -129,7 +139,10 @@ describe('RendererChannel client limits', () => {
 describe('RendererChannel config changes', () => {
   it('drops plain clients from other devices once they must use TLS, before checking tokens', () => {
     let plainRemote = true;
-    let token = '';
+    // Remote clients now require a configured token even before the TLS policy
+    // changes; use a valid baseline token so this test isolates the policy
+    // transition it is exercising.
+    let token = 'old';
     const policy = {
       tlsEnabled: () => true,
       tlsPort: () => 8443,
@@ -147,8 +160,8 @@ describe('RendererChannel config changes', () => {
           apiToken: token,
         }),
     });
-    const plain = open('10.42.0.23', 'plain');
-    const secure = open('10.42.0.24', 'tls');
+    const plain = open('10.42.0.23', 'plain', '10.42.0.1', 'old');
+    const secure = open('10.42.0.24', 'tls', '10.42.0.1', 'old');
     const kiosk = open('127.0.0.1', 'plain', '127.0.0.1');
     const kioskAtAddress = open('10.42.0.1', 'plain', '10.42.0.1');
     const all = [plain, secure, kiosk, kioskAtAddress];
@@ -302,14 +315,17 @@ describe('/ws/hud from other devices', () => {
   });
 
   it.skipIf(lan === null)('refuses display upgrades beyond the per-device limit', async () => {
-    const t = (current = await startTestServer({ host: '0.0.0.0' }));
+    const t = (current = await startTestServer({
+      host: '0.0.0.0',
+      config: { server: { apiToken: 'test-key' } },
+    }));
     // Other devices use TLS.
     for (let i = 0; i < MAX_RENDERER_CLIENTS_PER_ADDRESS; i += 1) {
-      const socket = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud`);
+      const socket = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud?token=test-key`);
       sockets.push(socket);
       await socket.opened;
     }
-    const extra = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud`);
+    const extra = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud?token=test-key`);
     sockets.push(extra);
     await expect(extra.opened).rejects.toThrow(/503/);
     // The HUD's own display still connects, over loopback and at the LAN address.

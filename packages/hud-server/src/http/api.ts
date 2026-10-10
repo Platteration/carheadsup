@@ -33,9 +33,11 @@ import { TripLogUnavailableError } from '../store/trip-store.ts';
 import type { TripStore } from '../store/trip-store.ts';
 import type { KioskHealth } from '../ws/renderer-channel.ts';
 import { isHudItself } from './auth.ts';
+import { configForClient, keepConfigSecrets } from './config-secrets.ts';
 import { HttpError } from './respond.ts';
 import type { HttpReply } from './respond.ts';
 import { Router } from './router.ts';
+import type { RouteContext } from './router.ts';
 import { parseSimControl } from './sim-control.ts';
 
 /** Default and maximum page size of `GET /api/trips`. */
@@ -183,19 +185,36 @@ export function createApiRouter(deps: ApiDeps): Router {
     return ok(info);
   });
 
-  router.add('GET', '/api/config', () => ok(deps.getConfig()));
+  function configView(config: HudConfig, ctx: RouteContext): HudConfig {
+    return configForClient(
+      config,
+      isHudItself(ctx.req.socket.remoteAddress, ctx.req.socket.localAddress),
+    );
+  }
+
+  function configResult(result: ApiConfigResult, ctx: RouteContext): HttpReply {
+    return configReply({ ...result, config: configView(result.config, ctx) });
+  }
+
+  router.add('GET', '/api/config', (ctx) => ok(configView(deps.getConfig(), ctx)));
 
   router.add('PUT', '/api/config', async (ctx) => {
     const body = await ctx.body();
     if (body === undefined) throw new HttpError(400, 'A JSON request body is required');
-    return configReply(await deps.updateConfig((current) => parseConfig(body, current)));
+    return configResult(
+      await deps.updateConfig((current) => parseConfig(keepConfigSecrets(body, current), current)),
+      ctx,
+    );
   });
 
   router.add('PATCH', '/api/config', async (ctx) => {
     const body = await ctx.body();
     if (body === undefined) throw new HttpError(400, 'A JSON request body is required');
-    return configReply(
-      await deps.updateConfig((current) => mergeConfig(current, body as DeepPartial<HudConfig>)),
+    return configResult(
+      await deps.updateConfig((current) =>
+        mergeConfig(current, keepConfigSecrets(body, current) as DeepPartial<HudConfig>),
+      ),
+      ctx,
     );
   });
 

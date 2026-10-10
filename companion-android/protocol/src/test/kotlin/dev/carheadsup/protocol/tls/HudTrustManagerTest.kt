@@ -24,6 +24,8 @@ import java.util.Base64
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 import kotlin.concurrent.thread
@@ -97,6 +99,24 @@ class HudTrustManagerTest {
         socket.soTimeout = 5_000
         socket.startHandshake()
         socket
+    }
+
+    @Test
+    fun `a certificate accepted by a CA trust store still cannot bypass a different HUD pin`() {
+        val caStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null, null)
+            setCertificateEntry("trusted-substitute", relay.certificate)
+        }
+        val caTrust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+            init(caStore)
+        }.trustManagers.filterIsInstance<X509TrustManager>().single()
+        caTrust.checkServerTrusted(arrayOf(relay.certificate), "EC")
+        val pinned = HudTrustManager(pinnedFingerprint = hud.fingerprint)
+        assertThrows(HudCertificateException::class.java) {
+            pinned.checkServerTrusted(arrayOf(relay.certificate), "EC")
+        }
+        assertNull(pinned.acceptedFingerprint)
+        assertEquals(relay.fingerprint, pinned.presentedFingerprint)
     }
 
     @Test

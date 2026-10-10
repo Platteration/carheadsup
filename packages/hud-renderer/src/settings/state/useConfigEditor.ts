@@ -2,6 +2,7 @@ import type { DeepPartial, HudConfig } from '@carheadsup/core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { isAbortError } from '../../common/api.ts';
 import type { HudApi } from '../../common/api.ts';
+import { acceptedApiToken, rebaseConfigResult } from '../model/config-response.ts';
 import {
   diffConfig,
   getAt,
@@ -240,7 +241,7 @@ export function useConfigEditor(api: HudApi, options: ConfigEditorOptions = {}):
         return {
           ...s,
           base: config,
-          draft: rebaseDraft(s.base, config, s.draft, sent),
+          draft: rebaseConfigResult(s.base, { config, errors: [...errors] }, s.draft, sent),
           serverIssues,
           generalErrors: parsed.general,
         };
@@ -316,8 +317,8 @@ export function useConfigEditor(api: HudApi, options: ConfigEditorOptions = {}):
       const result = await enqueue(() => api.patchConfig(patch));
       const parsed = applyResult(result.config, result.errors, sentPaths, patch);
       // A new API token takes effect for the very next request: keep using it from here.
-      const sentToken = patch.server?.apiToken;
-      if (sentToken !== undefined && result.config.server.apiToken === sentToken) {
+      const sentToken = acceptedApiToken(patch, result);
+      if (sentToken !== undefined) {
         api.tokens.set(sentToken);
       }
       update((x) => ({

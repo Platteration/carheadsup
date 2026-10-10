@@ -166,7 +166,7 @@ notification and sends it to the HUD.
   each browser warns once, and only comparing its fingerprint with the one the HUD shows tells a
   real HUD from someone posing as it on the Wi-Fi. With TLS switched off (`server.tlsPort` null)
   or `server.allowPlainRemote` on, browsers fall back to plain HTTP and the token is readable on
-  the Wi-Fi. Protect the network with WPA2 and set an API token (see
+  the Wi-Fi. Protect the network with WPA2 and copy the generated API token from the HUD’s local settings to the companion (see
   [docs/architecture.md](docs/architecture.md#security-model)).
 - A flat reflection puts the image about a metre ahead of your eyes, not several metres down the
   road like a factory HUD with focusing optics.

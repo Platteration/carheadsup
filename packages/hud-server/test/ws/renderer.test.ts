@@ -239,8 +239,8 @@ describe('/ws/hud', () => {
   it.skipIf(lan === null)(
     "ignores other devices' heartbeats and keeps the health endpoint to the HUD itself",
     async () => {
-      const t = await start({ host: '0.0.0.0' });
-      const remote = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud`);
+      const t = await start({ host: '0.0.0.0', config: { server: { apiToken: 'test-key' } } });
+      const remote = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud?token=test-key`);
       sockets.push(remote);
       await remote.opened;
       remote.send({ t: 'alive' });
@@ -253,10 +253,20 @@ describe('/ws/hud', () => {
       expect(t.logger.text('warn')).toContain(`page error on a display at ${lan}: remote boom`);
       const local = (await (await fetch(`${t.base}/api/kiosk/health`)).json()) as ApiKioskHealth;
       expect(local).toMatchObject({ aliveAgoMs: null, displays: 0 });
-      const fromDevice = await device.request(`https://${lan}:${t.tlsPort}/api/kiosk/health`);
+      const fromDevice = await device.request(`https://${lan}:${t.tlsPort}/api/kiosk/health`, {
+        headers: { authorization: 'Bearer test-key' },
+      });
       expect(fromDevice.status).toBe(403);
     },
   );
+
+  it.skipIf(lan === null)('denies remote display access with an empty API token', async () => {
+    const t = await start({ host: '0.0.0.0', config: { server: { apiToken: '' } } });
+    const remote = device.socket(`wss://${lan}:${t.tlsPort}/ws/hud`);
+    sockets.push(remote);
+    await expect(remote.opened).rejects.toThrow(/401/);
+    await connect(`${t.wsBase}/ws/hud`).nextOfType('frame');
+  });
 
   it.skipIf(lan === null)('requires the API token from remote clients', async () => {
     const t = await start({ host: '0.0.0.0', config: { server: { apiToken: 's3cret' } } });
