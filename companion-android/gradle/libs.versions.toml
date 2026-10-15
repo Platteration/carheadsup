@@ -9,7 +9,7 @@
 #  - ZXing core (pure Java, Maven Central) decodes the HUD's pairing QR code in :protocol.
 [versions]
 agp = "8.13.2"
-kotlin = "2.3.21"
+kotlin = "2.4.21"
 kotlinx-serialization = "1.10.0"
 kotlinx-coroutines = "1.11.0"
 junit = "5.14.4"
