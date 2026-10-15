@@ -9,6 +9,7 @@ import pkg from '../package.json' with { type: 'json' };
 import * as dtc from '../src/dtc.ts';
 import * as core from '../src/index.ts';
 import { lookupDtc as internalLookup } from '../src/obd/dtc-lookup.ts';
+import { explainDtc as internalExplain } from '../src/obd/dtc-explainer.ts';
 
 describe('package entry points', () => {
   it('maps the main index and the DTC database to their modules (imported above)', () => {
@@ -22,6 +23,7 @@ describe('package entry points', () => {
   it('keeps the database and its lookup out of the main index', () => {
     const names = Object.keys(core);
     expect(names).not.toContain('lookupDtc');
+    expect(names).not.toContain('explainDtc');
     expect(names).not.toContain('DTC_DATABASE');
     // The light code helpers stay available to every consumer.
     for (const name of [
@@ -37,10 +39,17 @@ describe('package entry points', () => {
   });
 
   it('serves the lookup and database from @carheadsup/core/dtc', async () => {
-    expect(Object.keys(dtc).sort()).toEqual(['DTC_DATABASE', 'lookupDtc']);
+    expect(Object.keys(dtc).sort()).toEqual(['DTC_DATABASE', 'explainDtc', 'lookupDtc']);
     expect(dtc.lookupDtc).toBe(internalLookup);
+    expect(dtc.explainDtc).toBe(internalExplain);
     expect(dtc.lookupDtc(' p0420 ')).toMatchObject({ code: 'P0420', known: true });
     expect(Object.keys(dtc.DTC_DATABASE).length).toBeGreaterThan(4000);
+    // The explainer ships from the same lazy entry point.
+    expect(dtc.explainDtc('P0420')).toMatchObject({
+      code: 'P0420',
+      verdict: 'schedule-service',
+    });
+    expect(dtc.explainDtc('P0420').causes.length).toBeGreaterThan(0);
     // Resolvable by package name, as the renderer and server import it.
     const viaName = await import('@carheadsup/core/dtc');
     expect(viaName.lookupDtc('U0100').code).toBe('U0100');
