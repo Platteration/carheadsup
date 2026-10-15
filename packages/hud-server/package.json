@@ -20,7 +20,7 @@
   "dependencies": {
     "@carheadsup/core": "*",
     "@carheadsup/obd": "*",
-    "ws": "^8.21.3"
+    "ws": "^8.22.0"
   },
   "optionalDependencies": {
     "i2c-bus": "^5.2.3"
