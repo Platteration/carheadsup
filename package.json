@@ -28,11 +28,11 @@
     "format:check": "prettier --check ."
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
+    "@playwright/test": "^1.64.0",
     "@types/node": "^22.20.4",
     "@types/ws": "^8.18.1",
-    "prettier": "^3.9.9",
+    "prettier": "^3.9.10",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.4"
   }
 }

@@ -24,7 +24,7 @@
     "@carheadsup/obd": "*",
     "@preact/preset-vite": "^2.10.6",
     "happy-dom": "^20.14.5",
-    "preact-render-to-string": "^6.7.0",
-    "vite": "^8.3.0"
+    "preact-render-to-string": "^6.8.0",
+    "vite": "^8.3.4"
   }
 }
